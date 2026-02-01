@@ -18,7 +18,7 @@
 //! ```no_run
 //! use wrashpty::terminal::TerminalGuard;
 //!
-//! fn main() -> anyhow::Result<()> {
+//! fn main() -> wrashpty::terminal::Result<()> {
 //!     // Create guard - terminal enters raw mode
 //!     let _guard = TerminalGuard::new()?;
 //!
@@ -41,10 +41,30 @@
 //!
 //! See architecture spec section 8 for complete terminal safety documentation.
 
-use anyhow::{Context, Result};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
 use nix::sys::termios::{tcgetattr, tcsetattr, SetArg, Termios};
 use std::io::{stdin, stdout, Write};
+use thiserror::Error;
+
+/// Errors that can occur during terminal operations.
+///
+/// This enum provides typed error handling for terminal-related failures,
+/// allowing callers to match on specific error kinds and handle them
+/// appropriately.
+#[derive(Error, Debug)]
+pub enum TerminalError {
+    /// I/O error during terminal operations (writing escape sequences, flushing,
+    /// raw mode, or terminal size queries).
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// Error from nix crate (termios operations).
+    #[error("Terminal attribute error: {0}")]
+    Nix(#[from] nix::errno::Errno),
+}
+
+/// Result type alias for terminal operations.
+pub type Result<T> = std::result::Result<T, TerminalError>;
 
 /// RAII guard for terminal raw mode management.
 ///
@@ -91,13 +111,12 @@ impl TerminalGuard {
     ///
     /// let guard = TerminalGuard::new()?;
     /// // Terminal is now in raw mode
-    /// # Ok::<(), anyhow::Error>(())
+    /// # Ok::<(), wrashpty::terminal::TerminalError>(())
     /// ```
     pub fn new() -> Result<Self> {
-        let original_termios =
-            tcgetattr(stdin()).context("Failed to get terminal attributes")?;
+        let original_termios = tcgetattr(stdin())?;
 
-        enable_raw_mode().context("Failed to enable raw mode")?;
+        enable_raw_mode()?;
 
         tracing::info!("Terminal raw mode enabled");
 
@@ -124,11 +143,11 @@ impl TerminalGuard {
     ///
     /// let (cols, rows) = TerminalGuard::get_size()?;
     /// println!("Terminal is {}x{}", cols, rows);
-    /// # Ok::<(), anyhow::Error>(())
+    /// # Ok::<(), wrashpty::terminal::TerminalError>(())
     /// ```
     #[must_use = "terminal size should be used after querying"]
     pub fn get_size() -> Result<(u16, u16)> {
-        size().context("Failed to get terminal size")
+        Ok(size()?)
     }
 
     /// Reset the scroll region to the full screen.
@@ -142,8 +161,8 @@ impl TerminalGuard {
     /// Returns an error if the escape sequence cannot be written to stdout.
     pub fn reset_scroll_region() -> Result<()> {
         let mut out = stdout();
-        write!(out, "\x1b[r").context("Failed to write scroll region reset")?;
-        out.flush().context("Failed to flush stdout")?;
+        write!(out, "\x1b[r")?;
+        out.flush()?;
         Ok(())
     }
 
@@ -158,8 +177,8 @@ impl TerminalGuard {
     /// Returns an error if the escape sequence cannot be written to stdout.
     pub fn show_cursor() -> Result<()> {
         let mut out = stdout();
-        write!(out, "\x1b[?25h").context("Failed to write show cursor sequence")?;
-        out.flush().context("Failed to flush stdout")?;
+        write!(out, "\x1b[?25h")?;
+        out.flush()?;
         Ok(())
     }
 
@@ -173,8 +192,8 @@ impl TerminalGuard {
     /// Returns an error if the escape sequence cannot be written to stdout.
     pub fn hide_cursor() -> Result<()> {
         let mut out = stdout();
-        write!(out, "\x1b[?25l").context("Failed to write hide cursor sequence")?;
-        out.flush().context("Failed to flush stdout")?;
+        write!(out, "\x1b[?25l")?;
+        out.flush()?;
         Ok(())
     }
 }
@@ -232,7 +251,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_terminal_guard_creation() {
+    fn test_new_when_tty_available_returns_guard() {
         // This test requires a real terminal, so it may be skipped in CI
         // Run with: cargo test -- --nocapture
         match TerminalGuard::new() {
@@ -249,7 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_size() {
+    fn test_get_size_when_tty_returns_positive_dimensions() {
         match TerminalGuard::get_size() {
             Ok((cols, rows)) => {
                 // Verify reasonable terminal dimensions
@@ -267,7 +286,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cursor_visibility() {
+    fn test_hide_cursor_then_show_cursor_succeeds() {
         // These tests work even without a real terminal since they just write to stdout
         // The visual effect can only be verified manually
         match TerminalGuard::hide_cursor() {
@@ -285,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn test_reset_scroll_region() {
+    fn test_reset_scroll_region_when_stdout_writable_succeeds() {
         // This test just verifies the escape sequence can be written
         match TerminalGuard::reset_scroll_region() {
             Ok(()) => {
@@ -298,7 +317,7 @@ mod tests {
     }
 
     #[test]
-    fn test_guard_drop_restoration() {
+    fn test_drop_when_guard_out_of_scope_restores_terminal() {
         // Create guard in inner scope to test drop
         {
             match TerminalGuard::new() {

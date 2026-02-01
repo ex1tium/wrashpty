@@ -29,12 +29,19 @@ use wrashpty::terminal::TerminalGuard;
 
 #[test]
 #[ignore] // Run manually: cargo test panic_test -- --ignored --nocapture
-fn test_panic_restores_terminal() {
+fn test_panic_hook_when_panic_occurs_restores_terminal() {
     // Install panic hook first - same order as main.rs
     install_panic_hook();
 
     // Create terminal guard - enters raw mode
-    let _guard = TerminalGuard::new().expect("Failed to create terminal guard");
+    // Gracefully skip test in non-TTY environments (e.g., CI)
+    let _guard = match TerminalGuard::new() {
+        Ok(guard) => guard,
+        Err(e) => {
+            eprintln!("Skipping test (no terminal available): {}", e);
+            return;
+        }
+    };
 
     // Print message (note: in raw mode, \r\n needed for proper newline)
     print!("Terminal in raw mode. About to panic in 1 second...\r\n");
