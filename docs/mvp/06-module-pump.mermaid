@@ -5,7 +5,7 @@ graph TB
     end
 
     subgraph pump_types["Types"]
-        event["PumpEvent\n- Continue\n- Marker: MarkerEvent\n- ChildOutput\n- ChildExited"]
+        event["PumpResult\n- Continue\n- MarkerDetected: Vec‹MarkerEvent›\n- PtyEof"]
     end
 
     subgraph pump_internal["Internal Data Flow"]
