@@ -298,6 +298,8 @@ mod pump_pty_tests {
     impl TestPty {
         /// Spawn a PTY with an arbitrary command for testing.
         fn spawn(cmd: &str) -> Self {
+            use nix::fcntl::{FcntlArg, OFlag, fcntl};
+
             let pty_system = native_pty_system();
             let size = PtySize {
                 rows: 24,
@@ -317,6 +319,13 @@ mod pump_pty_tests {
                 .spawn_command(command)
                 .expect("Failed to spawn command");
             let fd = pair.master.as_raw_fd().expect("Failed to get master fd");
+
+            // Set the master fd to non-blocking mode so reads return EAGAIN
+            // instead of blocking, which is required for the test loops.
+            let flags = fcntl(fd, FcntlArg::F_GETFL).expect("Failed to get fd flags");
+            let flags = OFlag::from_bits_truncate(flags);
+            fcntl(fd, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK))
+                .expect("Failed to set O_NONBLOCK on PTY master");
 
             Self {
                 master: pair.master,

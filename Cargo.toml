@@ -11,7 +11,7 @@ reedline = "0.28"
 crossterm = "0.27"
 
 # POSIX syscalls and signal handling
-nix = { version = "0.27", features = ["term", "signal", "poll"] }
+nix = { version = "0.27", features = ["term", "signal", "poll", "fs"] }
 signal-hook = "0.3"
 libc = "0.2"
 
