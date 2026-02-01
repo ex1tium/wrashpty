@@ -3,21 +3,6 @@
 //! This is the entry point that sets up critical safety infrastructure
 //! (panic hooks, logging) before any terminal operations begin.
 
-mod app;
-mod bashrc;
-mod chrome;
-mod complete;
-mod editor;
-mod history;
-mod marker;
-mod prompt;
-mod pty;
-mod pump;
-mod signals;
-mod suggest;
-mod terminal;
-mod types;
-
 use std::fs::File;
 use std::panic;
 use std::process::Command;
