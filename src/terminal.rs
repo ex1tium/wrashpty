@@ -1,10 +1,317 @@
-//! Terminal raw mode RAII guard.
+//! Terminal raw mode RAII guard and safety system.
 //!
-//! This module provides safe terminal mode management with automatic
-//! restoration on drop, forming a key part of the terminal safety system.
+//! This module provides safe terminal mode management with automatic restoration
+//! on drop, forming **layer 1** of Wrashpty's five-layer terminal safety system:
+//!
+//! 1. **RAII Guard** (this module) - Automatic restoration via `Drop` trait
+//! 2. **Panic Hook** (`main.rs`) - Async-signal-safe restoration using `libc::write`
+//! 3. **Signal Handlers** - Clean restoration on SIGTERM, SIGINT, etc.
+//! 4. **Atexit Handler** - Final fallback for process termination
+//! 5. **Shell Wrapper** - Outermost safety net in the launching shell
+//!
+//! The `TerminalGuard` saves the original terminal state on construction, enables
+//! raw mode for direct character input, and restores the terminal on drop. This
+//! works even during panic unwinding, providing defense-in-depth with the panic hook.
+//!
+//! # Usage
+//!
+//! ```no_run
+//! use wrashpty::terminal::TerminalGuard;
+//!
+//! fn main() -> anyhow::Result<()> {
+//!     // Create guard - terminal enters raw mode
+//!     let _guard = TerminalGuard::new()?;
+//!
+//!     // Query terminal size
+//!     let (cols, rows) = TerminalGuard::get_size()?;
+//!     println!("Terminal size: {}x{}", cols, rows);
+//!
+//!     // Do terminal operations...
+//!
+//!     // Guard drops here - terminal automatically restored
+//!     Ok(())
+//! }
+//! ```
+//!
+//! # Safety Notes
+//!
+//! - The `Drop` implementation uses best-effort restoration and ignores errors
+//! - Multiple restoration attempts (escape sequences + termios) provide redundancy
+//! - The panic hook in `main.rs` provides additional safety using async-signal-safe I/O
+//!
+//! See architecture spec section 8 for complete terminal safety documentation.
 
-// TODO: Implement in future Phase 0 tickets
-// - Raw mode RAII guard
-// - Terminal state save/restore
-// - Integration with crossterm
-// - Panic-safe cleanup
+use anyhow::{Context, Result};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
+use nix::sys::termios::{tcgetattr, tcsetattr, SetArg, Termios};
+use std::io::{stdin, stdout, Write};
+
+/// RAII guard for terminal raw mode management.
+///
+/// This struct saves the original terminal state on construction and restores it
+/// when dropped. It provides automatic cleanup even during panics, complementing
+/// the panic hook for maximum reliability.
+///
+/// # Example
+///
+/// ```no_run
+/// use wrashpty::terminal::TerminalGuard;
+///
+/// let guard = TerminalGuard::new()?;
+/// // Terminal is now in raw mode
+/// // ... do terminal operations ...
+/// drop(guard); // Or let it go out of scope
+/// // Terminal is restored to original state
+/// # Ok::<(), anyhow::Error>(())
+/// ```
+pub struct TerminalGuard {
+    /// Saved terminal state for restoration on drop.
+    original_termios: Termios,
+}
+
+impl TerminalGuard {
+    /// Create a new terminal guard, enabling raw mode.
+    ///
+    /// This saves the current terminal state and enables raw mode, which:
+    /// - Disables line buffering (characters available immediately)
+    /// - Disables echo (typed characters not shown)
+    /// - Disables signal generation (Ctrl+C doesn't send SIGINT)
+    /// - Disables special input processing
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Terminal attributes cannot be read (e.g., stdin is not a terminal)
+    /// - Raw mode cannot be enabled
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use wrashpty::terminal::TerminalGuard;
+    ///
+    /// let guard = TerminalGuard::new()?;
+    /// // Terminal is now in raw mode
+    /// # Ok::<(), anyhow::Error>(())
+    /// ```
+    pub fn new() -> Result<Self> {
+        let original_termios =
+            tcgetattr(stdin()).context("Failed to get terminal attributes")?;
+
+        enable_raw_mode().context("Failed to enable raw mode")?;
+
+        tracing::info!("Terminal raw mode enabled");
+
+        Ok(TerminalGuard { original_termios })
+    }
+
+    /// Get the current terminal size in columns and rows.
+    ///
+    /// This is a static method that can be called without holding the guard,
+    /// as terminal size queries don't require raw mode.
+    ///
+    /// # Returns
+    ///
+    /// A tuple of `(columns, rows)` representing the terminal dimensions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the terminal size cannot be determined.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use wrashpty::terminal::TerminalGuard;
+    ///
+    /// let (cols, rows) = TerminalGuard::get_size()?;
+    /// println!("Terminal is {}x{}", cols, rows);
+    /// # Ok::<(), anyhow::Error>(())
+    /// ```
+    #[must_use = "terminal size should be used after querying"]
+    pub fn get_size() -> Result<(u16, u16)> {
+        size().context("Failed to get terminal size")
+    }
+
+    /// Reset the scroll region to the full screen.
+    ///
+    /// Emits the DECSTBM reset sequence (`\x1b[r`) to restore the scroll region
+    /// to encompass the entire terminal. This is important for cleanup after
+    /// applications that set custom scroll regions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the escape sequence cannot be written to stdout.
+    pub fn reset_scroll_region() -> Result<()> {
+        let mut out = stdout();
+        write!(out, "\x1b[r").context("Failed to write scroll region reset")?;
+        out.flush().context("Failed to flush stdout")?;
+        Ok(())
+    }
+
+    /// Show the cursor.
+    ///
+    /// Emits the DECTCEM show cursor sequence (`\x1b[?25h`) to make the cursor
+    /// visible. Should be called during cleanup to ensure the cursor is visible
+    /// after the application exits.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the escape sequence cannot be written to stdout.
+    pub fn show_cursor() -> Result<()> {
+        let mut out = stdout();
+        write!(out, "\x1b[?25h").context("Failed to write show cursor sequence")?;
+        out.flush().context("Failed to flush stdout")?;
+        Ok(())
+    }
+
+    /// Hide the cursor.
+    ///
+    /// Emits the DECTCEM hide cursor sequence (`\x1b[?25l`) to make the cursor
+    /// invisible. Useful during rendering to prevent cursor flicker.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the escape sequence cannot be written to stdout.
+    pub fn hide_cursor() -> Result<()> {
+        let mut out = stdout();
+        write!(out, "\x1b[?25l").context("Failed to write hide cursor sequence")?;
+        out.flush().context("Failed to flush stdout")?;
+        Ok(())
+    }
+}
+
+impl Drop for TerminalGuard {
+    /// Restore the terminal to its original state.
+    ///
+    /// This method performs best-effort restoration, ignoring any errors since
+    /// `Drop` cannot return errors. Multiple restoration attempts provide
+    /// defense-in-depth:
+    ///
+    /// 1. Reset scroll region (escape sequence)
+    /// 2. Show cursor (escape sequence)
+    /// 3. Flush stdout
+    /// 4. Disable raw mode (crossterm)
+    /// 5. Restore original termios (nix)
+    ///
+    /// Even if some steps fail (e.g., fd closed), others may succeed.
+    fn drop(&mut self) {
+        tracing::info!("Restoring terminal state");
+
+        // Best-effort restoration - ignore all errors
+        // Escape sequences may work even if termios fails
+        let mut out = stdout();
+
+        // Attempt 1: Reset scroll region
+        if let Err(e) = write!(out, "\x1b[r") {
+            tracing::warn!("Failed to reset scroll region: {}", e);
+        }
+
+        // Attempt 2: Show cursor
+        if let Err(e) = write!(out, "\x1b[?25h") {
+            tracing::warn!("Failed to show cursor: {}", e);
+        }
+
+        // Attempt 3: Flush stdout
+        if let Err(e) = out.flush() {
+            tracing::warn!("Failed to flush stdout: {}", e);
+        }
+
+        // Attempt 4: Disable raw mode via crossterm
+        if let Err(e) = disable_raw_mode() {
+            tracing::warn!("Failed to disable raw mode: {}", e);
+        }
+
+        // Attempt 5: Restore original termios
+        if let Err(e) = tcsetattr(stdin(), SetArg::TCSANOW, &self.original_termios) {
+            tracing::warn!("Failed to restore terminal attributes: {}", e);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_terminal_guard_creation() {
+        // This test requires a real terminal, so it may be skipped in CI
+        // Run with: cargo test -- --nocapture
+        match TerminalGuard::new() {
+            Ok(guard) => {
+                // Guard created successfully, will restore on drop
+                drop(guard);
+                // If we get here without panic, restoration worked
+            }
+            Err(e) => {
+                // Not running in a terminal (e.g., CI environment)
+                eprintln!("Skipping test (no terminal): {}", e);
+            }
+        }
+    }
+
+    #[test]
+    fn test_get_size() {
+        match TerminalGuard::get_size() {
+            Ok((cols, rows)) => {
+                // Verify reasonable terminal dimensions
+                assert!(cols > 0, "Terminal width should be positive");
+                assert!(rows > 0, "Terminal height should be positive");
+                // Most terminals are at least 20x5
+                assert!(cols >= 20, "Terminal width should be at least 20");
+                assert!(rows >= 5, "Terminal height should be at least 5");
+            }
+            Err(e) => {
+                // Not running in a terminal (e.g., CI environment)
+                eprintln!("Skipping test (no terminal): {}", e);
+            }
+        }
+    }
+
+    #[test]
+    fn test_cursor_visibility() {
+        // These tests work even without a real terminal since they just write to stdout
+        // The visual effect can only be verified manually
+        match TerminalGuard::hide_cursor() {
+            Ok(()) => {
+                // Hide succeeded, now show
+                assert!(
+                    TerminalGuard::show_cursor().is_ok(),
+                    "show_cursor should succeed after hide_cursor"
+                );
+            }
+            Err(e) => {
+                eprintln!("Skipping test (stdout not writable): {}", e);
+            }
+        }
+    }
+
+    #[test]
+    fn test_reset_scroll_region() {
+        // This test just verifies the escape sequence can be written
+        match TerminalGuard::reset_scroll_region() {
+            Ok(()) => {
+                // Success - effect can only be verified manually
+            }
+            Err(e) => {
+                eprintln!("Skipping test (stdout not writable): {}", e);
+            }
+        }
+    }
+
+    #[test]
+    fn test_guard_drop_restoration() {
+        // Create guard in inner scope to test drop
+        {
+            match TerminalGuard::new() {
+                Ok(_guard) => {
+                    // Guard will be dropped at end of this scope
+                }
+                Err(e) => {
+                    eprintln!("Skipping test (no terminal): {}", e);
+                    return;
+                }
+            }
+        }
+        // If we get here, drop completed without panic
+        // Terminal should be usable - manual verification needed
+    }
+}
