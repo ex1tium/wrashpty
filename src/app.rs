@@ -13,8 +13,9 @@
 //!                ▼                                  ▼
 //!              Edit ◀───────────────────────── Passthrough
 //!                │   PROMPT marker                  ▲
-//!                │ [stub: auto-transition]          │
-//!                └──────────────────────────────────┘
+//!                │ command submit                   │ PREEXEC marker
+//!                ▼                                  │
+//!           Injecting ──────────────────────────────┘
 //!                │
 //!                ▼
 //!           Terminating ──► exit(code)
@@ -34,6 +35,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
+
+use std::os::unix::io::AsRawFd;
 
 use portable_pty::ExitStatus;
 
@@ -122,11 +125,15 @@ impl App {
         // Spawn PTY with bash
         let pty = Pty::spawn(bashrc_path, cols, rows).context("Failed to spawn PTY")?;
 
-        // Create pump with PTY master fd and session token
-        let pump = Pump::new(pty.master_fd(), session_token);
-
-        // Create signal handler
+        // Create signal handler before pump so we can pass its fd
         let signal_handler = SignalHandler::new().context("Failed to initialize signal handler")?;
+
+        // Create pump with PTY master fd, session token, and signal fd for wake-on-signal
+        let pump = Pump::new(
+            pty.master_fd(),
+            session_token,
+            Some(signal_handler.as_raw_fd()),
+        );
 
         info!(mode = ?Mode::Initializing, "App starting");
 
@@ -260,12 +267,27 @@ impl App {
     /// This is a stub implementation that will be replaced with reedline
     /// integration in a future ticket. Currently it just sleeps briefly
     /// and returns to Passthrough.
+    ///
+    /// # Future Implementation
+    ///
+    /// When command submission is implemented, this method should:
+    /// 1. Accept user input via reedline
+    /// 2. On command submit: call `transition_to_injecting()`, inject the command
+    ///    into the PTY, then return to let the main loop handle `run_injecting()`
+    /// 3. `run_injecting()` waits for PREEXEC marker before transitioning to Passthrough
     fn run_edit(&mut self) -> Result<()> {
         debug!("Edit mode (stub) - auto-transitioning to Passthrough");
 
         // Stub: sleep briefly to avoid busy loop, then return to passthrough
         thread::sleep(EDIT_STUB_DELAY);
 
+        // TODO: When command submission is implemented, the flow should be:
+        //   1. Get command from reedline
+        //   2. self.transition_to_injecting();
+        //   3. self.pty.write_command(&command)?;
+        //   4. return Ok(()) to let main loop call run_injecting()
+        //
+        // For now, bypass Injecting mode since there's no command to inject.
         self.transition_to_passthrough()?;
         Ok(())
     }
