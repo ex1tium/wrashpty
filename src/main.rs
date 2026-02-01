@@ -4,49 +4,12 @@
 //! (panic hooks, logging) before any terminal operations begin.
 
 use std::fs::File;
-use std::panic;
 use std::process::Command;
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use tracing::info;
-
-/// Install a panic hook that performs async-signal-safe terminal restoration.
-///
-/// This is the first layer of the five-layer terminal safety system. When a
-/// panic occurs, we must restore the terminal to a usable state before
-/// displaying the panic message. The restoration sequence uses only
-/// async-signal-safe operations (direct write syscalls).
-fn install_panic_hook() {
-    let original_hook = panic::take_hook();
-
-    panic::set_hook(Box::new(move |panic_info| {
-        // Async-signal-safe terminal restoration sequence:
-        // - \x1b[r    : Reset scroll region to full screen (DECSTBM)
-        // - \x1b[?25h : Show cursor (DECTCEM)
-        //
-        // We use libc::write directly to STDOUT_FILENO and STDERR_FILENO
-        // without any buffering or allocation. This is async-signal-safe
-        // and works even if the standard library's state is corrupted.
-        let restore_sequence = b"\x1b[r\x1b[?25h";
-        unsafe {
-            // Write to both stdout and stderr to maximize chances of restoration
-            libc::write(
-                libc::STDOUT_FILENO,
-                restore_sequence.as_ptr() as *const libc::c_void,
-                restore_sequence.len(),
-            );
-            libc::write(
-                libc::STDERR_FILENO,
-                restore_sequence.as_ptr() as *const libc::c_void,
-                restore_sequence.len(),
-            );
-        }
-
-        // Chain to the original panic hook for message display
-        original_hook(panic_info);
-    }));
-}
+use wrashpty::safety::install_panic_hook;
 
 /// Set up file-based logging.
 ///

@@ -10,6 +10,8 @@
 pub mod marker;
 pub mod pty;
 pub mod pump;
+pub mod safety;
+pub mod terminal;
 pub mod types;
 
 // Internal modules - not part of the public API
@@ -22,4 +24,3 @@ mod history;
 mod prompt;
 mod signals;
 mod suggest;
-mod terminal;
