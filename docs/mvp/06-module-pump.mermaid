@@ -1,0 +1,42 @@
+graph TB
+    subgraph pump_public["pump.rs — Public API"]
+        new_pump["Pump::new pty_master_fd"]
+        poll_once["poll_once parser timeout -> Result PumpEvent"]
+    end
+
+    subgraph pump_types["Types"]
+        event["PumpEvent\n- Continue\n- Marker: MarkerEvent\n- ChildOutput\n- ChildExited"]
+    end
+
+    subgraph pump_internal["Internal Data Flow"]
+        buf_in["read buffer: 8192 bytes\nreused across calls"]
+        poll_call["nix::poll on\nstdin + pty_master + signal_fd"]
+        stdin_path["stdin ready:\nread -> write to pty_master"]
+        pty_path["pty ready:\nread -> feed to MarkerParser"]
+        marker_check["MarkerParser output:\nBytes -> write to stdout\nMarker -> return as event"]
+        echo_sup["Echo suppression:\ntrack injected command\nskip first echo match"]
+    end
+
+    poll_once --> poll_call
+    poll_call --> stdin_path
+    poll_call --> pty_path
+    pty_path --> marker_check
+    marker_check --> echo_sup
+    echo_sup --> event
+
+    subgraph pump_deps["Dependencies"]
+        d_nix["nix\npoll syscall"]
+        d_marker["marker.rs\nMarkerParser"]
+    end
+
+    poll_call --> d_nix
+    pty_path --> d_marker
+
+    subgraph pump_consumers["Consumed By"]
+        c_app["app.rs\nPassthrough mode loop"]
+    end
+
+    event --> c_app
+
+    style pump_public fill:#1e40af,stroke:#1e3a8a,color:#fff
+    style poll_call fill:#374151,stroke:#1f2937,color:#fff

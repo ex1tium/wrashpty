@@ -1,0 +1,57 @@
+graph TB
+    subgraph marker_public["marker.rs — Public API"]
+        new_parser["MarkerParser::new(session_token)"]
+        feed["feed(bytes) -> MarkerIter"]
+        is_mid["is_mid_sequence() -> bool"]
+        flush_stale["flush_stale() -> Option bytes"]
+    end
+
+    subgraph marker_types["Types"]
+        event["MarkerEvent\n- Precmd { exit_code: i32 }\n- Prompt\n- Preexec"]
+        output["ParseOutput<'a>\n- Bytes(&'a [u8])\n- Marker(MarkerEvent)"]
+    end
+
+    subgraph marker_fsm["State Machine"]
+        normal["Normal\npass bytes through"]
+        esc["EscSeen\nbyte was 0x1B"]
+        osc["OscBody\naccumulating after ESC ]"]
+    end
+
+    subgraph marker_internal["Internal State"]
+        buf["buf: [u8; 80] fixed array\nbuf_len: usize\nNo heap allocation"]
+        token["session_token_hex: [u8; 16]\nFor constant-time validation"]
+        security["security_event_count: u32\nTracks invalid token attempts"]
+    end
+
+    normal -->|"0x1B"| esc
+    esc -->|"']'"| osc
+    esc -->|"other"| normal
+    osc -->|"BEL + valid token"| event
+    osc -->|"BEL + invalid token"| normal
+    osc -->|"buf overflow (80 bytes)"| normal
+
+    feed --> marker_fsm
+    marker_fsm --> marker_types
+
+    subgraph marker_timeout["Timeout Handling (External)"]
+        poll_loop["Poll loop checks:\nis_mid_sequence() &&\nelapsed > 100ms"]
+        poll_loop -->|"true"| flush_stale
+    end
+
+    subgraph marker_consumers["Consumed By"]
+        c_pump["pump.rs\ncalls feed per read\nchecks is_mid_sequence"]
+        c_app["app.rs\nreceives MarkerEvent\nhandles security events"]
+    end
+
+    output --> c_pump
+    event --> c_app
+
+    subgraph marker_deps["Dependencies"]
+        d_te["thiserror\ntyped parse errors"]
+        d_gr["getrandom\n(token generation at startup)"]
+    end
+
+    style marker_public fill:#7c3aed,stroke:#6d28d9,color:#fff
+    style marker_fsm fill:#374151,stroke:#1f2937,color:#fff
+    style buf fill:#1f2937,stroke:#111827,color:#9ca3af
+    style marker_timeout fill:#dc2626,stroke:#b91c1c,color:#fff

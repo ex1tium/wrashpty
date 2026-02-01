@@ -1,0 +1,108 @@
+graph TB
+    subgraph External["External Crates"]
+        direction LR
+        cr_pty["portable-pty"]
+        cr_rl["reedline"]
+        cr_ct["crossterm"]
+        cr_nix["nix"]
+        cr_sh["signal-hook"]
+        cr_tf["tempfile"]
+        cr_ah["anyhow"]
+        cr_te["thiserror"]
+        cr_tr["tracing"]
+        cr_dirs["dirs"]
+    end
+
+    subgraph Layer0["Layer 0 — Entry + Orchestration"]
+        main["main.rs\nnew App, panic hook,\nexit code"]
+        app["app.rs\nMode FSM, poll loop,\nreedline lifecycle"]
+    end
+
+    subgraph Layer1["Layer 1 — Platform Services"]
+        pty["pty.rs\nSpawn Bash, PTY master,\nresize, write_command"]
+        bashrc["bashrc.rs\nGenerate rcfile,\nmarker functions"]
+        terminal["terminal.rs\nRaw mode guard,\nterminal size, scroll regions"]
+        marker["marker.rs\nStreaming OSC parser,\nMarkerEvent emitter"]
+        pump["pump.rs\nByte pump, poll fds,\necho suppression"]
+        signals["signals.rs\nSIGWINCH, SIGCHLD,\nSIGTERM handling"]
+        chrome["chrome.rs\nTop bar, footer,\nscroll region mgmt"]
+    end
+
+    subgraph Layer2["Layer 2 — Editor Bridge"]
+        editor["editor.rs\nreedline config,\nread_line bridge"]
+    end
+
+    subgraph Layer3["Layer 3 — Feature Providers"]
+        history["history.rs\nHISTFILE loader,\nprefix search"]
+        suggest["suggest.rs\nHistoryHinter,\nghost text"]
+        complete["complete.rs\nFilesystem, PATH,\ngit branches"]
+        prompt["prompt.rs\ncwd, exit code,\nduration display"]
+    end
+
+    subgraph OS["Operating System"]
+        real_term["Real Terminal\nstdin + stdout"]
+        pty_pair["PTY pair\nmaster + slave"]
+        bash_child["Bash --noediting\nchild process"]
+        child_progs["Child Programs\nvim, ssh, ls..."]
+    end
+
+    main --> app
+
+    app -->|"mode=Edit"| editor
+    app -->|"mode=Passthrough"| pump
+    app --> pty
+    app --> terminal
+    app --> signals
+    app --> chrome
+
+    pty --> bashrc
+    pump --> marker
+
+    editor --> history
+    editor --> suggest
+    editor --> complete
+    editor --> prompt
+
+    pty -.->|"spawn + resize"| pty_pair
+    pty -.->|"write commands"| pty_pair
+    pump -.->|"read/write bytes"| pty_pair
+    pump -.->|"forward output"| real_term
+    terminal -.->|"raw mode control"| real_term
+    signals -.->|"SIGWINCH"| pty_pair
+    pty_pair -.-> bash_child
+    bash_child -.-> child_progs
+
+    pty --> cr_pty
+    pty --> cr_nix
+    bashrc --> cr_tf
+    bashrc --> cr_dirs
+    terminal --> cr_ct
+    terminal --> cr_nix
+    marker --> cr_te
+    pump --> cr_nix
+    signals --> cr_sh
+    signals --> cr_nix
+    chrome --> cr_ct
+    chrome --> terminal
+    editor --> cr_rl
+    app --> cr_ah
+    app --> cr_tr
+    history --> cr_rl
+    suggest --> cr_rl
+    complete --> cr_rl
+    prompt --> cr_rl
+
+    style app fill:#b45309,stroke:#92400e,color:#fff
+    style editor fill:#059669,stroke:#047857,color:#fff
+    style marker fill:#7c3aed,stroke:#6d28d9,color:#fff
+    style pty fill:#1e40af,stroke:#1e3a8a,color:#fff
+    style pump fill:#1e40af,stroke:#1e3a8a,color:#fff
+    style main fill:#b45309,stroke:#92400e,color:#fff
+    style terminal fill:#1e40af,stroke:#1e3a8a,color:#fff
+    style signals fill:#1e40af,stroke:#1e3a8a,color:#fff
+    style bashrc fill:#1e40af,stroke:#1e3a8a,color:#fff
+    style chrome fill:#0891b2,stroke:#0e7490,color:#fff
+    style history fill:#059669,stroke:#047857,color:#fff
+    style suggest fill:#059669,stroke:#047857,color:#fff
+    style complete fill:#059669,stroke:#047857,color:#fff
+    style prompt fill:#059669,stroke:#047857,color:#fff

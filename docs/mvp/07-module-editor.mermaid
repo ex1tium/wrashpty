@@ -1,0 +1,49 @@
+graph TB
+    subgraph editor_public["editor.rs — Public API"]
+        new_ed["EditorHandle::new\nhistory, completer, hinter, prompt"]
+        read_line["read_line -> Result EditorResult"]
+        update["update_prompt exit_code duration"]
+    end
+
+    subgraph editor_result["EditorResult"]
+        cmd["Command with String"]
+        exit["Exit"]
+        interrupted["Interrupted"]
+    end
+
+    subgraph editor_internal["Internal: reedline Configuration"]
+        keybinds["Keybinding mode\nEmacs default, Vi optional"]
+        menu["Completion menu config\ncolumns, padding, marker"]
+        highlight["Highlighter\nfuture: command validation"]
+        validator["Input validator\nfuture: multi-line support"]
+    end
+
+    subgraph editor_traits["reedline Trait Implementations"]
+        t_history["history.rs\nimpl History\nload HISTFILE, prefix search"]
+        t_hinter["suggest.rs\nimpl Hinter\nghost text from history"]
+        t_completer["complete.rs\nimpl Completer\nfiles, PATH, git branches"]
+        t_prompt["prompt.rs\nimpl Prompt\ncwd, exit code, duration"]
+    end
+
+    subgraph editor_deps["Dependencies"]
+        d_rl["reedline\nReedline engine"]
+        d_ct["crossterm\nterminal events"]
+    end
+
+    new_ed --> editor_internal
+    new_ed --> editor_traits
+    read_line --> d_rl
+    d_rl --> t_history
+    d_rl --> t_hinter
+    d_rl --> t_completer
+    d_rl --> t_prompt
+    read_line --> editor_result
+
+    subgraph editor_consumers["Consumed By"]
+        c_app["app.rs\nEdit mode calls read_line"]
+    end
+
+    editor_result --> c_app
+
+    style editor_public fill:#059669,stroke:#047857,color:#fff
+    style editor_traits fill:#374151,stroke:#1f2937,color:#fff

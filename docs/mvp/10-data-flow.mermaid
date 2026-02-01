@@ -1,0 +1,37 @@
+graph LR
+    subgraph passthrough["Passthrough Mode Data Flow"]
+        p_stdin["stdin\nraw bytes"]
+        p_pty_w["PTY master\nwrite end"]
+        p_pty_r["PTY master\nread end"]
+        p_parser["MarkerParser\nfeed + scan"]
+        p_stdout["stdout\nclean bytes"]
+        p_app["App\nmode transitions"]
+
+        p_stdin -->|"forward"| p_pty_w
+        p_pty_r -->|"raw bytes"| p_parser
+        p_parser -->|"Bytes variant"| p_stdout
+        p_parser -->|"Marker variant"| p_app
+    end
+
+    subgraph edit["Edit Mode Data Flow"]
+        e_stdin["stdin\nkey events"]
+        e_rl["reedline\nline editor"]
+        e_history["History\nprefix search"]
+        e_hinter["Hinter\nghost text"]
+        e_completer["Completer\ncandidates"]
+        e_prompt_mod["Prompt\ncwd + status"]
+        e_stdout["stdout\nprompt + UI"]
+        e_pty["PTY master\ncommand injection"]
+
+        e_stdin --> e_rl
+        e_history --> e_rl
+        e_hinter --> e_rl
+        e_completer --> e_rl
+        e_prompt_mod --> e_rl
+        e_rl -->|"render"| e_stdout
+        e_rl -->|"Success line"| e_pty
+    end
+
+    style p_parser fill:#7c3aed,stroke:#6d28d9,color:#fff
+    style e_rl fill:#059669,stroke:#047857,color:#fff
+    style p_app fill:#b45309,stroke:#92400e,color:#fff
