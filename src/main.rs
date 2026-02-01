@@ -9,6 +9,8 @@ use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use tracing::info;
+use wrashpty::app::App;
+use wrashpty::bashrc;
 use wrashpty::safety::install_panic_hook;
 
 /// Set up file-based logging.
@@ -70,11 +72,19 @@ fn main() -> Result<()> {
     // Validate bash is available
     validate_bash_version()?;
 
-    // Bootstrap complete message
-    println!("Wrashpty v0.1.0 - Bootstrap complete");
+    // Generate bashrc with session token
+    let (bashrc_path, session_token) =
+        bashrc::generate().context("Failed to generate bashrc")?;
 
-    // TODO: Initialize App and enter main event loop
-    // This will be implemented in future tickets as part of Phase 0-3 development.
+    // Create and run the application in a block to ensure Drop runs before exit
+    let exit_code = {
+        let mut app = App::new(&bashrc_path, session_token).context("Failed to initialize App")?;
+        let code = app.run().context("App run failed")?;
+        info!(exit_code = code, "Wrashpty exiting");
+        code
+        // app dropped here: terminal restored, bashrc deleted
+    };
 
-    Ok(())
+    // Exit with the shell's actual exit code
+    std::process::exit(exit_code);
 }
