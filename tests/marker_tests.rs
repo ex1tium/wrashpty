@@ -157,7 +157,7 @@ fn test_failed_command_exit_code() {
     let token = make_token();
     let mut parser = MarkerParser::new(token);
 
-    // Command fails with exit code 1
+    // Command fails with exit code 2 (e.g., ls misuse or file not found on some systems)
     let mut output = make_marker(&token, "PREEXEC", None);
     output.extend(b"ls: cannot access 'nonexistent': No such file or directory\n");
     output.extend(make_marker(&token, "PRECMD", Some("2")));

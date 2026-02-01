@@ -144,6 +144,10 @@ pub struct Pump {
     /// Timestamp of last I/O activity for stale sequence detection.
     /// Only updated when bytes are actually read or written, not on poll timeout.
     last_activity_time: Instant,
+
+    /// Whether stdin has been closed (EOF, HUP, or error).
+    /// Once set, stdin is excluded from subsequent polls to avoid busy-looping.
+    stdin_closed: bool,
 }
 
 impl Pump {
@@ -164,6 +168,7 @@ impl Pump {
             pty_fd,
             marker_parser: MarkerParser::new(session_token),
             last_activity_time: Instant::now(),
+            stdin_closed: false,
         }
     }
 
@@ -205,7 +210,36 @@ impl Pump {
         let stdin_fd = unsafe { BorrowedFd::borrow_raw(STDIN_FILENO) };
         let pty_fd = unsafe { BorrowedFd::borrow_raw(self.pty_fd) };
 
-        // Set up poll file descriptors
+        // Set up poll file descriptors, conditionally including stdin
+        // If stdin is closed, we only poll the PTY to avoid busy-looping
+        let (stdin_poll_idx, pty_poll_idx) = if self.stdin_closed {
+            // Only poll PTY when stdin is closed
+            let mut pollfds = [PollFd::new(&pty_fd, PollFlags::POLLIN)];
+
+            loop {
+                match poll(&mut pollfds, poll_timeout_ms) {
+                    Ok(_) => break,
+                    Err(nix::errno::Errno::EINTR) => continue,
+                    Err(e) => return Err(e).context("Poll failed"),
+                }
+            }
+
+            // Check PTY readiness
+            if let Some(revents) = pollfds[0].revents() {
+                if revents.contains(PollFlags::POLLHUP) || revents.contains(PollFlags::POLLERR) {
+                    return self.forward_pty_to_stdout();
+                }
+                if revents.contains(PollFlags::POLLIN) {
+                    return self.forward_pty_to_stdout();
+                }
+            }
+
+            return Ok(PumpResult::Continue);
+        } else {
+            (0, 1)
+        };
+
+        // Poll both stdin and PTY
         let mut pollfds = [
             PollFd::new(&stdin_fd, PollFlags::POLLIN),
             PollFd::new(&pty_fd, PollFlags::POLLIN),
@@ -226,15 +260,20 @@ impl Pump {
         // Note: We do NOT update last_activity_time here on poll return.
         // It is only updated when actual I/O occurs (bytes read/written).
 
-        // Check stdin readiness
-        if let Some(revents) = pollfds[0].revents() {
-            if revents.contains(PollFlags::POLLIN) {
+        // Check stdin readiness - handle POLLIN, POLLHUP, and POLLERR
+        if let Some(revents) = pollfds[stdin_poll_idx].revents() {
+            // Check for hang-up or error conditions (stdin closed)
+            if revents.contains(PollFlags::POLLHUP) || revents.contains(PollFlags::POLLERR) {
+                // Stdin closed - mark it so we skip polling it in the future
+                self.stdin_closed = true;
+                tracing::debug!("Stdin closed (HUP/ERR)");
+            } else if revents.contains(PollFlags::POLLIN) {
                 self.forward_stdin_to_pty()?;
             }
         }
 
         // Check PTY readiness - handle POLLIN, POLLHUP, and POLLERR
-        if let Some(revents) = pollfds[1].revents() {
+        if let Some(revents) = pollfds[pty_poll_idx].revents() {
             // Check for hang-up or error conditions (child process terminated)
             if revents.contains(PollFlags::POLLHUP) || revents.contains(PollFlags::POLLERR) {
                 // PTY hung up or error - attempt a read to confirm EOF or drain remaining data
@@ -378,6 +417,12 @@ fn write_all(fd: RawFd, mut buf: &[u8]) -> Result<()> {
             }
             Err(nix::errno::Errno::EINTR) => {
                 // Interrupted by signal (e.g., SIGWINCH), retry
+                continue;
+            }
+            // EAGAIN and EWOULDBLOCK are the same on Linux; handle both for portability
+            #[allow(unreachable_patterns)]
+            Err(nix::errno::Errno::EAGAIN) | Err(nix::errno::Errno::EWOULDBLOCK) => {
+                // Would block - retry the write (mirrors read-path behavior)
                 continue;
             }
             Err(e) => {
