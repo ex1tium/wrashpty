@@ -41,9 +41,9 @@
 //!
 //! See architecture spec section 8 for complete terminal safety documentation.
 
-use std::io::{stdin, stdout, Write};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, size};
-use nix::sys::termios::{tcgetattr, tcsetattr, SetArg, Termios};
+use nix::sys::termios::{SetArg, Termios, tcgetattr, tcsetattr};
+use std::io::{Write, stdin, stdout};
 use thiserror::Error;
 
 /// Errors that can occur during terminal operations.
