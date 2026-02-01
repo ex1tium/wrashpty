@@ -15,8 +15,39 @@
 
 use std::io::Write;
 
-use anyhow::{Context, Result};
 use tempfile::NamedTempFile;
+use thiserror::Error;
+
+/// Errors that can occur during session initialization.
+///
+/// This enum provides typed error handling for bashrc generation failures,
+/// allowing callers to match on specific error kinds.
+#[derive(Error, Debug)]
+pub enum SessionError {
+    /// Failed to generate cryptographically secure session token.
+    #[error("failed to generate session token: {0}")]
+    GetRandom(String),
+
+    /// Failed to create temporary bashrc file.
+    #[error("failed to create temporary bashrc file")]
+    TempFileCreate(#[source] std::io::Error),
+
+    /// Failed to write bashrc content.
+    #[error("failed to write bashrc content")]
+    WriteContent(#[source] std::io::Error),
+
+    /// Failed to flush bashrc file.
+    #[error("failed to flush bashrc file")]
+    Flush(#[source] std::io::Error),
+
+    /// Failed to persist temporary bashrc file.
+    #[error("failed to persist temporary bashrc file")]
+    Persist(#[source] tempfile::PersistError),
+
+    /// Bashrc path is not valid UTF-8.
+    #[error("bashrc path is not valid UTF-8")]
+    InvalidPath,
+}
 
 /// Generates a temporary bashrc file with OSC 777 marker hooks.
 ///
@@ -46,11 +77,10 @@ use tempfile::NamedTempFile;
 /// let pty = Pty::spawn(&bashrc_path, 80, 24)?;
 /// let pump = Pump::new(pty.master_fd(), token, None);
 /// ```
-pub fn generate() -> Result<(String, [u8; 16])> {
+pub fn generate() -> Result<(String, [u8; 16]), SessionError> {
     // Generate cryptographically secure 8-byte session token
     let mut token_bytes = [0u8; 8];
-    getrandom::getrandom(&mut token_bytes)
-        .map_err(|e| anyhow::anyhow!("Failed to generate session token: {}", e))?;
+    getrandom::getrandom(&mut token_bytes).map_err(|e| SessionError::GetRandom(e.to_string()))?;
 
     // Convert to 16-character hex string
     let token_hex = bytes_to_hex_string(&token_bytes);
@@ -60,7 +90,7 @@ pub fn generate() -> Result<(String, [u8; 16])> {
     session_token.copy_from_slice(token_hex.as_bytes());
 
     // Create temporary file that persists after function returns
-    let mut file = NamedTempFile::new().context("Failed to create temporary bashrc file")?;
+    let mut file = NamedTempFile::new().map_err(SessionError::TempFileCreate)?;
 
     // Write bashrc content
     let bashrc_content = format!(
@@ -75,14 +105,33 @@ if [[ -f ~/.bashrc ]]; then
     source ~/.bashrc
 fi
 
-# Preserve user's existing PROMPT_COMMAND
-__user_prompt_command="${{PROMPT_COMMAND:-}}"
+# Preserve user's existing PROMPT_COMMAND (handles both string and array forms)
+# Bash 5.1+ supports PROMPT_COMMAND as an array
+__wrash_prompt_command_is_array=false
+__user_prompt_command=""
+__user_prompt_command_array=()
+
+if [[ -n "${{PROMPT_COMMAND+x}}" ]]; then
+    # Check if PROMPT_COMMAND is an array using declare -p
+    if [[ "$(declare -p PROMPT_COMMAND 2>/dev/null)" =~ "declare -a" ]]; then
+        __wrash_prompt_command_is_array=true
+        __user_prompt_command_array=("${{PROMPT_COMMAND[@]}}")
+    else
+        __user_prompt_command="${{PROMPT_COMMAND:-}}"
+    fi
+fi
 
 # Precmd function emits PRECMD marker with exit code
 __wrash_precmd() {{
     local ec=$?
-    # Execute user's original PROMPT_COMMAND
-    if [[ -n "$__user_prompt_command" ]]; then
+    # Execute user's original PROMPT_COMMAND (array or string form)
+    if [[ "$__wrash_prompt_command_is_array" == "true" ]]; then
+        # Execute each element of the array
+        local cmd
+        for cmd in "${{__user_prompt_command_array[@]}}"; do
+            eval "$cmd"
+        done
+    elif [[ -n "$__user_prompt_command" ]]; then
         eval "$__user_prompt_command"
     fi
     # Emit PRECMD marker with exit code
@@ -96,11 +145,30 @@ PROMPT_COMMAND='__wrash_precmd'
 # This marks the exact boundary where prompt output ends
 PS1="\[\e]777;${{__wrash_token}};PROMPT\a\]${{PS1}}"
 
+# Capture existing DEBUG trap before installing ours
+__wrash_original_debug_trap=""
+__wrash_debug_trap_output="$(trap -p DEBUG 2>/dev/null)"
+if [[ -n "$__wrash_debug_trap_output" ]]; then
+    # Extract the trap command from "trap -- 'command' DEBUG"
+    # Use parameter expansion to extract the command between quotes
+    if [[ "$__wrash_debug_trap_output" =~ trap\ --\ \'(.*)\'\ DEBUG ]]; then
+        __wrash_original_debug_trap="${{BASH_REMATCH[1]}}"
+    elif [[ "$__wrash_debug_trap_output" =~ trap\ --\ \"(.*)\"\ DEBUG ]]; then
+        __wrash_original_debug_trap="${{BASH_REMATCH[1]}}"
+    fi
+fi
+
 # Preexec function emits PREEXEC marker before command execution
 __wrash_preexec() {{
     # Skip if this is a completion or internal function
     [[ "$BASH_COMMAND" == "$PROMPT_COMMAND" ]] && return
     [[ "$BASH_COMMAND" == __wrash_* ]] && return
+
+    # Chain to original DEBUG trap if one existed
+    if [[ -n "$__wrash_original_debug_trap" ]]; then
+        eval "$__wrash_original_debug_trap"
+    fi
+
     # Emit PREEXEC marker
     printf '\e]777;%s;PREEXEC\a' "$__wrash_token"
 }}
@@ -112,19 +180,14 @@ trap '__wrash_preexec' DEBUG
     );
 
     file.write_all(bashrc_content.as_bytes())
-        .context("Failed to write bashrc content")?;
+        .map_err(SessionError::WriteContent)?;
 
-    file.flush().context("Failed to flush bashrc file")?;
+    file.flush().map_err(SessionError::Flush)?;
 
     // Keep the file (prevent deletion on drop) and get the path
-    let (_, path) = file
-        .keep()
-        .context("Failed to persist temporary bashrc file")?;
+    let (_, path) = file.keep().map_err(SessionError::Persist)?;
 
-    let path_str = path
-        .to_str()
-        .context("Bashrc path is not valid UTF-8")?
-        .to_string();
+    let path_str = path.to_str().ok_or(SessionError::InvalidPath)?.to_string();
 
     tracing::info!(path = %path_str, "Generated bashrc with session token");
 
@@ -211,6 +274,62 @@ mod tests {
         assert!(
             content.contains("source ~/.bashrc"),
             "Bashrc should source user's bashrc"
+        );
+
+        // Clean up
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_generate_handles_prompt_command_array() {
+        let (path, _token) = generate().expect("generate() failed");
+
+        let content = fs::read_to_string(&path).expect("Failed to read bashrc");
+
+        // Should detect array form of PROMPT_COMMAND
+        assert!(
+            content.contains("declare -a"),
+            "Bashrc should detect PROMPT_COMMAND array form"
+        );
+
+        // Should preserve array into backup variable
+        assert!(
+            content.contains("__user_prompt_command_array"),
+            "Bashrc should backup PROMPT_COMMAND array"
+        );
+
+        // Should check array flag before executing
+        assert!(
+            content.contains("__wrash_prompt_command_is_array"),
+            "Bashrc should track if PROMPT_COMMAND was array"
+        );
+
+        // Clean up
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_generate_chains_debug_trap() {
+        let (path, _token) = generate().expect("generate() failed");
+
+        let content = fs::read_to_string(&path).expect("Failed to read bashrc");
+
+        // Should capture existing DEBUG trap
+        assert!(
+            content.contains("trap -p DEBUG"),
+            "Bashrc should capture existing DEBUG trap"
+        );
+
+        // Should store original trap
+        assert!(
+            content.contains("__wrash_original_debug_trap"),
+            "Bashrc should store original DEBUG trap"
+        );
+
+        // Should chain to original trap
+        assert!(
+            content.contains(r#"eval "$__wrash_original_debug_trap""#),
+            "Bashrc should chain to original DEBUG trap"
         );
 
         // Clean up
