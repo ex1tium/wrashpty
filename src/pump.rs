@@ -316,8 +316,11 @@ impl Pump {
 
         match read(STDIN_FILENO, &mut buf) {
             Ok(0) => {
-                // EOF on stdin - user closed input, ignore
+                // EOF on stdin - user closed input
+                // Set flag to exclude stdin from future polls and prevent busy-looping
                 // The PTY will continue running until child exits
+                self.stdin_closed = true;
+                tracing::debug!("Stdin closed (EOF)");
             }
             Ok(n) => {
                 write_all(self.pty_fd, &buf[..n])?;
