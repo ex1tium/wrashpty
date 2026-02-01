@@ -70,3 +70,31 @@ pub enum MarkerEvent {
     /// Signals transition from Edit/Injecting to Passthrough mode.
     Preexec,
 }
+
+/// Events generated from Unix signals.
+///
+/// These events are produced by the [`crate::signals::SignalHandler`] when the
+/// corresponding Unix signals are delivered to the process. The main event loop
+/// processes these events to handle terminal resize, child process state changes,
+/// and graceful shutdown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignalEvent {
+    /// Terminal window size has changed (SIGWINCH).
+    ///
+    /// Emitted when the terminal emulator resizes. In Edit mode, this is
+    /// delegated to reedline for proper line re-rendering. In Passthrough
+    /// mode, the new size is propagated to the PTY.
+    WindowResize,
+
+    /// A child process has exited or stopped (SIGCHLD).
+    ///
+    /// Emitted when the shell or any child process changes state. Used to
+    /// detect shell exit for graceful termination.
+    ChildExit,
+
+    /// Shutdown has been requested (SIGTERM, SIGINT, or SIGHUP).
+    ///
+    /// Emitted when the application should terminate gracefully. The
+    /// shutdown sequence restores terminal state and cleans up resources.
+    Shutdown,
+}

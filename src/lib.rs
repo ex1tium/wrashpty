@@ -22,5 +22,5 @@ mod complete;
 mod editor;
 mod history;
 mod prompt;
-mod signals;
+pub mod signals;
 mod suggest;
