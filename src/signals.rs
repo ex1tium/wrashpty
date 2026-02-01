@@ -16,13 +16,17 @@
 //! mechanism. The actual signal handlers only write a byte to a pipe; all
 //! processing happens in the main thread via [`SignalHandler::check_signals`].
 
+use std::io::{Error as IoError, ErrorKind};
+use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use tracing::{debug, info};
 use signal_hook::consts::signal::{SIGCHLD, SIGHUP, SIGINT, SIGTERM, SIGWINCH};
-use signal_hook::iterator::Signals;
+use signal_hook::iterator::backend::SignalDelivery;
+use signal_hook::iterator::exfiltrator::SignalOnly;
+use tracing::{debug, info};
 
 use crate::types::SignalEvent;
 
@@ -32,12 +36,19 @@ use crate::types::SignalEvent;
 /// and convert them to events for main loop processing. This avoids the
 /// complexity and pitfalls of writing async-signal-safe code directly.
 ///
+/// The underlying file descriptor can be obtained via [`AsRawFd`] for use with
+/// `poll(2)` or `select(2)` in an event loop.
+///
 /// # Example
 ///
 /// ```no_run
+/// use std::os::unix::io::AsRawFd;
 /// use wrashpty::signals::SignalHandler;
 ///
 /// let mut handler = SignalHandler::new().expect("Failed to register signals");
+///
+/// // Get the fd for use with poll/select
+/// let signal_fd = handler.as_raw_fd();
 ///
 /// // In main event loop:
 /// for event in handler.check_signals() {
@@ -49,8 +60,9 @@ use crate::types::SignalEvent;
 /// }
 /// ```
 pub struct SignalHandler {
-    /// Signal iterator using self-pipe for async-signal-safe delivery.
-    signals: Signals,
+    /// Signal delivery backend using self-pipe for async-signal-safe delivery.
+    /// Uses the low-level backend to expose the underlying file descriptor.
+    signals: SignalDelivery<UnixStream, SignalOnly>,
 
     /// Shutdown flag set when termination signal is received.
     /// Shared via Arc to allow checking from multiple locations.
@@ -71,8 +83,15 @@ impl SignalHandler {
     /// - The signal is already handled by another mechanism
     /// - System resources are exhausted
     pub fn new() -> Result<Self> {
-        let signals = Signals::new([SIGWINCH, SIGCHLD, SIGTERM, SIGINT, SIGHUP])
-            .context("Failed to register signal handlers")?;
+        let (read, write) = UnixStream::pair().context("Failed to create signal pipe")?;
+
+        let signals = SignalDelivery::with_pipe(
+            read,
+            write,
+            SignalOnly,
+            [SIGWINCH, SIGCHLD, SIGTERM, SIGINT, SIGHUP],
+        )
+        .context("Failed to register signal handlers")?;
 
         let shutdown_flag = Arc::new(AtomicBool::new(false));
 
@@ -99,7 +118,21 @@ impl SignalHandler {
     pub fn check_signals(&mut self) -> Vec<SignalEvent> {
         let mut events = Vec::new();
 
-        for signal in self.signals.pending() {
+        // Non-blocking check for pending signals using poll_pending with a
+        // non-blocking callback that checks if the pipe has data available.
+        let pending = self.signals.poll_pending(&mut Self::has_signals_nonblocking);
+
+        let pending = match pending {
+            Ok(Some(p)) => p,
+            Ok(None) => return events, // No signals pending
+            Err(e) => {
+                // Log error but don't propagate - signal handling should be best-effort
+                tracing::warn!("Error polling signals: {}", e);
+                return events;
+            }
+        };
+
+        for signal in pending {
             match signal {
                 SIGWINCH => {
                     debug!("SIGWINCH received");
@@ -123,6 +156,35 @@ impl SignalHandler {
         events
     }
 
+    /// Non-blocking check if the signal pipe has data available.
+    ///
+    /// Returns `Ok(true)` if there's data to read, `Ok(false)` if not.
+    fn has_signals_nonblocking(read: &mut UnixStream) -> Result<bool, IoError> {
+        // Use recv with MSG_PEEK | MSG_DONTWAIT to check for data without blocking
+        let mut buf = [0u8; 1];
+        let result = unsafe {
+            libc::recv(
+                read.as_raw_fd(),
+                buf.as_mut_ptr() as *mut libc::c_void,
+                1,
+                libc::MSG_PEEK | libc::MSG_DONTWAIT,
+            )
+        };
+
+        if result > 0 {
+            Ok(true)
+        } else if result == 0 {
+            Ok(false)
+        } else {
+            let err = IoError::last_os_error();
+            if err.kind() == ErrorKind::WouldBlock {
+                Ok(false)
+            } else {
+                Err(err)
+            }
+        }
+    }
+
     /// Returns whether a shutdown signal has been received.
     ///
     /// This method is thread-safe and uses sequential consistency ordering
@@ -133,6 +195,17 @@ impl SignalHandler {
     /// `true` if `SIGTERM`, `SIGINT`, or `SIGHUP` has been received.
     pub fn should_shutdown(&self) -> bool {
         self.shutdown_flag.load(Ordering::SeqCst)
+    }
+}
+
+impl AsRawFd for SignalHandler {
+    /// Returns the raw file descriptor of the signal delivery pipe's read end.
+    ///
+    /// This fd can be used with `poll(2)` or `select(2)` to integrate signal
+    /// handling into an event loop. When the fd becomes readable, call
+    /// [`check_signals`](Self::check_signals) to process pending signals.
+    fn as_raw_fd(&self) -> RawFd {
+        self.signals.get_read().as_raw_fd()
     }
 }
 
