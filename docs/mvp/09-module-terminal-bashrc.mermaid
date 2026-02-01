@@ -1,0 +1,67 @@
+graph TB
+    subgraph terminal_public["terminal.rs — Public API"]
+        enter_raw["TerminalGuard::enter_raw_mode -> Result"]
+        get_size["TerminalGuard::get_size -> Result cols rows"]
+        drop_guard["Drop impl: restore original termios"]
+    end
+
+    subgraph terminal_internal["Internal: RAII Safety"]
+        save["Save original termios on construction"]
+        raw["Enable raw mode via crossterm"]
+        restore["Restore termios on Drop\nAlso called by panic hook"]
+    end
+
+    subgraph terminal_deps["Dependencies"]
+        d_ct["crossterm\nraw mode, terminal size"]
+        d_nix["nix\ntcgetattr, tcsetattr"]
+    end
+
+    enter_raw --> save --> raw
+    drop_guard --> restore
+
+    subgraph terminal_consumers["Consumed By"]
+        c_app["app.rs\ncreated at startup\nheld for program lifetime"]
+    end
+
+    enter_raw --> d_ct
+    save --> d_nix
+    restore --> d_nix
+
+    subgraph bashrc_section["  "]
+        direction TB
+        subgraph bashrc_public["bashrc.rs — Public API"]
+            create_rc["GeneratedRc::create -> Result"]
+            rc_path["path -> Path"]
+            drop_rc["Drop impl: tempfile cleaned up"]
+        end
+
+        subgraph bashrc_internal["Generated Script Structure"]
+            s1["1. Define __wrash_precmd function"]
+            s2["2. Define __wrash_preexec_trap function"]
+            s3["3. Source user ~/.bashrc"]
+            s4["4. Capture and chain user PROMPT_COMMAND"]
+            s5["5. Override PROMPT_COMMAND"]
+            s6["6. Set PS1 with PROMPT marker"]
+            s7["7. Install DEBUG trap with guard"]
+        end
+
+        subgraph bashrc_deps["Dependencies"]
+            d_tf["tempfile\nsecure temp file"]
+            d_dirs["dirs\nlocate ~/.bashrc"]
+        end
+
+        create_rc --> bashrc_internal
+        s1 --> s2 --> s3 --> s4 --> s5 --> s6 --> s7
+        create_rc --> d_tf
+        create_rc --> d_dirs
+    end
+
+    subgraph bashrc_consumers["Consumed By"]
+        c_pty["pty.rs\npasses path to bash --rcfile"]
+    end
+
+    rc_path --> c_pty
+
+    style terminal_public fill:#1e40af,stroke:#1e3a8a,color:#fff
+    style bashrc_public fill:#1e40af,stroke:#1e3a8a,color:#fff
+    style restore fill:#dc2626,stroke:#b91c1c,color:#fff

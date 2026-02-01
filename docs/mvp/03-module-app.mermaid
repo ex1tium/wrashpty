@@ -1,0 +1,53 @@
+graph TB
+    subgraph app_public["app.rs — Public API"]
+        direction LR
+        new["App::new config -> Result"]
+        run["App::run -> Result ExitCode"]
+    end
+
+    subgraph app_internal["Internal State"]
+        mode["mode: Mode enum\nInitializing, Passthrough,\nEdit, Injecting, Terminating"]
+        chrome_mode["chrome_mode: ChromeMode\nFull or Headless"]
+        exit_code["last_exit_code: i32"]
+        cmd_start["command_start_time: Instant"]
+        echo_sup["echo_suppressor: EchoSuppressor"]
+        git_cache["git_status_cache: GitStatusCache"]
+    end
+
+    subgraph app_loop["Event Loop"]
+        poll_phase["poll stdin + pty_master + signal_fd"]
+        pt_branch["Passthrough branch:\nforward stdin to PTY\nscan PTY output via pump"]
+        ed_branch["Edit branch:\ncall reedline.read_line\ninject command on Enter"]
+        sig_check["Signal dispatch:\nSIGWINCH -> resize\nSIGCHLD -> check child"]
+    end
+
+    new --> app_internal
+    run --> app_loop
+    app_loop --> poll_phase
+    poll_phase --> pt_branch
+    poll_phase --> ed_branch
+    poll_phase --> sig_check
+
+    subgraph app_deps["Dependencies"]
+        d_pty["pty.rs\nPtyHandle"]
+        d_term["terminal.rs\nTerminalGuard"]
+        d_pump["pump.rs\nPump"]
+        d_editor["editor.rs\nEditorHandle"]
+        d_signals["signals.rs\nSignalHandler"]
+        d_chrome["chrome.rs\nChrome"]
+    end
+
+    pt_branch --> d_pump
+    pt_branch --> d_pty
+    ed_branch --> d_editor
+    ed_branch --> d_pty
+    sig_check --> d_signals
+    sig_check --> d_pty
+    app_internal --> d_term
+    chrome_mode --> d_chrome
+    sig_check -->|"resize with chrome offset"| d_chrome
+
+    style app_public fill:#b45309,stroke:#92400e,color:#fff
+    style mode fill:#374151,stroke:#1f2937,color:#fff
+    style chrome_mode fill:#0891b2,stroke:#0e7490,color:#fff
+    style d_chrome fill:#0891b2,stroke:#0e7490,color:#fff

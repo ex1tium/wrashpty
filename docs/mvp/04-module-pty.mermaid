@@ -1,0 +1,51 @@
+graph TB
+    subgraph pty_public["pty.rs — Public API"]
+        spawn["PtyHandle::spawn config -> Result"]
+        master_fd["master_fd -> RawFd"]
+        write_cmd["write_command line -> Result"]
+        resize["resize cols rows -> Result"]
+        try_wait["try_wait -> Result Option ExitStatus"]
+    end
+
+    subgraph pty_internal["Internal Structure"]
+        master["PTY master fd\nread child output\nwrite user input"]
+        child["Child process handle\nBash PID, wait status"]
+        reader["Buffered reader\nfrom master"]
+        writer["Writer\nto master"]
+    end
+
+    subgraph pty_setup["Spawn Sequence"]
+        s1["1. Create PTY pair via portable-pty"]
+        s2["2. Configure slave: ECHO on, ISIG on"]
+        s3["3. Fork child with setsid"]
+        s4["4. Child: slave becomes controlling terminal"]
+        s5["5. Child: exec bash --noediting --rcfile tmp"]
+        s6["6. Parent: close slave, keep master"]
+    end
+
+    spawn --> pty_setup
+    s1 --> s2 --> s3 --> s4 --> s5 --> s6
+    s6 --> pty_internal
+
+    subgraph pty_deps["Dependencies"]
+        d_pp["portable-pty\nPTY abstraction"]
+        d_nix["nix\ntermios, ioctl"]
+        d_bashrc["bashrc.rs\nGeneratedRc path"]
+    end
+
+    spawn --> d_pp
+    spawn --> d_bashrc
+    resize --> d_nix
+
+    subgraph pty_consumers["Consumed By"]
+        c_app["app.rs"]
+        c_pump["pump.rs via master_fd"]
+    end
+
+    master_fd --> c_pump
+    write_cmd --> c_app
+    resize --> c_app
+    try_wait --> c_app
+
+    style pty_public fill:#1e40af,stroke:#1e3a8a,color:#fff
+    style pty_setup fill:#374151,stroke:#1f2937,color:#fff

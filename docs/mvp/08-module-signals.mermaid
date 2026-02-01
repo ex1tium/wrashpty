@@ -1,0 +1,42 @@
+graph TB
+    subgraph signals_public["signals.rs — Public API"]
+        new_sig["SignalHandler::new -> Result"]
+        sig_fd["signal_fd -> RawFd"]
+        read_pending["read_pending -> Option SignalEvent"]
+    end
+
+    subgraph signals_types["SignalEvent"]
+        resize["Resize"]
+        child_exit["ChildExited"]
+        terminate["Terminate"]
+    end
+
+    subgraph signals_internal["Internal: signal-hook Pipe"]
+        pipe["Self-pipe trick:\nsignal writes to pipe fd\nmain loop polls pipe fd"]
+        winch["SIGWINCH -> Resize"]
+        chld["SIGCHLD -> ChildExited"]
+        term["SIGTERM -> Terminate"]
+    end
+
+    new_sig --> pipe
+    pipe --> winch
+    pipe --> chld
+    pipe --> term
+    read_pending --> signals_types
+
+    subgraph signals_deps["Dependencies"]
+        d_sh["signal-hook\nasync-signal-safe delivery"]
+        d_nix["nix\nsignal constants"]
+    end
+
+    pipe --> d_sh
+
+    subgraph signals_consumers["Consumed By"]
+        c_app["app.rs\nsignal_fd included in poll\nread_pending after poll returns"]
+    end
+
+    sig_fd --> c_app
+    signals_types --> c_app
+
+    style signals_public fill:#1e40af,stroke:#1e3a8a,color:#fff
+    style pipe fill:#374151,stroke:#1f2937,color:#fff

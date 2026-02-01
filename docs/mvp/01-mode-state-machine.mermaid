@@ -1,0 +1,49 @@
+stateDiagram-v2
+    [*] --> Initializing: startup
+
+    state Initializing {
+        [*] --> WaitingForPrompt
+        WaitingForPrompt --> WaitingForPrompt: PTY output forwarded
+        WaitingForPrompt --> WaitingForPrompt: user input buffered
+    }
+
+    state Passthrough {
+        [*] --> BytePump
+        BytePump --> BytePump: stdin bytes forwarded to PTY
+        BytePump --> BytePump: PTY bytes forwarded to stdout
+        BytePump --> MarkerScan: ESC detected in PTY output
+        MarkerScan --> BytePump: not a marker, flush bytes
+        MarkerScan --> PrecmdSeen: PRECMD marker, store exit code
+        PrecmdSeen --> BytePump: continue pumping
+    }
+
+    state Edit {
+        [*] --> PromptReady
+        PromptReady --> Editing: user types
+        Editing --> Editing: keystrokes, suggestions, completions
+        Editing --> PromptReady: Ctrl+C clears line
+        Editing --> CommandReady: Enter pressed
+    }
+
+    state Injecting {
+        [*] --> WaitingForPreexec
+        WaitingForPreexec --> EchoSuppression: echo bytes received
+        EchoSuppression --> WaitingForPreexec: bytes suppressed
+    }
+
+    state Terminating {
+        [*] --> WaitingForChild
+        WaitingForChild --> SendSigterm: timeout 2s
+        SendSigterm --> SendSigkill: timeout 4s
+    }
+
+    Initializing --> Edit: first PROMPT marker
+    Initializing --> Passthrough: timeout 10s (degraded mode)
+    Passthrough --> Edit: PROMPT marker detected
+    Edit --> Injecting: command submitted
+    Injecting --> Passthrough: PREEXEC marker received
+    Injecting --> Edit: Ctrl+C cancels injection
+    Injecting --> Passthrough: timeout 500ms (proceed anyway)
+    Passthrough --> Terminating: child exits or SIGTERM received
+    Edit --> Terminating: Ctrl+D or "exit" command
+    Terminating --> [*]: child exited or force killed

@@ -1,0 +1,55 @@
+sequenceDiagram
+    participant W as Wrashpty
+    participant B as Bash
+    participant P as Child Program
+
+    rect rgb(40, 40, 60)
+        Note over W,B: Startup
+        W->>B: spawn on PTY with generated rcfile
+        B-->>W: init output
+        B-->>W: PRECMD exit=0
+        B-->>W: PROMPT
+        Note over W: Enter EDIT mode
+    end
+
+    rect rgb(30, 60, 30)
+        Note over W,B: Simple Command
+        Note over W: reedline collects "ls -la"
+        W->>B: inject "ls -la"
+        B-->>W: PREEXEC
+        Note over W: Enter PASSTHROUGH
+        B->>P: exec ls
+        P-->>W: output bytes
+        P-->>B: exit 0
+        B-->>W: PRECMD exit=0
+        B-->>W: PROMPT
+        Note over W: Enter EDIT mode
+    end
+
+    rect rgb(60, 30, 30)
+        Note over W,B: Full-Screen App
+        Note over W: reedline collects "vim file"
+        W->>B: inject "vim file"
+        B-->>W: PREEXEC
+        Note over W: Enter PASSTHROUGH
+        B->>P: exec vim
+        Note over W,P: all I/O forwarded transparently
+        P-->>B: exit 0
+        B-->>W: PRECMD exit=0
+        B-->>W: PROMPT
+        Note over W: Enter EDIT mode
+    end
+
+    rect rgb(50, 40, 20)
+        Note over W,B: Job Control - Ctrl+Z
+        Note over W: reedline collects "sleep 100"
+        W->>B: inject "sleep 100"
+        B-->>W: PREEXEC
+        Note over W: PASSTHROUGH
+        Note over W: User presses Ctrl+Z
+        W->>B: forward 0x1A byte
+        Note over B: SIGTSTP to foreground group
+        B-->>W: PRECMD exit=148
+        B-->>W: PROMPT
+        Note over W: EDIT mode
+    end
