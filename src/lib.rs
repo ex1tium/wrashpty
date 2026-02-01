@@ -9,6 +9,7 @@
 
 pub mod marker;
 pub mod pty;
+pub mod pump;
 pub mod types;
 
 // Internal modules - not part of the public API
@@ -19,7 +20,6 @@ mod complete;
 mod editor;
 mod history;
 mod prompt;
-mod pump;
 mod signals;
 mod suggest;
 mod terminal;

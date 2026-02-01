@@ -22,6 +22,9 @@ getrandom = "0.2"
 anyhow = "1.0"
 thiserror = "1.0"
 
+# Zero-allocation collections for hot paths
+smallvec = "1.15.1"
+
 # Temporary file handling
 tempfile = "3.8"
 
