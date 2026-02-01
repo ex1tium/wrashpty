@@ -19,8 +19,8 @@
 use std::io::{Error as IoError, ErrorKind};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use signal_hook::consts::signal::{SIGCHLD, SIGHUP, SIGINT, SIGTERM, SIGWINCH};
@@ -120,7 +120,9 @@ impl SignalHandler {
 
         // Non-blocking check for pending signals using poll_pending with a
         // non-blocking callback that checks if the pipe has data available.
-        let pending = self.signals.poll_pending(&mut Self::has_signals_nonblocking);
+        let pending = self
+            .signals
+            .poll_pending(&mut Self::has_signals_nonblocking);
 
         let pending = match pending {
             Ok(Some(p)) => p,
@@ -212,7 +214,7 @@ impl AsRawFd for SignalHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nix::sys::signal::{kill, Signal};
+    use nix::sys::signal::{Signal, kill};
     use nix::unistd::getpid;
     use serial_test::serial;
     use std::thread;
