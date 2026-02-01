@@ -14,9 +14,9 @@ pub mod safety;
 pub mod terminal;
 pub mod types;
 
-// Internal modules - not part of the public API
-mod app;
-mod bashrc;
+// Application modules - public for binary crate access
+pub mod app;
+pub mod bashrc;
 mod chrome;
 mod complete;
 mod editor;
