@@ -44,7 +44,7 @@ use tempfile::NamedTempFile;
 /// ```ignore
 /// let (bashrc_path, token) = bashrc::generate()?;
 /// let pty = Pty::spawn(&bashrc_path, 80, 24)?;
-/// let pump = Pump::new(pty.master_fd(), token);
+/// let pump = Pump::new(pty.master_fd(), token, None);
 /// ```
 pub fn generate() -> Result<(String, [u8; 16])> {
     // Generate cryptographically secure 8-byte session token

@@ -8,10 +8,48 @@ use std::process::Command;
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
-use tracing::info;
+use tracing::{debug, info};
 use wrashpty::app::App;
 use wrashpty::bashrc;
 use wrashpty::safety::install_panic_hook;
+
+/// RAII guard for cleaning up the generated bashrc file.
+///
+/// If dropped without being disarmed, removes the bashrc file to prevent leaks
+/// when App creation fails after bashrc generation.
+struct BashrcGuard {
+    path: String,
+    armed: bool,
+}
+
+impl BashrcGuard {
+    fn new(path: String) -> Self {
+        Self { path, armed: true }
+    }
+
+    /// Returns a reference to the path.
+    fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Disarms the guard, preventing cleanup on drop.
+    ///
+    /// Call this after App is successfully created (App handles cleanup).
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for BashrcGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            debug!("BashrcGuard cleanup: removing {}", self.path);
+            if let Err(e) = std::fs::remove_file(&self.path) {
+                debug!("Failed to remove bashrc file during cleanup: {}", e);
+            }
+        }
+    }
+}
 
 /// Set up file-based logging.
 ///
@@ -76,9 +114,15 @@ fn main() -> Result<()> {
     let (bashrc_path, session_token) =
         bashrc::generate().context("Failed to generate bashrc")?;
 
+    // Wrap bashrc path in a guard to ensure cleanup if App creation fails
+    let bashrc_guard = BashrcGuard::new(bashrc_path);
+
     // Create and run the application in a block to ensure Drop runs before exit
     let exit_code = {
-        let mut app = App::new(&bashrc_path, session_token).context("Failed to initialize App")?;
+        let mut app =
+            App::new(bashrc_guard.path(), session_token).context("Failed to initialize App")?;
+        // App created successfully - disarm guard since App owns bashrc cleanup
+        bashrc_guard.disarm();
         let code = app.run().context("App run failed")?;
         info!(exit_code = code, "Wrashpty exiting");
         code

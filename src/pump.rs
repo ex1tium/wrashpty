@@ -111,11 +111,13 @@ pub enum PumpResult {
 /// # Example
 ///
 /// ```ignore
+/// use std::os::unix::io::AsRawFd;
 /// use wrashpty::pump::{Pump, PumpResult};
 ///
 /// let pty_fd = pty.master_fd();
 /// let token = session_token;
-/// let mut pump = Pump::new(pty_fd, token);
+/// let signal_fd = signal_handler.as_raw_fd();
+/// let mut pump = Pump::new(pty_fd, token, Some(signal_fd));
 ///
 /// loop {
 ///     match pump.run_once()? {
@@ -129,7 +131,10 @@ pub enum PumpResult {
 ///             }
 ///         }
 ///         PumpResult::PtyEof => break,
-///         PumpResult::Continue => {}
+///         PumpResult::Continue => {
+///             // Check for pending signals
+///             signal_handler.check_signals();
+///         }
 ///     }
 /// }
 /// ```
@@ -137,6 +142,10 @@ pub enum PumpResult {
 pub struct Pump {
     /// PTY master file descriptor for poll operations.
     pty_fd: RawFd,
+
+    /// Signal handler file descriptor for waking on signal delivery.
+    /// When readable, signals are pending and the caller should process them.
+    signal_fd: Option<RawFd>,
 
     /// Streaming marker parser instance.
     marker_parser: MarkerParser,
@@ -157,15 +166,17 @@ impl Pump {
     ///
     /// * `pty_fd` - The PTY master file descriptor from `Pty::master_fd()`
     /// * `session_token` - 16-byte session token for marker validation
+    /// * `signal_fd` - Optional signal handler fd to wake on signal delivery
     ///
     /// # Safety
     ///
-    /// The caller must ensure `pty_fd` remains valid for the lifetime of
-    /// the pump.
+    /// The caller must ensure `pty_fd` and `signal_fd` (if provided) remain
+    /// valid for the lifetime of the pump.
     #[must_use]
-    pub fn new(pty_fd: RawFd, session_token: [u8; 16]) -> Self {
+    pub fn new(pty_fd: RawFd, session_token: [u8; 16], signal_fd: Option<RawFd>) -> Self {
         Self {
             pty_fd,
+            signal_fd,
             marker_parser: MarkerParser::new(session_token),
             last_activity_time: Instant::now(),
             stdin_closed: false,
@@ -205,87 +216,99 @@ impl Pump {
             -1
         };
 
-        // SAFETY: STDIN_FILENO (0) and pty_fd are valid file descriptors
-        // that remain open for the duration of the poll call.
+        // SAFETY: These file descriptors remain valid for the duration of the poll call.
+        // STDIN_FILENO (0) is always valid, pty_fd is owned by Pty which outlives Pump,
+        // and signal_fd (if present) is owned by the signal handler which outlives Pump.
         let stdin_fd = unsafe { BorrowedFd::borrow_raw(STDIN_FILENO) };
         let pty_fd = unsafe { BorrowedFd::borrow_raw(self.pty_fd) };
+        let signal_fd = self.signal_fd.map(|fd| unsafe { BorrowedFd::borrow_raw(fd) });
 
-        // Set up poll file descriptors, conditionally including stdin
-        // If stdin is closed, we only poll the PTY to avoid busy-looping
-        let (stdin_poll_idx, pty_poll_idx) = if self.stdin_closed {
-            // Only poll PTY when stdin is closed
-            let mut pollfds = [PollFd::new(&pty_fd, PollFlags::POLLIN)];
+        // Build poll array dynamically based on state.
+        // Max 3 fds: stdin (optional), PTY (always), signal (optional).
+        let mut pollfds: SmallVec<[PollFd<'_>; 3]> = SmallVec::new();
 
-            loop {
-                match poll(&mut pollfds, poll_timeout_ms) {
-                    Ok(_) => break,
-                    Err(nix::errno::Errno::EINTR) => continue,
-                    Err(e) => return Err(e).context("Poll failed"),
-                }
-            }
-
-            // Check PTY readiness
-            if let Some(revents) = pollfds[0].revents() {
-                if revents.contains(PollFlags::POLLHUP) || revents.contains(PollFlags::POLLERR) {
-                    return self.forward_pty_to_stdout();
-                }
-                if revents.contains(PollFlags::POLLIN) {
-                    return self.forward_pty_to_stdout();
-                }
-            }
-
-            return Ok(PumpResult::Continue);
+        // Add stdin if not closed (to avoid busy-looping on closed stdin)
+        let stdin_idx = if !self.stdin_closed {
+            pollfds.push(PollFd::new(&stdin_fd, PollFlags::POLLIN));
+            Some(pollfds.len() - 1)
         } else {
-            (0, 1)
+            None
         };
 
-        // Poll both stdin and PTY
-        let mut pollfds = [
-            PollFd::new(&stdin_fd, PollFlags::POLLIN),
-            PollFd::new(&pty_fd, PollFlags::POLLIN),
-        ];
+        // PTY is always polled
+        let pty_idx = pollfds.len();
+        pollfds.push(PollFd::new(&pty_fd, PollFlags::POLLIN));
+
+        // Add signal fd if present
+        let signal_idx = signal_fd.as_ref().map(|fd| {
+            pollfds.push(PollFd::new(fd, PollFlags::POLLIN));
+            pollfds.len() - 1
+        });
 
         // Wait for I/O events, retrying on EINTR (signal interruption)
         loop {
             match poll(&mut pollfds, poll_timeout_ms) {
                 Ok(_) => break,
-                Err(nix::errno::Errno::EINTR) => {
-                    // Interrupted by signal (e.g., SIGWINCH), retry poll
-                    continue;
-                }
+                Err(nix::errno::Errno::EINTR) => continue,
                 Err(e) => return Err(e).context("Poll failed"),
             }
         }
 
-        // Note: We do NOT update last_activity_time here on poll return.
-        // It is only updated when actual I/O occurs (bytes read/written).
+        // Check signal fd first - return to let caller handle signals
+        // But first, still process any ready I/O to avoid data loss
+        if let Some(idx) = signal_idx {
+            if let Some(revents) = pollfds[idx].revents() {
+                if revents.contains(PollFlags::POLLIN) {
+                    if let Some(stdin_idx) = stdin_idx {
+                        self.process_stdin_events(&pollfds[stdin_idx])?;
+                    }
+                    if let Some(result) = self.process_pty_events(&pollfds[pty_idx])? {
+                        return Ok(result);
+                    }
+                    return Ok(PumpResult::Continue);
+                }
+            }
+        }
 
-        // Check stdin readiness - handle POLLIN, POLLHUP, and POLLERR
-        if let Some(revents) = pollfds[stdin_poll_idx].revents() {
+        // Process stdin events (if stdin is in the poll array)
+        if let Some(idx) = stdin_idx {
+            self.process_stdin_events(&pollfds[idx])?;
+        }
+
+        // Process PTY events
+        if let Some(result) = self.process_pty_events(&pollfds[pty_idx])? {
+            return Ok(result);
+        }
+
+        Ok(PumpResult::Continue)
+    }
+
+    /// Process stdin poll events.
+    fn process_stdin_events(&mut self, pollfd: &PollFd) -> Result<()> {
+        if let Some(revents) = pollfd.revents() {
             // Check for hang-up or error conditions (stdin closed)
             if revents.contains(PollFlags::POLLHUP) || revents.contains(PollFlags::POLLERR) {
-                // Stdin closed - mark it so we skip polling it in the future
                 self.stdin_closed = true;
                 tracing::debug!("Stdin closed (HUP/ERR)");
             } else if revents.contains(PollFlags::POLLIN) {
                 self.forward_stdin_to_pty()?;
             }
         }
+        Ok(())
+    }
 
-        // Check PTY readiness - handle POLLIN, POLLHUP, and POLLERR
-        if let Some(revents) = pollfds[pty_poll_idx].revents() {
+    /// Process PTY poll events. Returns Some(result) if a state-changing event occurred.
+    fn process_pty_events(&mut self, pollfd: &PollFd) -> Result<Option<PumpResult>> {
+        if let Some(revents) = pollfd.revents() {
             // Check for hang-up or error conditions (child process terminated)
             if revents.contains(PollFlags::POLLHUP) || revents.contains(PollFlags::POLLERR) {
-                // PTY hung up or error - attempt a read to confirm EOF or drain remaining data
-                return self.forward_pty_to_stdout();
+                return Ok(Some(self.forward_pty_to_stdout()?));
             }
-
             if revents.contains(PollFlags::POLLIN) {
-                return self.forward_pty_to_stdout();
+                return Ok(Some(self.forward_pty_to_stdout()?));
             }
         }
-
-        Ok(PumpResult::Continue)
+        Ok(None)
     }
 
     /// Checks for and flushes stale partial marker sequences.
@@ -490,11 +513,22 @@ mod tests {
     fn test_pump_new() {
         let token = *b"a1b2c3d4e5f67890";
         // Use a dummy fd (won't actually be used in this test)
-        let pump = Pump::new(99, token);
+        let pump = Pump::new(99, token, None);
 
         assert_eq!(pump.pty_fd, 99);
+        assert!(pump.signal_fd.is_none());
         // Parser should start in normal state
         assert!(!pump.marker_parser.is_mid_sequence());
+    }
+
+    /// Test Pump construction with signal fd.
+    #[test]
+    fn test_pump_new_with_signal_fd() {
+        let token = *b"a1b2c3d4e5f67890";
+        let pump = Pump::new(99, token, Some(42));
+
+        assert_eq!(pump.pty_fd, 99);
+        assert_eq!(pump.signal_fd, Some(42));
     }
 
     /// Test that buffer size is reasonable.
