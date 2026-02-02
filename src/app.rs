@@ -842,7 +842,6 @@ impl App {
         panel_height: u16,
         _total_rows: u16,
     ) -> Result<PanelResult> {
-        use crossterm::cursor::{Hide, Show};
         use crossterm::terminal::enable_raw_mode;
 
         // Ensure raw mode is enabled for crossterm event handling

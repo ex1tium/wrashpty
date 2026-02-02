@@ -14,7 +14,10 @@
 use std::collections::VecDeque;
 
 use anyhow::{Context, Result};
-use reedline::{FileBackedHistory, HistoryItem, Prompt, Reedline, Signal};
+use reedline::{
+    ColumnarMenu, FileBackedHistory, HistoryItem, KeyCode, KeyModifiers, MenuBuilder, Prompt,
+    Reedline, ReedlineEvent, ReedlineMenu, Signal, default_emacs_keybindings,
+};
 use tracing::{debug, info, warn};
 
 use crate::complete::WrashCompleter;
@@ -162,13 +165,34 @@ impl Editor {
         // Create hinter for fish-style autosuggestions
         let hinter = Box::new(HistoryHinter::new());
 
-        // Create reedline with history, completions, and autosuggestions
+        // Create a columnar completion menu
+        let completion_menu = Box::new(
+            ColumnarMenu::default()
+                .with_name("completion_menu")
+                .with_columns(4)
+                .with_column_width(None) // auto-width
+        );
+
+        // Set up keybindings with Tab triggering the completion menu
+        let mut keybindings = default_emacs_keybindings();
+        keybindings.add_binding(
+            KeyModifiers::NONE,
+            KeyCode::Tab,
+            ReedlineEvent::UntilFound(vec![
+                ReedlineEvent::Menu("completion_menu".to_string()),
+                ReedlineEvent::MenuNext,
+            ]),
+        );
+
+        // Create reedline with history, completions, menu, and autosuggestions
         // Note: Ctrl+R history search and Up/Down prefix filtering are provided
         // by reedline's default keybindings when history is configured.
         let mut reedline = Reedline::create()
             .with_history(Box::new(history))
             .with_completer(completer)
-            .with_hinter(hinter);
+            .with_hinter(hinter)
+            .with_menu(ReedlineMenu::EngineCompleter(completion_menu))
+            .with_edit_mode(Box::new(reedline::Emacs::new(keybindings)));
 
         // Populate reedline history with loaded bash_history entries
         // Use history_mut().save() to add each entry to the history store

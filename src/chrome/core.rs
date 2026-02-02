@@ -289,16 +289,14 @@ impl Chrome {
         Ok(())
     }
 
-    /// Sets up the scroll region and positions cursor at bottom of region.
+    /// Sets up the scroll region while preserving cursor position.
     ///
-    /// This function sets up the scroll region (rows 2 to N) and positions
-    /// the cursor at the bottom row of the scroll region. This ensures that
-    /// subsequent command output will appear at the bottom and scroll naturally.
+    /// This function sets up the scroll region (rows 2 to N) and preserves
+    /// the cursor position. This allows natural top-to-bottom terminal flow
+    /// where output appears immediately after the previous content.
     ///
-    /// **Important**: Reedline may leave the cursor outside the scroll region
-    /// after accepting input. Simply restoring that position would cause output
-    /// to go to the wrong place. By explicitly positioning the cursor inside
-    /// the scroll region, we ensure proper scrolling behavior.
+    /// **Note**: DECSTBM resets cursor to home position as a side effect.
+    /// We save and restore the cursor to maintain the natural flow.
     ///
     /// # Arguments
     ///
@@ -318,24 +316,24 @@ impl Chrome {
         let stdout = io::stdout();
         let mut out = stdout.lock();
 
+        // Save cursor position before DECSTBM resets it
+        write!(out, "\x1b[s")?;
+
         // DECSTBM: Set scrolling region from row 2 to row total_rows
         // Row 1 is for context bar, rows 2-N are scroll region
         // This moves cursor to row 1 as a side effect.
         write!(out, "\x1b[2;{}r", bottom_row)?;
 
-        // CRITICAL: Position cursor at bottom of scroll region (row N).
-        // If cursor is outside scroll region, output won't scroll properly.
-        // By positioning at the bottom of scroll region, subsequent output will
-        // appear there and scroll naturally when newlines are encountered.
-        write!(out, "\x1b[{};1H", bottom_row)?;
+        // Restore cursor to its original position
+        // This preserves natural top-to-bottom flow
+        write!(out, "\x1b[u")?;
 
         out.flush()?;
 
         debug!(
             top = 2,
             bottom = bottom_row,
-            cursor_row = bottom_row,
-            "Scroll region configured, cursor at bottom"
+            "Scroll region configured, cursor preserved"
         );
         Ok(())
     }
