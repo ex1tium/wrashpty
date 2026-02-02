@@ -681,10 +681,9 @@ impl App {
     /// Creates an EchoGuard to suppress echo, writes the command,
     /// and transitions to Injecting mode.
     fn inject_pending_command(&mut self) -> Result<()> {
-        let command = self
-            .pending_command
-            .take()
-            .expect("inject_pending_command called without pending command");
+        let command = self.pending_command.take().ok_or_else(|| {
+            anyhow::anyhow!("inject_pending_command called without pending command")
+        })?;
 
         debug!(command = %command, "Injecting command");
 
