@@ -589,6 +589,7 @@ mod tests {
     // =========================================================================
 
     #[test]
+    #[serial_test::serial]
     fn test_path_completer_new() {
         use std::fs::File;
         use std::io::Write;
