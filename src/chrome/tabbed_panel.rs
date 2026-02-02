@@ -1,0 +1,239 @@
+//! Tabbed panel system for organizing multiple panels.
+
+use std::any::Any;
+use std::path::Path;
+
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::buffer::Buffer;
+use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Tabs, Widget};
+
+use super::command_palette::CommandPalettePanel;
+use super::file_browser::FileBrowserPanel;
+use super::help_panel::HelpPanel;
+use super::history_browser::HistoryBrowserPanel;
+use super::panel::{Panel, PanelResult};
+
+/// A tabbed container for multiple panels.
+pub struct TabbedPanel {
+    /// Panel instances.
+    tabs: Vec<Box<dyn Panel>>,
+    /// Currently selected tab index.
+    active_tab: usize,
+}
+
+impl TabbedPanel {
+    /// Creates a new tabbed panel with all panel types.
+    pub fn new() -> Self {
+        let tabs: Vec<Box<dyn Panel>> = vec![
+            Box::new(CommandPalettePanel::new()),
+            Box::new(FileBrowserPanel::new()),
+            Box::new(HistoryBrowserPanel::new()),
+            Box::new(HelpPanel::new()),
+        ];
+
+        Self {
+            tabs,
+            active_tab: 0,
+        }
+    }
+
+    /// Loads context for all panels based on the current working directory.
+    pub fn load_context(&mut self, cwd: &Path) {
+        // Load commands for command palette
+        if let Some(panel) = self.tabs.get_mut(0) {
+            if let Some(cmd_panel) = panel.as_any_mut().downcast_mut::<CommandPalettePanel>() {
+                cmd_panel.load_commands(cwd);
+            }
+        }
+
+        // Set cwd for file browser
+        if let Some(panel) = self.tabs.get_mut(1) {
+            if let Some(file_panel) = panel.as_any_mut().downcast_mut::<FileBrowserPanel>() {
+                let _ = file_panel.navigate_to(cwd);
+            }
+        }
+
+        // Load history for history browser
+        if let Some(panel) = self.tabs.get_mut(2) {
+            if let Some(hist_panel) = panel.as_any_mut().downcast_mut::<HistoryBrowserPanel>() {
+                hist_panel.load_history();
+            }
+        }
+    }
+
+    /// Returns the number of tabs.
+    pub fn tab_count(&self) -> usize {
+        self.tabs.len()
+    }
+
+    /// Returns the active tab index.
+    pub fn active_tab(&self) -> usize {
+        self.active_tab
+    }
+
+    /// Switches to the next tab.
+    fn next_tab(&mut self) {
+        if !self.tabs.is_empty() {
+            self.active_tab = (self.active_tab + 1) % self.tabs.len();
+        }
+    }
+
+    /// Switches to the previous tab.
+    fn prev_tab(&mut self) {
+        if !self.tabs.is_empty() {
+            self.active_tab = if self.active_tab == 0 {
+                self.tabs.len() - 1
+            } else {
+                self.active_tab - 1
+            };
+        }
+    }
+}
+
+impl Default for TabbedPanel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Panel for TabbedPanel {
+    fn preferred_height(&self) -> u16 {
+        // Active panel height + 3 for tab bar and outer border
+        self.tabs
+            .get(self.active_tab)
+            .map(|p| p.preferred_height() + 4)
+            .unwrap_or(14)
+    }
+
+    fn title(&self) -> &str {
+        "Panels"
+    }
+
+    fn render(&mut self, buffer: &mut Buffer, area: Rect) {
+        if area.height < 3 || area.width < 10 {
+            return;
+        }
+
+        // Create layout: tab bar at top (2 lines for visibility), content below
+        let chunks = Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).split(area);
+
+        // Render tab bar with better visibility
+        let titles: Vec<Line> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .map(|(i, tab)| {
+                let style = if i == self.active_tab {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White).bg(Color::DarkGray)
+                };
+                Line::from(Span::styled(format!(" {} ", tab.title()), style))
+            })
+            .collect();
+
+        let tabs_widget = Tabs::new(titles)
+            .select(self.active_tab)
+            .style(Style::default().fg(Color::White))
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .divider(Span::styled(" ", Style::default()));
+
+        tabs_widget.render(chunks[0], buffer);
+
+        // Render a separator line
+        if chunks[0].height > 1 {
+            let sep_area = Rect::new(chunks[0].x, chunks[0].y + 1, chunks[0].width, 1);
+            for x in sep_area.x..sep_area.x + sep_area.width {
+                if let Some(cell) = buffer.cell_mut((x, sep_area.y)) {
+                    cell.set_char('─');
+                    cell.set_style(Style::default().fg(Color::DarkGray));
+                }
+            }
+        }
+
+        // Render active panel content
+        if let Some(panel) = self.tabs.get_mut(self.active_tab) {
+            panel.render(buffer, chunks[1]);
+        }
+    }
+
+    fn handle_input(&mut self, key: KeyEvent) -> PanelResult {
+        match key.code {
+            // Tab switching
+            KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.prev_tab();
+                PanelResult::Continue
+            }
+            KeyCode::Tab => {
+                self.next_tab();
+                PanelResult::Continue
+            }
+            KeyCode::BackTab => {
+                self.prev_tab();
+                PanelResult::Continue
+            }
+            // Global dismiss
+            KeyCode::Esc => PanelResult::Dismiss,
+            // Delegate to active panel
+            _ => {
+                if let Some(panel) = self.tabs.get_mut(self.active_tab) {
+                    panel.handle_input(key)
+                } else {
+                    PanelResult::Dismiss
+                }
+            }
+        }
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tabbed_panel_new() {
+        let panel = TabbedPanel::new();
+        assert_eq!(panel.tab_count(), 4);
+        assert_eq!(panel.active_tab(), 0);
+    }
+
+    #[test]
+    fn test_tabbed_panel_next_tab() {
+        let mut panel = TabbedPanel::new();
+        assert_eq!(panel.active_tab(), 0);
+        panel.next_tab();
+        assert_eq!(panel.active_tab(), 1);
+        panel.next_tab();
+        assert_eq!(panel.active_tab(), 2);
+        panel.next_tab();
+        assert_eq!(panel.active_tab(), 3);
+        // Wrap around
+        panel.next_tab();
+        assert_eq!(panel.active_tab(), 0);
+    }
+
+    #[test]
+    fn test_tabbed_panel_prev_tab() {
+        let mut panel = TabbedPanel::new();
+        // Should wrap to last
+        panel.prev_tab();
+        assert_eq!(panel.active_tab(), 3);
+        panel.prev_tab();
+        assert_eq!(panel.active_tab(), 2);
+    }
+}

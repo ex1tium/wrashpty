@@ -379,7 +379,10 @@ mod tests {
                         // Success - raw mode was maintained
                     }
                     Err(e) => {
-                        panic!("ensure_raw_mode should succeed when already in raw mode: {}", e);
+                        panic!(
+                            "ensure_raw_mode should succeed when already in raw mode: {}",
+                            e
+                        );
                     }
                 }
                 // Guard drops here, restoring terminal

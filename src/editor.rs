@@ -113,6 +113,8 @@ pub enum EditorResult {
     ClearLine,
     /// User pressed Ctrl+D to exit.
     Exit,
+    /// A host command was requested via ExecuteHostCommand.
+    HostCommand(String),
 }
 
 /// Reedline-based line editor with background output buffering.

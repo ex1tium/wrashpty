@@ -180,7 +180,10 @@ impl FilesystemCompleter {
         // Limit results
         suggestions.truncate(MAX_FILESYSTEM_SUGGESTIONS);
 
-        debug!(count = suggestions.len(), "Generated filesystem completions");
+        debug!(
+            count = suggestions.len(),
+            "Generated filesystem completions"
+        );
         suggestions
     }
 }
@@ -284,7 +287,10 @@ impl PathCompleter {
             })
             .collect();
 
-        debug!(count = suggestions.len(), "Generated executable completions");
+        debug!(
+            count = suggestions.len(),
+            "Generated executable completions"
+        );
         suggestions
     }
 }
@@ -367,7 +373,10 @@ impl GitCompleter {
             })
             .collect();
 
-        debug!(count = suggestions.len(), "Generated git branch completions");
+        debug!(
+            count = suggestions.len(),
+            "Generated git branch completions"
+        );
         suggestions
     }
 
@@ -668,7 +677,9 @@ mod tests {
                 "PathCompleter should find executables in the temp PATH"
             );
             assert!(
-                completer.executables.contains(&"dummy_test_exe".to_string()),
+                completer
+                    .executables
+                    .contains(&"dummy_test_exe".to_string()),
                 "PathCompleter should find the dummy_test_exe"
             );
         }
