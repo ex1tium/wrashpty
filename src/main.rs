@@ -111,8 +111,7 @@ fn main() -> Result<()> {
     validate_bash_version()?;
 
     // Generate bashrc with session token
-    let (bashrc_path, session_token) =
-        bashrc::generate().context("Failed to generate bashrc")?;
+    let (bashrc_path, session_token) = bashrc::generate().context("Failed to generate bashrc")?;
 
     // Wrap bashrc path in a guard to ensure cleanup if App creation fails
     let bashrc_guard = BashrcGuard::new(bashrc_path);

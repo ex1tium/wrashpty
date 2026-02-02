@@ -30,16 +30,22 @@
 //! Markers from the pump can arrive in batches (multiple per read), and are
 //! processed sequentially to handle transitions correctly.
 
-use std::thread;
+use std::io::Write;
+use std::os::unix::io::{AsRawFd, BorrowedFd, RawFd};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use nix::poll::{poll, PollFd, PollFlags};
+use nix::unistd::read;
+use portable_pty::ExitStatus;
 use tracing::{debug, info, warn};
 
-use std::os::unix::io::AsRawFd;
-
-use portable_pty::ExitStatus;
-
+use crate::editor::{Editor, EditorResult};
+use crate::prompt::WrashPrompt;
 use crate::pty::Pty;
 use crate::pump::{Pump, PumpResult};
 use crate::signals::SignalHandler;
@@ -60,8 +66,170 @@ const INITIALIZATION_TIMEOUT: Duration = Duration::from_secs(10);
 /// Timeout for graceful child exit during termination.
 const TERMINATION_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// Sleep duration for stub edit mode to avoid busy loop.
-const EDIT_STUB_DELAY: Duration = Duration::from_millis(100);
+/// Timeout for waiting for PREEXEC marker during command injection.
+/// If no PREEXEC arrives within this time, transition to Passthrough anyway.
+const INJECTION_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Poll interval for background PTY drain during Edit mode (milliseconds).
+const EDIT_MODE_DRAIN_POLL_MS: i32 = 50;
+
+/// Buffer size for background PTY drain reads.
+const DRAIN_BUFFER_SIZE: usize = 4096;
+
+/// Maximum number of drain results to buffer in the channel.
+/// With 4KB per chunk, this caps memory at ~16MB for the channel.
+/// This accommodates verbose background jobs (builds, find, logs) while
+/// still preventing OOM from runaway output. When full, newest chunks
+/// are dropped to prevent blocking PTY reads.
+const DRAIN_CHANNEL_CAPACITY: usize = 4096;
+
+/// Result from the background PTY drain thread.
+struct DrainResult {
+    /// Bytes read from the PTY.
+    bytes: Vec<u8>,
+    /// Whether EOF was detected.
+    eof: bool,
+    /// Number of bytes dropped due to channel backpressure before this chunk.
+    dropped_bytes: usize,
+}
+
+/// RAII guard for the background PTY drain thread.
+///
+/// Ensures the drain thread is stopped and joined on all exit paths,
+/// including when `read_line` returns an error. This prevents leaking
+/// a live PTY reader thread.
+struct DrainGuard {
+    /// Flag to signal the drain thread to stop.
+    stop_flag: Arc<AtomicBool>,
+    /// Handle to the drain thread (Option to allow taking in drop).
+    handle: Option<JoinHandle<()>>,
+}
+
+impl DrainGuard {
+    /// Creates a new drain guard with the given stop flag and thread handle.
+    fn new(stop_flag: Arc<AtomicBool>, handle: JoinHandle<()>) -> Self {
+        Self {
+            stop_flag,
+            handle: Some(handle),
+        }
+    }
+
+    /// Stops the drain thread and waits for it to finish.
+    ///
+    /// This is called automatically on drop, but can be called explicitly
+    /// if you need to ensure the thread is stopped before proceeding.
+    fn stop(&mut self) {
+        self.stop_flag.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for DrainGuard {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// Background PTY drain loop that runs while reedline blocks on input.
+///
+/// This function continuously polls the PTY and reads any available data,
+/// sending it through a bounded channel for later processing. This prevents
+/// background job output from backing up in the PTY buffer while the user
+/// is typing.
+///
+/// When the channel is full (backpressure), chunks are dropped and the byte
+/// count is tracked. The dropped count is reported with the next successfully
+/// sent chunk so users are informed about dropped background output.
+fn pty_drain_loop(pty_fd: RawFd, stop: Arc<AtomicBool>, tx: SyncSender<DrainResult>) {
+    let mut buf = [0u8; DRAIN_BUFFER_SIZE];
+    let mut pending_dropped_bytes: usize = 0;
+
+    while !stop.load(Ordering::Relaxed) {
+        // SAFETY: pty_fd is valid for the duration of Edit mode
+        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(pty_fd) };
+        let mut pollfds = [PollFd::new(&borrowed_fd, PollFlags::POLLIN)];
+
+        // Poll with short timeout to check stop flag periodically
+        match poll(&mut pollfds, EDIT_MODE_DRAIN_POLL_MS) {
+            Ok(_) => {}
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(_) => break,
+        }
+
+        if let Some(revents) = pollfds[0].revents() {
+            if revents.contains(PollFlags::POLLHUP) || revents.contains(PollFlags::POLLERR) {
+                // EOF detected - use try_send to avoid blocking if channel is full.
+                // If we can't send the EOF marker, just break - the receiver will
+                // detect EOF when it processes the channel contents.
+                let eof_result = DrainResult {
+                    bytes: Vec::new(),
+                    eof: true,
+                    dropped_bytes: pending_dropped_bytes,
+                };
+                match tx.try_send(eof_result) {
+                    Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
+                    Err(mpsc::TrySendError::Disconnected(_)) => {}
+                }
+                break;
+            }
+
+            if revents.contains(PollFlags::POLLIN) {
+                // Drain all available data
+                loop {
+                    match read(pty_fd, &mut buf) {
+                        Ok(0) => {
+                            // EOF - use try_send to avoid blocking
+                            let eof_result = DrainResult {
+                                bytes: Vec::new(),
+                                eof: true,
+                                dropped_bytes: pending_dropped_bytes,
+                            };
+                            let _ = tx.try_send(eof_result);
+                            return;
+                        }
+                        Ok(n) => {
+                            let result = DrainResult {
+                                bytes: buf[..n].to_vec(),
+                                eof: false,
+                                dropped_bytes: pending_dropped_bytes,
+                            };
+                            // Use try_send for backpressure - don't block PTY reads
+                            match tx.try_send(result) {
+                                Ok(()) => {
+                                    // Successfully sent, reset dropped counter
+                                    pending_dropped_bytes = 0;
+                                }
+                                Err(mpsc::TrySendError::Full(dropped)) => {
+                                    // Channel full - drop this chunk and track bytes
+                                    pending_dropped_bytes =
+                                        pending_dropped_bytes.saturating_add(dropped.bytes.len());
+                                }
+                                Err(mpsc::TrySendError::Disconnected(_)) => {
+                                    // Receiver gone, stop draining
+                                    return;
+                                }
+                            }
+                        }
+                        Err(nix::errno::Errno::EAGAIN) => break,
+                        Err(nix::errno::Errno::EIO) => {
+                            // EIO means PTY closed - use try_send to avoid blocking
+                            let eof_result = DrainResult {
+                                bytes: Vec::new(),
+                                eof: true,
+                                dropped_bytes: pending_dropped_bytes,
+                            };
+                            let _ = tx.try_send(eof_result);
+                            return;
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
+    }
+}
 
 /// Main application struct coordinating all Wrashpty components.
 ///
@@ -96,6 +264,15 @@ pub struct App {
 
     /// Path to the generated bashrc file (for cleanup).
     bashrc_path: String,
+
+    /// Reedline-based line editor.
+    editor: Editor,
+
+    /// Command pending injection after transitioning to Injecting mode.
+    pending_command: Option<String>,
+
+    /// Timestamp when injection started (for timeout).
+    injection_start: Option<Instant>,
 }
 
 impl App {
@@ -113,14 +290,14 @@ impl App {
     /// - Terminal size query fails
     /// - PTY spawn fails
     /// - Signal handler registration fails
+    /// - Editor creation fails
     pub fn new(bashrc_path: &str, session_token: [u8; 16]) -> Result<Self> {
         // Create terminal guard first (enables raw mode)
         let terminal_guard =
             TerminalGuard::new().context("Failed to initialize terminal raw mode")?;
 
         // Get terminal size for PTY
-        let (cols, rows) =
-            TerminalGuard::get_size().context("Failed to get terminal size")?;
+        let (cols, rows) = TerminalGuard::get_size().context("Failed to get terminal size")?;
 
         // Spawn PTY with bash
         let pty = Pty::spawn(bashrc_path, cols, rows).context("Failed to spawn PTY")?;
@@ -135,6 +312,9 @@ impl App {
             Some(signal_handler.as_raw_fd()),
         );
 
+        // Create the reedline editor
+        let editor = Editor::new().context("Failed to create editor")?;
+
         info!(mode = ?Mode::Initializing, "App starting");
 
         Ok(Self {
@@ -147,6 +327,9 @@ impl App {
             startup_time: Instant::now(),
             session_token,
             bashrc_path: bashrc_path.to_string(),
+            editor,
+            pending_command: None,
+            injection_start: None,
         })
     }
 
@@ -262,33 +445,264 @@ impl App {
         Ok(())
     }
 
-    /// Handles the Edit mode: interactive line editing.
+    /// Handles the Edit mode: interactive line editing with reedline.
     ///
-    /// This is a stub implementation that will be replaced with reedline
-    /// integration in a future ticket. Currently it just sleeps briefly
-    /// and returns to Passthrough.
+    /// In Edit mode, reedline owns the terminal for command editing. Any
+    /// background output from the PTY is buffered to prevent corruption.
+    /// A background thread continuously drains PTY output while reedline
+    /// blocks waiting for user input.
     ///
-    /// # Future Implementation
-    ///
-    /// When command submission is implemented, this method should:
-    /// 1. Accept user input via reedline
-    /// 2. On command submit: call `transition_to_injecting()`, inject the command
-    ///    into the PTY, then return to let the main loop handle `run_injecting()`
-    /// 3. `run_injecting()` waits for PREEXEC marker before transitioning to Passthrough
+    /// The user can:
+    /// - Submit a command (Enter): transitions to Injecting
+    /// - Clear the line (Ctrl+C): stays in Edit
+    /// - Exit (Ctrl+D at empty prompt): transitions to Terminating
     fn run_edit(&mut self) -> Result<()> {
-        debug!("Edit mode (stub) - auto-transitioning to Passthrough");
+        // Poll PTY for any background output before showing the prompt
+        // This captures output from background jobs that arrived since last prompt
+        if let Some(transition) = self.collect_background_output()? {
+            return transition;
+        }
 
-        // Stub: sleep briefly to avoid busy loop, then return to passthrough
-        thread::sleep(EDIT_STUB_DELAY);
+        // Flush any pending background output before showing the prompt
+        if self.editor.has_pending() {
+            let (data, dropped) = self.editor.flush_pending();
+            if !data.is_empty() {
+                std::io::stdout()
+                    .write_all(&data)
+                    .context("Failed to write buffered output")?;
+                std::io::stdout()
+                    .flush()
+                    .context("Failed to flush stdout")?;
+            }
+            if dropped > 0 {
+                warn!(
+                    dropped_bytes = dropped,
+                    "Background output exceeded buffer, {} bytes dropped", dropped
+                );
+                // Show warning to user in terminal
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "\x1b[33m[wrashpty: {} bytes of background output dropped due to buffer overflow]\x1b[0m",
+                    dropped
+                );
+            }
+        }
 
-        // TODO: When command submission is implemented, the flow should be:
-        //   1. Get command from reedline
-        //   2. self.transition_to_injecting();
-        //   3. self.pty.write_command(&command)?;
-        //   4. return Ok(()) to let main loop call run_injecting()
-        //
-        // For now, bypass Injecting mode since there's no command to inject.
-        self.transition_to_passthrough()?;
+        // Create prompt with last exit code
+        let prompt = WrashPrompt::new(self.last_exit_code);
+
+        // Start background PTY drain thread to continuously collect output
+        // while reedline blocks waiting for user input.
+        // Use a bounded channel to prevent OOM from noisy background output.
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let stop_flag_clone = stop_flag.clone();
+        let (tx, rx): (SyncSender<DrainResult>, Receiver<DrainResult>) =
+            mpsc::sync_channel(DRAIN_CHANNEL_CAPACITY);
+        let pty_fd = self.pty.master_fd();
+
+        let drain_handle: JoinHandle<()> = thread::spawn(move || {
+            pty_drain_loop(pty_fd, stop_flag_clone, tx);
+        });
+
+        // RAII guard ensures drain thread is stopped on all exit paths,
+        // including when read_line returns an error
+        let mut drain_guard = DrainGuard::new(stop_flag, drain_handle);
+
+        // Read line from user (blocks until input)
+        // Use match instead of ? to ensure drain_guard is dropped before returning
+        let editor_result = match self.editor.read_line(&prompt) {
+            Ok(result) => result,
+            Err(e) => {
+                // Guard will stop and join the drain thread on drop
+                drop(drain_guard);
+                return Err(e).context("Reedline read_line failed");
+            }
+        };
+
+        // Explicitly stop the drain thread before processing results
+        drain_guard.stop();
+
+        // Collect and process all bytes from the drain thread
+        let mut all_bytes = Vec::new();
+        let mut eof_detected = false;
+        let mut channel_dropped_bytes: usize = 0;
+        while let Ok(result) = rx.try_recv() {
+            all_bytes.extend(result.bytes);
+            channel_dropped_bytes = channel_dropped_bytes.saturating_add(result.dropped_bytes);
+            if result.eof {
+                eof_detected = true;
+            }
+        }
+
+        // Warn user about bytes dropped due to channel backpressure
+        if channel_dropped_bytes > 0 {
+            warn!(
+                dropped_bytes = channel_dropped_bytes,
+                "Background drain channel full, {} bytes dropped", channel_dropped_bytes
+            );
+            let _ = writeln!(
+                std::io::stderr(),
+                "\x1b[33m[wrashpty: {} bytes of background output dropped due to channel backpressure]\x1b[0m",
+                channel_dropped_bytes
+            );
+        }
+
+        // Process collected bytes through the marker parser
+        if !all_bytes.is_empty() || eof_detected {
+            debug!(
+                bytes = all_bytes.len(),
+                eof = eof_detected,
+                channel_dropped = channel_dropped_bytes,
+                "Processing bytes from background drain"
+            );
+            let parsed = self.pump.process_read_bytes(&all_bytes, eof_detected);
+
+            // Buffer any output bytes
+            if !parsed.bytes.is_empty() {
+                self.editor.buffer_output(&parsed.bytes);
+            }
+
+            // Handle markers from drain
+            for marker in parsed.markers {
+                match marker {
+                    MarkerEvent::Precmd { exit_code } => {
+                        self.last_exit_code = exit_code;
+                        debug!(exit_code, "Received PRECMD during background drain");
+                    }
+                    MarkerEvent::Prompt => {
+                        debug!("Received PROMPT during background drain (ignored)");
+                    }
+                    MarkerEvent::Preexec => {
+                        debug!("Received PREEXEC during background drain (ignored)");
+                    }
+                }
+            }
+
+            // Handle EOF from drain
+            if parsed.eof {
+                info!("PTY EOF detected during background drain");
+                self.transition_to_terminating();
+                return Ok(());
+            }
+        }
+
+        // Also do a final non-blocking poll in case data arrived after drain stopped
+        if let Some(transition) = self.collect_background_output()? {
+            return transition;
+        }
+
+        // Handle the editor result
+        match editor_result {
+            EditorResult::Command(line) => {
+                // Check for built-in exit command
+                let trimmed = line.trim();
+                if trimmed == "exit" || trimmed.starts_with("exit ") {
+                    info!("User typed 'exit' command");
+                    self.transition_to_terminating();
+                    return Ok(());
+                }
+
+                // Skip empty commands
+                if trimmed.is_empty() {
+                    debug!("Empty command, staying in Edit mode");
+                    return Ok(());
+                }
+
+                // Store command and transition to Injecting
+                self.pending_command = Some(line);
+                self.inject_pending_command()?;
+            }
+            EditorResult::ClearLine => {
+                debug!("Line cleared, staying in Edit mode");
+                // Stay in Edit mode
+            }
+            EditorResult::Exit => {
+                info!("Ctrl+D at empty prompt, exiting");
+                self.transition_to_terminating();
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Collects background PTY output during Edit mode.
+    ///
+    /// Does a non-blocking poll to check for PTY output from background jobs.
+    /// Buffers any bytes received and handles markers appropriately.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(None)` - Continue in Edit mode
+    /// - `Ok(Some(Ok(())))` - Transition occurred, caller should return
+    /// - `Err(_)` - Error occurred
+    fn collect_background_output(&mut self) -> Result<Option<Result<()>>> {
+        let result = self.pump.poll_pty_nonblocking()?;
+
+        // Buffer any bytes received (don't write to stdout during Edit mode)
+        if !result.bytes.is_empty() {
+            debug!(
+                bytes = result.bytes.len(),
+                "Buffering background PTY output"
+            );
+            self.editor.buffer_output(&result.bytes);
+        }
+
+        // Handle markers that arrived during Edit mode
+        for marker in result.markers {
+            match marker {
+                MarkerEvent::Precmd { exit_code } => {
+                    self.last_exit_code = exit_code;
+                    debug!(exit_code, "Received PRECMD during Edit mode");
+                }
+                MarkerEvent::Prompt => {
+                    // Unexpected PROMPT during Edit mode - we're already at prompt
+                    // This could happen with background job completion; stay in Edit
+                    debug!("Received PROMPT during Edit mode (ignored)");
+                }
+                MarkerEvent::Preexec => {
+                    // Unexpected PREEXEC during Edit mode - very unusual
+                    debug!("Unexpected PREEXEC during Edit mode (ignored)");
+                }
+            }
+        }
+
+        // Handle PTY EOF
+        if result.eof {
+            info!("PTY EOF detected during Edit mode");
+            self.transition_to_terminating();
+            return Ok(Some(Ok(())));
+        }
+
+        Ok(None)
+    }
+
+    /// Injects the pending command into the PTY.
+    ///
+    /// Creates an EchoGuard to suppress echo, writes the command,
+    /// and transitions to Injecting mode.
+    fn inject_pending_command(&mut self) -> Result<()> {
+        let command = self.pending_command.take().ok_or_else(|| {
+            anyhow::anyhow!("inject_pending_command called without pending command")
+        })?;
+
+        debug!(command = %command, "Injecting command");
+
+        // Transition to Injecting mode first (syncs PTY size)
+        self.transition_to_injecting()?;
+
+        // Create echo guard to suppress command echo
+        let _guard = self
+            .pty
+            .create_echo_guard()
+            .context("Failed to create echo guard")?;
+
+        // Write command to PTY
+        self.pty
+            .write_command(&command)
+            .context("Failed to write command to PTY")?;
+
+        // Guard drops here, restoring echo
+
         Ok(())
     }
 
@@ -297,7 +711,23 @@ impl App {
     /// In this mode, we've injected a command and are waiting for the shell
     /// to emit a PREEXEC marker indicating the command is about to execute.
     /// Once PREEXEC is received, we transition to Passthrough mode.
+    ///
+    /// If no PREEXEC arrives within INJECTION_TIMEOUT, transitions to Passthrough
+    /// anyway to prevent deadlocks.
     fn run_injecting(&mut self) -> Result<()> {
+        // Check for injection timeout
+        if let Some(start) = self.injection_start {
+            if start.elapsed() > INJECTION_TIMEOUT {
+                warn!(
+                    "Injection timeout ({:?}) - transitioning to Passthrough without PREEXEC",
+                    INJECTION_TIMEOUT
+                );
+                self.injection_start = None;
+                self.transition_to_passthrough()?;
+                return Ok(());
+            }
+        }
+
         match self.pump.run_once()? {
             PumpResult::MarkerDetected(markers) => {
                 for marker in markers {
@@ -308,10 +738,15 @@ impl App {
                         }
                         MarkerEvent::Prompt => {
                             // Unexpected - command should execute before next prompt
-                            debug!("Unexpected PROMPT in Injecting");
+                            // But handle gracefully by transitioning to Edit
+                            debug!("Unexpected PROMPT in Injecting - transitioning to Edit");
+                            self.injection_start = None;
+                            self.transition_to_edit();
+                            return Ok(());
                         }
                         MarkerEvent::Preexec => {
                             debug!("Received PREEXEC - command executing");
+                            self.injection_start = None;
                             self.transition_to_passthrough()?;
                             return Ok(());
                         }
@@ -320,6 +755,7 @@ impl App {
             }
             PumpResult::PtyEof => {
                 info!("PTY EOF in Injecting");
+                self.injection_start = None;
                 self.transition_to_terminating();
             }
             PumpResult::Continue => {}
@@ -390,10 +826,25 @@ impl App {
     }
 
     /// Transitions to Injecting mode.
-    #[allow(dead_code)]
-    fn transition_to_injecting(&mut self) {
+    ///
+    /// **Critical**: Synchronizes PTY size before entering Injecting mode.
+    /// The terminal may have been resized while reedline was active in Edit
+    /// mode. Since reedline owns SIGWINCH during Edit mode, we sync here
+    /// to ensure the PTY has the correct geometry before command execution.
+    fn transition_to_injecting(&mut self) -> Result<()> {
         info!(from = ?self.mode, to = ?Mode::Injecting, "Mode transition");
+
+        // Sync PTY size - terminal may have been resized during Edit mode
+        let (cols, rows) =
+            TerminalGuard::get_size().context("Failed to get terminal size for transition")?;
+        self.pty
+            .resize(cols, rows)
+            .context("Failed to resize PTY on transition to Injecting")?;
+        debug!(cols, rows, "PTY size synchronized for command execution");
+
         self.mode = Mode::Injecting;
+        self.injection_start = Some(Instant::now());
+        Ok(())
     }
 
     /// Transitions to Terminating mode.
@@ -425,23 +876,34 @@ impl App {
     /// Handles terminal window resize signal (SIGWINCH).
     ///
     /// Behavior depends on current mode:
-    /// - Edit mode: Ignored (reedline handles SIGWINCH internally)
+    /// - Edit mode: Let reedline handle SIGWINCH internally via crossterm.
+    ///   PTY will be synchronized when transitioning out of Edit mode.
     /// - Passthrough/Injecting/Initializing: Propagate resize to PTY
     /// - Terminating: Ignored
+    ///
+    /// # Why Edit Mode Doesn't Resize PTY
+    ///
+    /// Reedline has its own internal SIGWINCH handler (via crossterm). If the
+    /// wrapper also handled the signal, both would attempt to manage terminal
+    /// state, causing potential race conditions and corrupted rendering. By
+    /// letting reedline own SIGWINCH during Edit mode, we avoid conflicts.
+    /// The PTY is synchronized in `transition_to_injecting()` before command
+    /// execution.
     fn handle_sigwinch(&mut self) -> Result<()> {
         match self.mode {
             Mode::Edit => {
-                // Reedline handles SIGWINCH internally
-                debug!("SIGWINCH in Edit mode - delegating to reedline (stub)");
+                // Let reedline handle SIGWINCH internally via crossterm.
+                // Do NOT resize PTY here - it will be synced on transition.
+                debug!("SIGWINCH in Edit mode - reedline handles display refresh");
             }
             Mode::Passthrough | Mode::Injecting | Mode::Initializing => {
-                // Propagate resize to PTY
-                let (cols, rows) = TerminalGuard::get_size()
-                    .context("Failed to get terminal size for resize")?;
+                // We own SIGWINCH in these modes - propagate resize to PTY
+                let (cols, rows) =
+                    TerminalGuard::get_size().context("Failed to get terminal size for resize")?;
                 self.pty
                     .resize(cols, rows)
                     .context("Failed to resize PTY")?;
-                info!(cols, rows, "PTY resized");
+                info!(cols, rows, mode = ?self.mode, "PTY resized");
             }
             Mode::Terminating => {
                 // Ignore resize during shutdown
@@ -515,10 +977,10 @@ mod tests {
     }
 
     #[test]
-    fn test_edit_stub_delay_constant() {
-        // Verify delay is reasonable for a stub
-        assert!(EDIT_STUB_DELAY >= Duration::from_millis(10));
-        assert!(EDIT_STUB_DELAY <= Duration::from_millis(500));
+    fn test_injection_timeout_constant() {
+        // Verify timeout is reasonable for injection
+        assert!(INJECTION_TIMEOUT >= Duration::from_millis(100));
+        assert!(INJECTION_TIMEOUT <= Duration::from_secs(2));
     }
 
     // =========================================================================
@@ -801,7 +1263,10 @@ mod tests {
             }
         }
 
-        assert!(found_marker, "Should find PROMPT marker even with byte-by-byte feeding");
+        assert!(
+            found_marker,
+            "Should find PROMPT marker even with byte-by-byte feeding"
+        );
         assert!(!parser.is_mid_sequence());
     }
 
@@ -860,11 +1325,7 @@ mod tests {
         // Edit -> Injecting -> Passthrough (after PREEXEC)
 
         // Verify mode transitions are distinct
-        let modes = [
-            Mode::Edit,
-            Mode::Injecting,
-            Mode::Passthrough,
-        ];
+        let modes = [Mode::Edit, Mode::Injecting, Mode::Passthrough];
 
         for (i, mode) in modes.iter().enumerate() {
             for (j, other) in modes.iter().enumerate() {
@@ -902,8 +1363,8 @@ mod tests {
     #[test]
     fn test_panic_hook_preserves_original() {
         use std::panic;
-        use std::sync::atomic::{AtomicBool, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
 
         // Install a custom panic hook first
         let custom_called = Arc::new(AtomicBool::new(false));
@@ -959,18 +1420,19 @@ mod tests {
         drop(guard);
 
         // After drop, verify terminal is in a usable state by creating new guard
-        let result = panic::catch_unwind(|| {
-            match TerminalGuard::new() {
-                Ok(g) => {
-                    drop(g);
-                    true
-                }
-                Err(_) => false,
+        let result = panic::catch_unwind(|| match TerminalGuard::new() {
+            Ok(g) => {
+                drop(g);
+                true
             }
+            Err(_) => false,
         });
 
         match result {
-            Ok(success) => assert!(success, "Should be able to create new guard after restoration"),
+            Ok(success) => assert!(
+                success,
+                "Should be able to create new guard after restoration"
+            ),
             Err(_) => panic!("Guard creation panicked"),
         }
     }

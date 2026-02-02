@@ -7,8 +7,8 @@ rust-version = "1.85"
 [dependencies]
 # PTY and terminal control
 portable-pty = "0.8"
-reedline = "0.28"
-crossterm = "0.27"
+reedline = "0.45"
+crossterm = "0.29"
 
 # POSIX syscalls and signal handling
 nix = { version = "0.27", features = ["term", "signal", "poll", "fs"] }
