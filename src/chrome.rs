@@ -222,12 +222,17 @@ impl Chrome {
         Ok(())
     }
 
-    /// Sets up the scroll region while preserving cursor position.
+    /// Sets up the scroll region and positions cursor at bottom of region.
     ///
-    /// Unlike `setup_scroll_region`, this version saves the cursor position
-    /// before setting the scroll region and restores it afterward. This is
-    /// important when returning from Passthrough mode where command output
-    /// should remain visible.
+    /// This function sets up the scroll region (rows 2 to N-1) and positions
+    /// the cursor at the bottom row of the scroll region. This ensures that
+    /// subsequent command output will appear at the bottom and scroll naturally.
+    ///
+    /// **Important**: Reedline may leave the cursor outside the scroll region
+    /// (e.g., at the footer row) after accepting input. Simply restoring that
+    /// position would cause output to go to the wrong place. By explicitly
+    /// positioning the cursor inside the scroll region, we ensure proper
+    /// scrolling behavior.
     ///
     /// # Arguments
     ///
@@ -241,19 +246,27 @@ impl Chrome {
             return Ok(());
         }
 
+        let bottom_row = total_rows - 1;
         let mut out = io::stdout();
-        // Save cursor position before DECSTBM (which resets cursor to home)
-        write!(out, "\x1b[s")?;
+
         // DECSTBM: Set scrolling region from row 2 to row (total_rows - 1)
-        write!(out, "\x1b[2;{}r", total_rows - 1)?;
-        // Restore cursor position
-        write!(out, "\x1b[u")?;
+        // This moves cursor to row 1 as a side effect.
+        write!(out, "\x1b[2;{}r", bottom_row)?;
+
+        // CRITICAL: Position cursor at bottom of scroll region (row N-1).
+        // Reedline may have left cursor at row N (footer area) after accepting input.
+        // If cursor is outside scroll region, output won't scroll properly.
+        // By positioning at the bottom of scroll region, subsequent output will
+        // appear there and scroll naturally when newlines are encountered.
+        write!(out, "\x1b[{};1H", bottom_row)?;
+
         out.flush()?;
 
         debug!(
             top = 2,
-            bottom = total_rows - 1,
-            "Scroll region configured (cursor preserved)"
+            bottom = bottom_row,
+            cursor_row = bottom_row,
+            "Scroll region configured, cursor at bottom"
         );
         Ok(())
     }
@@ -702,6 +715,14 @@ fn chrome_refresh_loop(state: Arc<RefreshState>) {
 ///
 /// This is a static version used by the refresh thread which doesn't
 /// have access to the Chrome struct.
+///
+/// **IMPORTANT**: This function does NOT use cursor save/restore (`\x1b[s`/`\x1b[u`)
+/// because those sequences share a single buffer at the terminal level. When this
+/// function runs concurrently with reedline (which also manipulates cursor state),
+/// save/restore would corrupt cursor positioning, causing prompts to become invisible.
+///
+/// Instead, we move cursor to the footer row, draw, and leave it there. Reedline
+/// manages its own cursor positioning and will move it back to the input line.
 fn draw_footer_static(cols: u16, total_rows: u16) -> io::Result<()> {
     let hints = " Tab: complete | Ctrl+R: search | Ctrl+C: clear | Ctrl+D: exit ";
     let hints_width = hints.width();
@@ -717,11 +738,11 @@ fn draw_footer_static(cols: u16, total_rows: u16) -> io::Result<()> {
     };
 
     let mut out = io::stdout();
-    write!(out, "\x1b[s")?; // Save cursor position
+    // Move to footer row and draw - DO NOT use save/restore cursor here!
+    // Reedline will handle cursor positioning for its prompt.
     write!(out, "\x1b[{};1H", total_rows)?; // Move to last row
     write!(out, "\x1b[K")?; // Clear line
     write!(out, "\x1b[7m{}\x1b[0m", content)?; // Reverse video
-    write!(out, "\x1b[u")?; // Restore cursor position
     out.flush()?;
 
     Ok(())
