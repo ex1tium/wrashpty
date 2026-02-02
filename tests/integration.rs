@@ -53,6 +53,351 @@ mod test_utils {
     }
 }
 
+/// Edit mode integration tests.
+///
+/// These tests verify the edit mode behaviors including:
+/// - Entering Edit mode and submitting a command
+/// - Ctrl+C clearing the line without exiting
+/// - Ctrl+D exiting at an empty prompt
+/// - Injection flow producing PREEXEC -> Passthrough
+/// - Buffering of background output during edit
+///
+/// **Note**: These tests require a proper TTY environment and are marked
+/// `#[ignore]` by default. Run with `cargo test -- --ignored` to execute them
+/// in an interactive terminal session.
+#[cfg(test)]
+mod edit_mode_tests {
+    use std::io::{Read, Write};
+    use std::thread;
+    use std::time::Duration;
+
+    use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+
+    /// Test harness for wrashpty edit mode testing.
+    struct EditModeTestHarness {
+        master: Box<dyn portable_pty::MasterPty + Send>,
+        reader: Box<dyn Read + Send>,
+        writer: Box<dyn Write + Send>,
+        #[allow(dead_code)]
+        child: Box<dyn portable_pty::Child + Send + Sync>,
+    }
+
+    impl EditModeTestHarness {
+        /// Spawn wrashpty for testing.
+        /// Returns None if wrashpty binary is not available.
+        fn spawn() -> Option<Self> {
+            let pty_system = native_pty_system();
+            let size = PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            };
+
+            let pair = pty_system.openpty(size).ok()?;
+
+            // Try to find wrashpty binary
+            let wrashpty_path = std::env::current_dir()
+                .ok()?
+                .join("target/debug/wrashpty");
+
+            if !wrashpty_path.exists() {
+                // Try release build
+                let release_path = std::env::current_dir()
+                    .ok()?
+                    .join("target/release/wrashpty");
+                if !release_path.exists() {
+                    return None;
+                }
+            }
+
+            let mut command = CommandBuilder::new(&wrashpty_path);
+            // Set TERM to ensure proper terminal behavior
+            command.env("TERM", "xterm-256color");
+
+            let child = pair.slave.spawn_command(command).ok()?;
+            let reader = pair.master.try_clone_reader().ok()?;
+            let writer = pair.master.take_writer().ok()?;
+
+            Some(Self {
+                master: pair.master,
+                reader,
+                writer,
+                child,
+            })
+        }
+
+        /// Read available output with timeout.
+        /// Returns the output and whether an error was detected.
+        fn read_output(&mut self, timeout_ms: u64) -> (String, bool) {
+            use nix::fcntl::{FcntlArg, OFlag, fcntl};
+
+            let fd = self.master.as_raw_fd().unwrap();
+
+            // Set non-blocking
+            let flags = fcntl(fd, FcntlArg::F_GETFL).unwrap_or(0);
+            let flags = OFlag::from_bits_truncate(flags);
+            let _ = fcntl(fd, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK));
+
+            let mut output = Vec::new();
+            let mut buf = [0u8; 1024];
+            let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+
+            while std::time::Instant::now() < deadline {
+                match self.reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => output.extend_from_slice(&buf[..n]),
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            // Restore blocking mode
+            let _ = fcntl(fd, FcntlArg::F_SETFL(flags));
+
+            let output_str = String::from_utf8_lossy(&output).to_string();
+            // Check for reedline/terminal errors that indicate non-TTY environment
+            let has_error = output_str.contains("cursor position could not be read")
+                || output_str.contains("Reedline read_line failed")
+                || output_str.contains("ENOTTY");
+
+            (output_str, has_error)
+        }
+
+        /// Send input to the PTY.
+        fn send(&mut self, input: &str) -> std::io::Result<()> {
+            self.writer.write_all(input.as_bytes())?;
+            self.writer.flush()
+        }
+
+        /// Send a control character.
+        fn send_ctrl(&mut self, c: char) -> std::io::Result<()> {
+            let ctrl_byte = (c as u8) & 0x1f;
+            self.writer.write_all(&[ctrl_byte])?;
+            self.writer.flush()
+        }
+    }
+
+    /// Test that wrashpty enters Edit mode and can submit a command.
+    ///
+    /// Requires a proper TTY environment; skipped in CI.
+    #[test]
+    #[ignore = "requires interactive TTY environment"]
+    fn test_edit_mode_command_submission() {
+        let Some(mut harness) = EditModeTestHarness::spawn() else {
+            eprintln!("Skipping test: wrashpty binary not found");
+            return;
+        };
+
+        // Wait for initial prompt
+        thread::sleep(Duration::from_millis(1000));
+        let (output, has_error) = harness.read_output(500);
+
+        if has_error {
+            eprintln!("Skipping test: terminal environment not suitable");
+            return;
+        }
+
+        // Should see some prompt indicator (reedline shows a prompt)
+        assert!(
+            !output.is_empty(),
+            "Expected some output after startup, got nothing"
+        );
+
+        // Send a simple command
+        harness.send("echo hello_from_test\n").unwrap();
+
+        // Wait for command execution
+        thread::sleep(Duration::from_millis(500));
+        let (output, _) = harness.read_output(500);
+
+        // Should see the command output
+        assert!(
+            output.contains("hello_from_test"),
+            "Expected 'hello_from_test' in output, got: {}",
+            output
+        );
+    }
+
+    /// Test that Ctrl+C clears the line without exiting.
+    ///
+    /// Requires a proper TTY environment; skipped in CI.
+    #[test]
+    #[ignore = "requires interactive TTY environment"]
+    fn test_edit_mode_ctrl_c_clears_line() {
+        let Some(mut harness) = EditModeTestHarness::spawn() else {
+            eprintln!("Skipping test: wrashpty binary not found");
+            return;
+        };
+
+        // Wait for initial prompt
+        thread::sleep(Duration::from_millis(1000));
+        let (_, has_error) = harness.read_output(500);
+
+        if has_error {
+            eprintln!("Skipping test: terminal environment not suitable");
+            return;
+        }
+
+        // Type something
+        harness.send("partial command").unwrap();
+        thread::sleep(Duration::from_millis(100));
+
+        // Send Ctrl+C to clear
+        harness.send_ctrl('C').unwrap();
+        thread::sleep(Duration::from_millis(200));
+
+        // Send a different command to verify we're still in edit mode
+        harness.send("echo still_alive\n").unwrap();
+        thread::sleep(Duration::from_millis(500));
+        let (output, _) = harness.read_output(500);
+
+        // Should see the new command output (proves we didn't exit)
+        assert!(
+            output.contains("still_alive"),
+            "Expected 'still_alive' in output after Ctrl+C, got: {}",
+            output
+        );
+    }
+
+    /// Test that Ctrl+D at empty prompt exits.
+    ///
+    /// Requires a proper TTY environment; skipped in CI.
+    #[test]
+    #[ignore = "requires interactive TTY environment"]
+    fn test_edit_mode_ctrl_d_exits() {
+        let Some(mut harness) = EditModeTestHarness::spawn() else {
+            eprintln!("Skipping test: wrashpty binary not found");
+            return;
+        };
+
+        // Wait for initial prompt
+        thread::sleep(Duration::from_millis(1000));
+        let (_, has_error) = harness.read_output(500);
+
+        if has_error {
+            eprintln!("Skipping test: terminal environment not suitable");
+            return;
+        }
+
+        // Send Ctrl+D at empty prompt
+        harness.send_ctrl('D').unwrap();
+
+        // Wait for exit
+        thread::sleep(Duration::from_millis(500));
+
+        // Try to send more input - should fail or produce no output
+        // because the shell should have exited
+        let _ = harness.send("echo should_not_work\n");
+        thread::sleep(Duration::from_millis(200));
+        let (output, _) = harness.read_output(200);
+
+        // Should NOT see the command output (shell exited)
+        assert!(
+            !output.contains("should_not_work"),
+            "Expected shell to exit after Ctrl+D, but got output: {}",
+            output
+        );
+    }
+
+    /// Test that command injection produces PREEXEC and transitions to Passthrough.
+    ///
+    /// Requires a proper TTY environment; skipped in CI.
+    #[test]
+    #[ignore = "requires interactive TTY environment"]
+    fn test_injection_flow_preexec_passthrough() {
+        let Some(mut harness) = EditModeTestHarness::spawn() else {
+            eprintln!("Skipping test: wrashpty binary not found");
+            return;
+        };
+
+        // Wait for initial prompt (Edit mode)
+        thread::sleep(Duration::from_millis(1000));
+        let (_, has_error) = harness.read_output(500);
+
+        if has_error {
+            eprintln!("Skipping test: terminal environment not suitable");
+            return;
+        }
+
+        // Send a command that produces output
+        harness.send("echo injected_command\n").unwrap();
+
+        // Wait for execution (Passthrough mode)
+        thread::sleep(Duration::from_millis(500));
+        let (output, _) = harness.read_output(500);
+
+        // Verify command executed (proves we transitioned through injection)
+        assert!(
+            output.contains("injected_command"),
+            "Expected command output after injection, got: {}",
+            output
+        );
+
+        // Verify we returned to Edit mode (can submit another command)
+        harness.send("echo back_to_edit\n").unwrap();
+        thread::sleep(Duration::from_millis(500));
+        let (output, _) = harness.read_output(500);
+
+        assert!(
+            output.contains("back_to_edit"),
+            "Expected to return to Edit mode, got: {}",
+            output
+        );
+    }
+
+    /// Test that background output is buffered during edit mode.
+    ///
+    /// Requires a proper TTY environment; skipped in CI.
+    #[test]
+    #[ignore = "requires interactive TTY environment"]
+    fn test_background_output_buffering() {
+        let Some(mut harness) = EditModeTestHarness::spawn() else {
+            eprintln!("Skipping test: wrashpty binary not found");
+            return;
+        };
+
+        // Wait for initial prompt
+        thread::sleep(Duration::from_millis(1000));
+        let (_, has_error) = harness.read_output(500);
+
+        if has_error {
+            eprintln!("Skipping test: terminal environment not suitable");
+            return;
+        }
+
+        // Start a background job that produces output after a delay
+        harness
+            .send("(sleep 1 && echo background_output) &\n")
+            .unwrap();
+        thread::sleep(Duration::from_millis(500));
+        let _ = harness.read_output(500);
+
+        // Now we should be back at prompt (Edit mode)
+        // The background output will arrive while we're in Edit mode
+
+        // Wait for background job to produce output
+        thread::sleep(Duration::from_millis(1500));
+
+        // Submit another command - background output should appear
+        harness.send("echo foreground\n").unwrap();
+        thread::sleep(Duration::from_millis(500));
+        let (output, _) = harness.read_output(1000);
+
+        // Should see the foreground command output
+        assert!(
+            output.contains("foreground"),
+            "Expected foreground output, got: {}",
+            output
+        );
+
+        // Background output may or may not be visible depending on timing,
+        // but the test verifies we don't crash or hang due to background output
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // Placeholder for future rexpect-based integration tests

@@ -33,7 +33,7 @@
 use std::io::Write;
 use std::os::unix::io::{AsRawFd, BorrowedFd, RawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -76,12 +76,21 @@ const EDIT_MODE_DRAIN_POLL_MS: i32 = 50;
 /// Buffer size for background PTY drain reads.
 const DRAIN_BUFFER_SIZE: usize = 4096;
 
+/// Maximum number of drain results to buffer in the channel.
+/// With 4KB per chunk, this caps memory at ~16MB for the channel.
+/// This accommodates verbose background jobs (builds, find, logs) while
+/// still preventing OOM from runaway output. When full, newest chunks
+/// are dropped to prevent blocking PTY reads.
+const DRAIN_CHANNEL_CAPACITY: usize = 4096;
+
 /// Result from the background PTY drain thread.
 struct DrainResult {
     /// Bytes read from the PTY.
     bytes: Vec<u8>,
     /// Whether EOF was detected.
     eof: bool,
+    /// Number of bytes dropped due to channel backpressure before this chunk.
+    dropped_bytes: usize,
 }
 
 /// RAII guard for the background PTY drain thread.
@@ -126,10 +135,16 @@ impl Drop for DrainGuard {
 /// Background PTY drain loop that runs while reedline blocks on input.
 ///
 /// This function continuously polls the PTY and reads any available data,
-/// sending it through a channel for later processing. This prevents background
-/// job output from backing up in the PTY buffer while the user is typing.
-fn pty_drain_loop(pty_fd: RawFd, stop: Arc<AtomicBool>, tx: Sender<DrainResult>) {
+/// sending it through a bounded channel for later processing. This prevents
+/// background job output from backing up in the PTY buffer while the user
+/// is typing.
+///
+/// When the channel is full (backpressure), chunks are dropped and the byte
+/// count is tracked. The dropped count is reported with the next successfully
+/// sent chunk so users are informed about dropped background output.
+fn pty_drain_loop(pty_fd: RawFd, stop: Arc<AtomicBool>, tx: SyncSender<DrainResult>) {
     let mut buf = [0u8; DRAIN_BUFFER_SIZE];
+    let mut pending_dropped_bytes: usize = 0;
 
     while !stop.load(Ordering::Relaxed) {
         // SAFETY: pty_fd is valid for the duration of Edit mode
@@ -145,10 +160,18 @@ fn pty_drain_loop(pty_fd: RawFd, stop: Arc<AtomicBool>, tx: Sender<DrainResult>)
 
         if let Some(revents) = pollfds[0].revents() {
             if revents.contains(PollFlags::POLLHUP) || revents.contains(PollFlags::POLLERR) {
-                let _ = tx.send(DrainResult {
+                // EOF detected - use try_send to avoid blocking if channel is full.
+                // If we can't send the EOF marker, just break - the receiver will
+                // detect EOF when it processes the channel contents.
+                let eof_result = DrainResult {
                     bytes: Vec::new(),
                     eof: true,
-                });
+                    dropped_bytes: pending_dropped_bytes,
+                };
+                match tx.try_send(eof_result) {
+                    Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
+                    Err(mpsc::TrySendError::Disconnected(_)) => {}
+                }
                 break;
             }
 
@@ -157,24 +180,47 @@ fn pty_drain_loop(pty_fd: RawFd, stop: Arc<AtomicBool>, tx: Sender<DrainResult>)
                 loop {
                     match read(pty_fd, &mut buf) {
                         Ok(0) => {
-                            let _ = tx.send(DrainResult {
+                            // EOF - use try_send to avoid blocking
+                            let eof_result = DrainResult {
                                 bytes: Vec::new(),
                                 eof: true,
-                            });
+                                dropped_bytes: pending_dropped_bytes,
+                            };
+                            let _ = tx.try_send(eof_result);
                             return;
                         }
                         Ok(n) => {
-                            let _ = tx.send(DrainResult {
+                            let result = DrainResult {
                                 bytes: buf[..n].to_vec(),
                                 eof: false,
-                            });
+                                dropped_bytes: pending_dropped_bytes,
+                            };
+                            // Use try_send for backpressure - don't block PTY reads
+                            match tx.try_send(result) {
+                                Ok(()) => {
+                                    // Successfully sent, reset dropped counter
+                                    pending_dropped_bytes = 0;
+                                }
+                                Err(mpsc::TrySendError::Full(dropped)) => {
+                                    // Channel full - drop this chunk and track bytes
+                                    pending_dropped_bytes =
+                                        pending_dropped_bytes.saturating_add(dropped.bytes.len());
+                                }
+                                Err(mpsc::TrySendError::Disconnected(_)) => {
+                                    // Receiver gone, stop draining
+                                    return;
+                                }
+                            }
                         }
                         Err(nix::errno::Errno::EAGAIN) => break,
                         Err(nix::errno::Errno::EIO) => {
-                            let _ = tx.send(DrainResult {
+                            // EIO means PTY closed - use try_send to avoid blocking
+                            let eof_result = DrainResult {
                                 bytes: Vec::new(),
                                 eof: true,
-                            });
+                                dropped_bytes: pending_dropped_bytes,
+                            };
+                            let _ = tx.try_send(eof_result);
                             return;
                         }
                         Err(_) => break,
@@ -446,10 +492,12 @@ impl App {
         let prompt = WrashPrompt::new(self.last_exit_code);
 
         // Start background PTY drain thread to continuously collect output
-        // while reedline blocks waiting for user input
+        // while reedline blocks waiting for user input.
+        // Use a bounded channel to prevent OOM from noisy background output.
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_flag_clone = stop_flag.clone();
-        let (tx, rx): (Sender<DrainResult>, Receiver<DrainResult>) = mpsc::channel();
+        let (tx, rx): (SyncSender<DrainResult>, Receiver<DrainResult>) =
+            mpsc::sync_channel(DRAIN_CHANNEL_CAPACITY);
         let pty_fd = self.pty.master_fd();
 
         let drain_handle: JoinHandle<()> = thread::spawn(move || {
@@ -477,11 +525,26 @@ impl App {
         // Collect and process all bytes from the drain thread
         let mut all_bytes = Vec::new();
         let mut eof_detected = false;
+        let mut channel_dropped_bytes: usize = 0;
         while let Ok(result) = rx.try_recv() {
             all_bytes.extend(result.bytes);
+            channel_dropped_bytes = channel_dropped_bytes.saturating_add(result.dropped_bytes);
             if result.eof {
                 eof_detected = true;
             }
+        }
+
+        // Warn user about bytes dropped due to channel backpressure
+        if channel_dropped_bytes > 0 {
+            warn!(
+                dropped_bytes = channel_dropped_bytes,
+                "Background drain channel full, {} bytes dropped", channel_dropped_bytes
+            );
+            let _ = writeln!(
+                std::io::stderr(),
+                "\x1b[33m[wrashpty: {} bytes of background output dropped due to channel backpressure]\x1b[0m",
+                channel_dropped_bytes
+            );
         }
 
         // Process collected bytes through the marker parser
@@ -489,6 +552,7 @@ impl App {
             debug!(
                 bytes = all_bytes.len(),
                 eof = eof_detected,
+                channel_dropped = channel_dropped_bytes,
                 "Processing bytes from background drain"
             );
             let parsed = self.pump.process_read_bytes(&all_bytes, eof_detected);
