@@ -247,7 +247,10 @@ impl Chrome {
         }
 
         let bottom_row = total_rows - 1;
-        let mut out = io::stdout();
+
+        // Lock stdout for atomic writes - prevents interleaving with other threads.
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
 
         // DECSTBM: Set scrolling region from row 2 to row (total_rows - 1)
         // This moves cursor to row 1 as a side effect.
@@ -280,7 +283,8 @@ impl Chrome {
     ///
     /// Returns an error if escape sequence cannot be written to stdout.
     pub fn reset_scroll_region() -> io::Result<()> {
-        let mut out = io::stdout();
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
         write!(out, "\x1b[r")?;
         out.flush()?;
         debug!("Scroll region reset to full screen");
@@ -325,8 +329,11 @@ impl Chrome {
             return Ok(());
         }
 
-        let mut out = io::stdout();
         let content = self.render_top_bar_content(cols as usize);
+
+        // Lock stdout for atomic writes - prevents interleaving with other threads.
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
 
         // Save cursor, move to row 1, clear line, draw content, restore cursor
         write!(out, "\x1b[s")?; // Save cursor position
@@ -358,8 +365,11 @@ impl Chrome {
             return Ok(());
         }
 
-        let mut out = io::stdout();
         let content = self.render_footer_content(cols as usize);
+
+        // Lock stdout for atomic writes - prevents interleaving with other threads.
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
 
         // Save cursor, move to last row, clear line, draw content, restore cursor
         write!(out, "\x1b[s")?; // Save cursor position
@@ -737,7 +747,11 @@ fn draw_footer_static(cols: u16, total_rows: u16) -> io::Result<()> {
         format!("{}{}", hints, " ".repeat(padding))
     };
 
-    let mut out = io::stdout();
+    // Lock stdout for atomic writes - prevents interleaving with other threads.
+    // This ensures all escape sequences are emitted together without corruption.
+    let stdout = io::stdout();
+    let mut out = stdout.lock();
+
     // Move to footer row and draw - DO NOT use save/restore cursor here!
     // Reedline will handle cursor positioning for its prompt.
     write!(out, "\x1b[{};1H", total_rows)?; // Move to last row
