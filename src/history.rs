@@ -3,6 +3,7 @@
 //! This module reads and parses bash history to provide history search
 //! and navigation in the reedline editor.
 
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
@@ -14,6 +15,10 @@ use tracing::{debug, info, warn};
 const MAX_HISTORY_LINES: usize = 10_000;
 
 /// Loads history entries from ~/.bash_history.
+///
+/// Uses a streaming approach with a bounded VecDeque to avoid loading the
+/// entire file into memory when histories are huge. Each line is processed
+/// as it's read, and oldest entries are dropped when the capacity is exceeded.
 ///
 /// Returns a vector of history entries, with oldest entries first.
 /// If the history file doesn't exist or is empty, returns an empty vector.
@@ -45,7 +50,10 @@ pub fn load_history() -> Result<Vec<String>> {
     };
 
     let reader = BufReader::new(file);
-    let mut history = Vec::new();
+
+    // Use a bounded VecDeque for streaming - avoids loading entire file
+    // before trimming when histories are huge
+    let mut history: VecDeque<String> = VecDeque::with_capacity(MAX_HISTORY_LINES);
     let mut line_number = 0;
     let mut skipped = 0;
 
@@ -64,7 +72,11 @@ pub fn load_history() -> Result<Vec<String>> {
                     continue;
                 }
 
-                history.push(line);
+                // Push to back, pop from front if over capacity
+                history.push_back(line);
+                if history.len() > MAX_HISTORY_LINES {
+                    history.pop_front();
+                }
             }
             Err(e) => {
                 warn!(line = line_number, error = %e, "Skipping corrupted history line");
@@ -73,12 +85,8 @@ pub fn load_history() -> Result<Vec<String>> {
         }
     }
 
-    // Enforce capacity limit by keeping only the last MAX_HISTORY_LINES entries
-    // This is O(n) instead of O(n²) from removing in the loop
-    if history.len() > MAX_HISTORY_LINES {
-        let drain_count = history.len() - MAX_HISTORY_LINES;
-        history.drain(..drain_count);
-    }
+    // Convert VecDeque to Vec for return
+    let history: Vec<String> = history.into();
 
     info!(
         entries = history.len(),
@@ -178,17 +186,18 @@ mod tests {
 
     #[test]
     fn test_history_capacity_limit_keeps_last_entries() {
-        // Test that we limit to MAX_HISTORY_LINES using O(n) drain approach
-        let mut history = Vec::new();
+        use std::collections::VecDeque;
+
+        // Test that we limit to MAX_HISTORY_LINES using streaming VecDeque approach
+        let mut history: VecDeque<String> = VecDeque::with_capacity(MAX_HISTORY_LINES);
         for i in 0..MAX_HISTORY_LINES + 100 {
-            history.push(format!("command {}", i));
+            history.push_back(format!("command {}", i));
+            if history.len() > MAX_HISTORY_LINES {
+                history.pop_front();
+            }
         }
 
-        // Apply the same capacity limit as load_history
-        if history.len() > MAX_HISTORY_LINES {
-            let drain_count = history.len() - MAX_HISTORY_LINES;
-            history.drain(..drain_count);
-        }
+        let history: Vec<String> = history.into();
 
         assert_eq!(history.len(), MAX_HISTORY_LINES);
         // Should have the last MAX_HISTORY_LINES entries
