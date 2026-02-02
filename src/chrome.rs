@@ -1,20 +1,21 @@
-//! Chrome layer for status bars and scroll regions.
+//! Chrome layer for status bar and scroll regions.
 //!
-//! This module manages the visual chrome (top bar, footer) using terminal
+//! This module manages the visual chrome (context bar) using terminal
 //! scroll regions to reserve screen real estate outside the shell area.
 //!
 //! # Architecture
 //!
 //! The chrome layer is orthogonal to the main Mode state machine. It can be
 //! enabled or disabled independently, and auto-suspends when the terminal
-//! is too small to display bars meaningfully.
+//! is too small to display the bar meaningfully.
 //!
-//! # Chrome Refresh
+//! # Strategic Snapshot Rendering
 //!
-//! Because reedline/crossterm may overwrite the footer during initialization,
-//! the `ChromeRefreshGuard` provides a background thread that periodically
-//! redraws the chrome bars during Edit mode. This ensures the bars remain
-//! visible even when reedline clears or repaints the terminal.
+//! The context bar is rendered once at state transitions (specifically when
+//! entering Edit mode) before reedline takes control. This eliminates
+//! flickering and cursor conflicts that would occur with continuous refresh.
+//! The bar displays rich context: exit code, command duration, current
+//! directory, git status, and timestamp.
 //!
 //! # Safety
 //!
@@ -23,21 +24,13 @@
 //! full-screen applications like vim and htop.
 
 use std::io::{self, Write};
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
-use std::sync::Arc;
-use std::thread::{self, JoinHandle};
+use std::path::Path;
 use std::time::Duration;
 
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, warn};
 use unicode_width::UnicodeWidthStr;
 
 use crate::types::ChromeMode;
-
-/// Refresh interval for chrome bars during Edit mode (30fps).
-const CHROME_REFRESH_INTERVAL: Duration = Duration::from_millis(33);
-
-/// Initial delay before first refresh to let reedline initialize.
-const CHROME_REFRESH_INITIAL_DELAY: Duration = Duration::from_millis(50);
 
 /// Minimum terminal columns for chrome to be active.
 const MIN_COLS: u16 = 20;
@@ -58,13 +51,13 @@ pub enum SizeCheckResult {
     Resumed,
 }
 
-/// Chrome layer manager for status bars and scroll regions.
+/// Chrome layer manager for status bar and scroll regions.
 ///
 /// The Chrome struct manages:
 /// - Mode state (Headless vs Full)
 /// - Auto-suspension when terminal is too small
 /// - Scroll region setup/reset
-/// - Top bar and footer rendering
+/// - Context bar rendering
 pub struct Chrome {
     /// Current chrome display mode.
     mode: ChromeMode,
@@ -72,6 +65,27 @@ pub struct Chrome {
     /// Whether chrome is temporarily suspended due to small terminal size.
     /// User preference (mode) is preserved and chrome resumes when terminal grows.
     suspended: bool,
+}
+
+/// Context information for rendering the chrome bar.
+///
+/// Contains all metadata needed to render a rich context bar showing
+/// command results, current location, and git status.
+pub struct ChromeContext<'a> {
+    /// Current working directory.
+    pub cwd: &'a Path,
+    /// Git branch name, if in a repository.
+    pub git_branch: Option<&'a str>,
+    /// Whether git working directory is dirty.
+    pub git_dirty: bool,
+    /// Exit code of the last command.
+    pub last_exit_code: i32,
+    /// The last command that was executed.
+    pub last_command: Option<&'a str>,
+    /// Duration of the last command execution.
+    pub last_duration: Option<Duration>,
+    /// Current timestamp string (HH:MM format).
+    pub timestamp: &'a str,
 }
 
 impl Chrome {
@@ -189,8 +203,8 @@ impl Chrome {
 
     /// Sets up the scroll region for chrome display.
     ///
-    /// Emits DECSTBM sequence to set scroll region from row 2 to row N-1,
-    /// reserving row 1 for top bar and row N for footer.
+    /// Emits DECSTBM sequence to set scroll region from row 2 to row N,
+    /// reserving row 1 for the context bar.
     ///
     /// **Note**: DECSTBM resets the cursor to the home position (top-left of
     /// scroll region). Use `setup_scroll_region_preserve_cursor` if you need
@@ -209,14 +223,14 @@ impl Chrome {
         }
 
         let mut out = io::stdout();
-        // DECSTBM: Set scrolling region from row 2 to row (total_rows - 1)
-        // Row 1 is for top bar, row total_rows is for footer
-        write!(out, "\x1b[2;{}r", total_rows - 1)?;
+        // DECSTBM: Set scrolling region from row 2 to row total_rows
+        // Row 1 is for context bar, rows 2-N are scroll region
+        write!(out, "\x1b[2;{}r", total_rows)?;
         out.flush()?;
 
         debug!(
             top = 2,
-            bottom = total_rows - 1,
+            bottom = total_rows,
             "Scroll region configured"
         );
         Ok(())
@@ -224,15 +238,14 @@ impl Chrome {
 
     /// Sets up the scroll region and positions cursor at bottom of region.
     ///
-    /// This function sets up the scroll region (rows 2 to N-1) and positions
+    /// This function sets up the scroll region (rows 2 to N) and positions
     /// the cursor at the bottom row of the scroll region. This ensures that
     /// subsequent command output will appear at the bottom and scroll naturally.
     ///
     /// **Important**: Reedline may leave the cursor outside the scroll region
-    /// (e.g., at the footer row) after accepting input. Simply restoring that
-    /// position would cause output to go to the wrong place. By explicitly
-    /// positioning the cursor inside the scroll region, we ensure proper
-    /// scrolling behavior.
+    /// after accepting input. Simply restoring that position would cause output
+    /// to go to the wrong place. By explicitly positioning the cursor inside
+    /// the scroll region, we ensure proper scrolling behavior.
     ///
     /// # Arguments
     ///
@@ -246,18 +259,18 @@ impl Chrome {
             return Ok(());
         }
 
-        let bottom_row = total_rows - 1;
+        let bottom_row = total_rows;
 
         // Lock stdout for atomic writes - prevents interleaving with other threads.
         let stdout = io::stdout();
         let mut out = stdout.lock();
 
-        // DECSTBM: Set scrolling region from row 2 to row (total_rows - 1)
+        // DECSTBM: Set scrolling region from row 2 to row total_rows
+        // Row 1 is for context bar, rows 2-N are scroll region
         // This moves cursor to row 1 as a side effect.
         write!(out, "\x1b[2;{}r", bottom_row)?;
 
-        // CRITICAL: Position cursor at bottom of scroll region (row N-1).
-        // Reedline may have left cursor at row N (footer area) after accepting input.
+        // CRITICAL: Position cursor at bottom of scroll region (row N).
         // If cursor is outside scroll region, output won't scroll properly.
         // By positioning at the bottom of scroll region, subsequent output will
         // appear there and scroll naturally when newlines are encountered.
@@ -312,26 +325,31 @@ impl Chrome {
         Ok(())
     }
 
-    /// Draws the top bar at row 1.
+    /// Renders the context bar with rich command and environment information.
     ///
-    /// Saves cursor position, draws bar content, and restores cursor.
-    /// Returns early if chrome is not active.
+    /// This is the single render point for chrome - called once at transition
+    /// to Edit mode before reedline takes control. The bar shows:
+    /// - Success/failure indicator (✓/✗)
+    /// - Command duration
+    /// - Current directory
+    /// - Git branch and dirty status
+    /// - Current time
     ///
     /// # Arguments
     ///
     /// * `cols` - Terminal width in columns
+    /// * `ctx` - Context information to display
     ///
     /// # Errors
     ///
     /// Returns an error if escape sequences cannot be written to stdout.
-    pub fn draw_top_bar(&self, cols: u16) -> io::Result<()> {
+    pub fn render_context_bar(&self, cols: u16, ctx: &ChromeContext) -> io::Result<()> {
         if !self.is_active() {
             return Ok(());
         }
 
-        let content = self.render_top_bar_content(cols as usize);
+        let content = self.format_context_bar(cols as usize, ctx);
 
-        // Lock stdout for atomic writes - prevents interleaving with other threads.
         let stdout = io::stdout();
         let mut out = stdout.lock();
 
@@ -343,93 +361,71 @@ impl Chrome {
         write!(out, "\x1b[u")?; // Restore cursor position
         out.flush()?;
 
-        debug!("Top bar drawn");
+        debug!("Context bar rendered");
         Ok(())
     }
 
-    /// Draws the footer bar at the last row.
+    /// Formats the context bar content with rich information.
     ///
-    /// Saves cursor position, draws bar content, and restores cursor.
-    /// Returns early if chrome is not active.
-    ///
-    /// # Arguments
-    ///
-    /// * `cols` - Terminal width in columns
-    /// * `total_rows` - Total terminal height in rows
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if escape sequences cannot be written to stdout.
-    pub fn draw_footer(&self, cols: u16, total_rows: u16) -> io::Result<()> {
-        if !self.is_active() {
-            return Ok(());
+    /// Layout: [✓/✗] [duration] [cwd] [git:branch●] [time]
+    fn format_context_bar(&self, max_width: usize, ctx: &ChromeContext) -> String {
+        // Build components
+        let status_icon = if ctx.last_exit_code == 0 { "✓" } else { "✗" };
+
+        let duration_str = if let Some(dur) = ctx.last_duration {
+            let secs = dur.as_secs_f64();
+            if secs < 1.0 {
+                format!("{:.1}s", secs)
+            } else {
+                format!("{:.1}s", secs)
+            }
+        } else {
+            String::new()
+        };
+
+        let cwd_str = ctx.cwd
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("/");
+
+        let git_str = if let Some(branch) = ctx.git_branch {
+            if ctx.git_dirty {
+                format!("{}●", branch)
+            } else {
+                branch.to_string()
+            }
+        } else {
+            String::new()
+        };
+
+        // Assemble bar content
+        let mut parts = Vec::new();
+        parts.push(format!(" {} ", status_icon));
+
+        if !duration_str.is_empty() {
+            parts.push(format!("{} ", duration_str));
         }
 
-        let content = self.render_footer_content(cols as usize);
+        parts.push(format!("{} ", cwd_str));
 
-        // Lock stdout for atomic writes - prevents interleaving with other threads.
-        let stdout = io::stdout();
-        let mut out = stdout.lock();
+        if !git_str.is_empty() {
+            parts.push(format!("git:{} ", git_str));
+        }
 
-        // Save cursor, move to last row, clear line, draw content, restore cursor
-        write!(out, "\x1b[s")?; // Save cursor position
-        write!(out, "\x1b[{};1H", total_rows)?; // Move to last row, column 1
-        write!(out, "\x1b[K")?; // Clear line
-        write!(out, "\x1b[7m{}\x1b[0m", content)?; // Reverse video for bar
-        write!(out, "\x1b[u")?; // Restore cursor position
-        out.flush()?;
+        parts.push(format!("{} ", ctx.timestamp));
 
-        debug!("Footer drawn");
-        Ok(())
-    }
+        let content = parts.join("");
+        let content_width = content.width();
 
-    /// Renders the top bar content with proper width handling.
-    ///
-    /// Displays the project name (current directory name) padded to fill
-    /// the available width. Truncates with "..." if too long.
-    fn render_top_bar_content(&self, max_width: usize) -> String {
-        let project_name = Self::get_project_name();
-        let label = format!(" {} ", project_name);
-        let label_width = label.width();
-
-        if label_width > max_width {
-            // Truncate and add ellipsis
-            let truncated = Self::truncate_to_width(&label, max_width.saturating_sub(3));
+        if content_width > max_width {
+            // Truncate with ellipsis
+            let truncated = Self::truncate_to_width(&content, max_width.saturating_sub(3));
             format!("{}...", truncated)
         } else {
             // Pad to full width
-            let padding = max_width.saturating_sub(label_width);
-            format!("{}{}", label, " ".repeat(padding))
+            let padding = max_width.saturating_sub(content_width);
+            format!("{}{}", content, " ".repeat(padding))
         }
-    }
-
-    /// Renders the footer content with keybinding hints.
-    ///
-    /// Displays keyboard shortcuts padded to fill the available width.
-    /// Truncates if too long for the terminal.
-    fn render_footer_content(&self, max_width: usize) -> String {
-        let hints = " Tab: complete | Ctrl+R: search | Ctrl+C: clear | Ctrl+D: exit ";
-        let hints_width = hints.width();
-
-        if hints_width > max_width {
-            // Truncate to fit
-            let truncated = Self::truncate_to_width(hints, max_width);
-            truncated.to_string()
-        } else {
-            // Pad to full width
-            let padding = max_width.saturating_sub(hints_width);
-            format!("{}{}", hints, " ".repeat(padding))
-        }
-    }
-
-    /// Gets the project name from the current directory.
-    ///
-    /// Falls back to "wrashpty" if current directory cannot be determined.
-    fn get_project_name() -> String {
-        std::env::current_dir()
-            .ok()
-            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-            .unwrap_or_else(|| "wrashpty".to_string())
     }
 
     /// Truncates a string to fit within the specified display width.
@@ -452,9 +448,9 @@ impl Chrome {
         &s[..last_valid_idx]
     }
 
-    /// Clears the content area (between chrome bars) and positions cursor.
+    /// Clears the content area (the scroll region) and positions cursor.
     ///
-    /// Clears rows 2 to N-1 (the scroll region area) and positions the cursor
+    /// Clears rows 2 through N (the scroll region area) and positions the cursor
     /// at row 2, column 1. This provides a clean slate after fullscreen apps
     /// or commands, ensuring predictable prompt positioning.
     ///
@@ -477,8 +473,8 @@ impl Chrome {
         let stdout = io::stdout();
         let mut out = stdout.lock();
 
-        // Clear each row in the content area (rows 2 to N-1)
-        for row in 2..total_rows {
+        // Clear each row in the content area (rows 2 through total_rows inclusive)
+        for row in 2..=total_rows {
             write!(out, "\x1b[{};1H", row)?; // Move to row
             write!(out, "\x1b[K")?; // Clear line
         }
@@ -491,41 +487,37 @@ impl Chrome {
         Ok(())
     }
 
-    /// Clears the chrome bars from the terminal.
+    /// Clears the context bar from the terminal.
     ///
     /// **Note**: This function moves the cursor. The caller should save/restore
     /// cursor position if needed.
     ///
     /// # Arguments
     ///
-    /// * `total_rows` - Total terminal height in rows
+    /// * `_total_rows` - Total terminal height (unused, kept for API compatibility)
     ///
     /// # Errors
     ///
     /// Returns an error if escape sequences cannot be written to stdout.
-    pub fn clear_bars(&self, total_rows: u16) -> io::Result<()> {
+    pub fn clear_bars(&self, _total_rows: u16) -> io::Result<()> {
         // Lock stdout for atomic writes - prevents interleaving with other threads.
         let stdout = io::stdout();
         let mut out = stdout.lock();
 
-        // Clear top bar
+        // Clear top bar (context bar)
         write!(out, "\x1b[1;1H")?; // Move to row 1
         write!(out, "\x1b[K")?; // Clear line
 
-        // Clear footer
-        write!(out, "\x1b[{};1H", total_rows)?; // Move to last row
-        write!(out, "\x1b[K")?; // Clear line
-
         out.flush()?;
-        debug!("Chrome bars cleared");
+        debug!("Context bar cleared");
         Ok(())
     }
 
     /// Toggles chrome mode with full terminal update.
     ///
     /// Handles all visual updates when switching between Headless and Full:
-    /// - Enabling: Sets up scroll region and draws bars
-    /// - Disabling: Clears bars and resets scroll region
+    /// - Enabling: Sets up scroll region (caller should render context bar)
+    /// - Disabling: Clears bar and resets scroll region
     ///
     /// # Arguments
     ///
@@ -540,13 +532,12 @@ impl Chrome {
             ChromeMode::Headless => {
                 // Enabling chrome
                 self.mode = ChromeMode::Full;
-                // Just check size - we proceed to draw if is_active() regardless of transition
+                // Just check size - we proceed to setup if is_active() regardless of transition
                 let _ = self.check_minimum_size(cols, rows);
 
                 if self.is_active() {
                     self.setup_scroll_region(rows)?;
-                    self.draw_top_bar(cols)?;
-                    self.draw_footer(cols, rows)?;
+                    // Note: Caller should render context bar with proper context
                 }
                 info!("Chrome enabled");
             }
@@ -562,225 +553,6 @@ impl Chrome {
         }
         Ok(())
     }
-
-    /// Redraws chrome bars if active.
-    ///
-    /// Called on SIGWINCH to update bars after terminal resize.
-    ///
-    /// # Arguments
-    ///
-    /// * `cols` - Terminal width in columns
-    /// * `rows` - Terminal height in rows
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if drawing operations fail.
-    pub fn redraw_if_active(&self, cols: u16, rows: u16) -> io::Result<()> {
-        if self.is_active() {
-            self.draw_top_bar(cols)?;
-            self.draw_footer(cols, rows)?;
-        }
-        Ok(())
-    }
-}
-
-/// Shared state for the chrome refresh thread.
-///
-/// Contains atomic values that can be safely accessed from both the main
-/// thread and the refresh thread.
-struct RefreshState {
-    /// Flag to signal the refresh thread to stop.
-    stop: AtomicBool,
-    /// Current terminal width (updated on resize).
-    cols: AtomicU16,
-    /// Current terminal height (updated on resize).
-    rows: AtomicU16,
-    /// Whether chrome is currently active.
-    active: AtomicBool,
-}
-
-/// RAII guard for the chrome refresh background thread.
-///
-/// While this guard is alive, a background thread periodically redraws the
-/// chrome bars (top bar and footer). This compensates for reedline/crossterm
-/// potentially overwriting the bars during terminal operations.
-///
-/// The thread is automatically stopped when the guard is dropped.
-///
-/// # Usage
-///
-/// ```ignore
-/// // Start refresh before reedline takes control
-/// let refresh_guard = ChromeRefreshGuard::start(cols, rows, chrome.is_active());
-///
-/// // reedline.read_line() blocks here...
-/// // Background thread keeps footer visible
-///
-/// // Guard dropped, thread stops
-/// drop(refresh_guard);
-/// ```
-pub struct ChromeRefreshGuard {
-    /// Shared state with the refresh thread.
-    state: Arc<RefreshState>,
-    /// Handle to the refresh thread.
-    handle: Option<JoinHandle<()>>,
-}
-
-impl ChromeRefreshGuard {
-    /// Starts the chrome refresh background thread.
-    ///
-    /// The thread will periodically redraw the chrome bars at approximately
-    /// 30fps while `active` is true. It respects terminal dimensions and
-    /// will stop when the guard is dropped.
-    ///
-    /// # Arguments
-    ///
-    /// * `cols` - Initial terminal width
-    /// * `rows` - Initial terminal height
-    /// * `active` - Whether chrome is currently active
-    pub fn start(cols: u16, rows: u16, active: bool) -> Self {
-        let state = Arc::new(RefreshState {
-            stop: AtomicBool::new(false),
-            cols: AtomicU16::new(cols),
-            rows: AtomicU16::new(rows),
-            active: AtomicBool::new(active),
-        });
-
-        let state_clone = Arc::clone(&state);
-        let handle = thread::spawn(move || {
-            chrome_refresh_loop(state_clone);
-        });
-
-        debug!("Chrome refresh thread started");
-
-        Self {
-            state,
-            handle: Some(handle),
-        }
-    }
-
-    /// Updates the terminal dimensions for the refresh thread.
-    ///
-    /// Call this when the terminal is resized (SIGWINCH) to ensure the
-    /// refresh thread draws bars at the correct positions.
-    pub fn update_size(&self, cols: u16, rows: u16) {
-        self.state.cols.store(cols, Ordering::Relaxed);
-        self.state.rows.store(rows, Ordering::Relaxed);
-    }
-
-    /// Updates whether chrome is active.
-    ///
-    /// When inactive, the refresh thread will skip drawing.
-    pub fn set_active(&self, active: bool) {
-        self.state.active.store(active, Ordering::Relaxed);
-    }
-
-    /// Stops the refresh thread and waits for it to finish.
-    pub fn stop(&mut self) {
-        self.state.stop.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-            debug!("Chrome refresh thread stopped");
-        }
-    }
-}
-
-impl Drop for ChromeRefreshGuard {
-    fn drop(&mut self) {
-        self.stop();
-    }
-}
-
-/// Background loop that periodically redraws chrome bars.
-///
-/// This function runs in a dedicated thread and redraws the footer
-/// at regular intervals to compensate for reedline potentially
-/// overwriting it.
-fn chrome_refresh_loop(state: Arc<RefreshState>) {
-    // Initial delay to let reedline do its setup/clearing
-    thread::sleep(CHROME_REFRESH_INITIAL_DELAY);
-
-    while !state.stop.load(Ordering::Relaxed) {
-        if state.active.load(Ordering::Relaxed) {
-            // Query current terminal size to handle resizes correctly.
-            // This adds one syscall per refresh but ensures correct positioning.
-            let (cols, rows) = match crossterm::terminal::size() {
-                Ok((c, r)) => (c, r),
-                Err(_) => {
-                    // Fall back to stored values if query fails
-                    (
-                        state.cols.load(Ordering::Relaxed),
-                        state.rows.load(Ordering::Relaxed),
-                    )
-                }
-            };
-
-            // Redraw footer (the part most likely to be overwritten)
-            if let Err(e) = draw_footer_static(cols, rows) {
-                trace!("Chrome refresh failed: {}", e);
-            }
-        }
-
-        thread::sleep(CHROME_REFRESH_INTERVAL);
-    }
-}
-
-/// Draws the footer without requiring a Chrome instance.
-///
-/// This is a static version used by the refresh thread which doesn't
-/// have access to the Chrome struct.
-///
-/// **IMPORTANT**: This function does NOT use cursor save/restore (`\x1b[s`/`\x1b[u`)
-/// because those sequences share a single buffer at the terminal level. When this
-/// function runs concurrently with reedline (which also manipulates cursor state),
-/// save/restore would corrupt cursor positioning, causing prompts to become invisible.
-///
-/// Instead, we move cursor to the footer row, draw, and leave it there. Reedline
-/// manages its own cursor positioning and will move it back to the input line.
-fn draw_footer_static(cols: u16, total_rows: u16) -> io::Result<()> {
-    let hints = " Tab: complete | Ctrl+R: search | Ctrl+C: clear | Ctrl+D: exit ";
-    let hints_width = hints.width();
-    let max_width = cols as usize;
-
-    let content = if hints_width > max_width {
-        // Truncate to fit
-        truncate_to_width_static(hints, max_width).to_string()
-    } else {
-        // Pad to full width
-        let padding = max_width.saturating_sub(hints_width);
-        format!("{}{}", hints, " ".repeat(padding))
-    };
-
-    // Lock stdout for atomic writes - prevents interleaving with other threads.
-    // This ensures all escape sequences are emitted together without corruption.
-    let stdout = io::stdout();
-    let mut out = stdout.lock();
-
-    // Move to footer row and draw - DO NOT use save/restore cursor here!
-    // Reedline will handle cursor positioning for its prompt.
-    write!(out, "\x1b[{};1H", total_rows)?; // Move to last row
-    write!(out, "\x1b[K")?; // Clear line
-    write!(out, "\x1b[7m{}\x1b[0m", content)?; // Reverse video
-    out.flush()?;
-
-    Ok(())
-}
-
-/// Static version of truncate_to_width for the refresh thread.
-fn truncate_to_width_static(s: &str, max_width: usize) -> &str {
-    let mut current_width = 0;
-    let mut last_valid_idx = 0;
-
-    for (idx, ch) in s.char_indices() {
-        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if current_width + ch_width > max_width {
-            break;
-        }
-        current_width += ch_width;
-        last_valid_idx = idx + ch.len_utf8();
-    }
-
-    &s[..last_valid_idx]
 }
 
 #[cfg(test)]
@@ -876,40 +648,86 @@ mod tests {
     }
 
     #[test]
-    fn test_get_project_name_returns_string() {
-        // Should return some string, either current dir name or fallback
-        let name = Chrome::get_project_name();
-        assert!(!name.is_empty());
+    fn test_format_context_bar_success() {
+        let chrome = Chrome::new(ChromeMode::Full);
+        let cwd = Path::new("/home/user/project");
+        let ctx = ChromeContext {
+            cwd,
+            git_branch: Some("main"),
+            git_dirty: false,
+            last_exit_code: 0,
+            last_command: Some("echo test"),
+            last_duration: Some(Duration::from_millis(123)),
+            timestamp: "14:32",
+        };
+
+        let result = chrome.format_context_bar(80, &ctx);
+
+        assert!(result.contains("✓"));
+        assert!(result.contains("0.1s"));
+        assert!(result.contains("project"));
+        assert!(result.contains("main"));
+        assert!(result.contains("14:32"));
+        assert_eq!(result.width(), 80);
     }
 
     #[test]
-    fn test_render_top_bar_content_fits() {
+    fn test_format_context_bar_failure() {
         let chrome = Chrome::new(ChromeMode::Full);
-        let content = chrome.render_top_bar_content(80);
-        assert_eq!(content.width(), 80);
+        let cwd = Path::new("/tmp");
+        let ctx = ChromeContext {
+            cwd,
+            git_branch: None,
+            git_dirty: false,
+            last_exit_code: 1,
+            last_command: Some("false"),
+            last_duration: Some(Duration::from_millis(50)),
+            timestamp: "14:33",
+        };
+
+        let result = chrome.format_context_bar(80, &ctx);
+
+        assert!(result.contains("✗"));
+        assert!(!result.contains("git:"));
     }
 
     #[test]
-    fn test_render_top_bar_content_truncates() {
+    fn test_format_context_bar_with_dirty_git() {
         let chrome = Chrome::new(ChromeMode::Full);
-        let content = chrome.render_top_bar_content(10);
-        // Should be truncated to fit
-        assert!(content.width() <= 10);
-        assert!(content.ends_with("...") || content.width() == 10);
+        let cwd = Path::new("/home/user/project");
+        let ctx = ChromeContext {
+            cwd,
+            git_branch: Some("feature"),
+            git_dirty: true,
+            last_exit_code: 0,
+            last_command: None,
+            last_duration: None,
+            timestamp: "14:34",
+        };
+
+        let result = chrome.format_context_bar(80, &ctx);
+
+        assert!(result.contains("feature●"));
     }
 
     #[test]
-    fn test_render_footer_content_fits() {
+    fn test_format_context_bar_truncation() {
         let chrome = Chrome::new(ChromeMode::Full);
-        let content = chrome.render_footer_content(80);
-        assert_eq!(content.width(), 80);
-    }
+        let cwd = Path::new("/very/long/path/to/project/directory");
+        let ctx = ChromeContext {
+            cwd,
+            git_branch: Some("feature/very-long-branch-name"),
+            git_dirty: true,
+            last_exit_code: 0,
+            last_command: Some("very long command"),
+            last_duration: Some(Duration::from_secs(123)),
+            timestamp: "14:32",
+        };
 
-    #[test]
-    fn test_render_footer_content_truncates() {
-        let chrome = Chrome::new(ChromeMode::Full);
-        let content = chrome.render_footer_content(20);
-        assert!(content.width() <= 20);
+        let result = chrome.format_context_bar(40, &ctx);
+
+        assert!(result.width() <= 40);
+        assert!(result.contains("..."));
     }
 
     #[test]
