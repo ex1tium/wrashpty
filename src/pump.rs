@@ -51,6 +51,17 @@ use smallvec::SmallVec;
 use crate::marker::{MarkerParser, ParseOutput};
 use crate::types::MarkerEvent;
 
+/// Result of a non-blocking PTY read for Edit mode buffering.
+#[derive(Debug)]
+pub struct EditModeReadResult {
+    /// Bytes read from PTY (to be buffered, not written to stdout).
+    pub bytes: Vec<u8>,
+    /// Any markers detected during the read.
+    pub markers: MarkerVec,
+    /// Whether PTY EOF was detected.
+    pub eof: bool,
+}
+
 /// Inline capacity for marker events in a single read.
 /// Most reads contain 0-2 markers; this avoids heap allocation for common cases.
 pub type MarkerVec = SmallVec<[MarkerEvent; 2]>;
@@ -221,7 +232,9 @@ impl Pump {
         // and signal_fd (if present) is owned by the signal handler which outlives Pump.
         let stdin_fd = unsafe { BorrowedFd::borrow_raw(STDIN_FILENO) };
         let pty_fd = unsafe { BorrowedFd::borrow_raw(self.pty_fd) };
-        let signal_fd = self.signal_fd.map(|fd| unsafe { BorrowedFd::borrow_raw(fd) });
+        let signal_fd = self
+            .signal_fd
+            .map(|fd| unsafe { BorrowedFd::borrow_raw(fd) });
 
         // Build poll array dynamically based on state.
         // Max 3 fds: stdin (optional), PTY (always), signal (optional).
@@ -414,6 +427,184 @@ impl Pump {
                 Ok(PumpResult::PtyEof)
             }
             Err(e) => Err(e).context("Failed to read PTY"),
+        }
+    }
+
+    /// Non-blocking read from PTY for Edit mode background output buffering.
+    ///
+    /// This method polls the PTY with zero timeout and returns any available
+    /// bytes and markers WITHOUT writing to stdout. The caller is responsible
+    /// for buffering the bytes and handling markers.
+    ///
+    /// This is used during Edit mode to capture background job output without
+    /// corrupting the reedline display.
+    ///
+    /// The method loops with zero-timeout polls to fully drain the PTY backlog
+    /// in a single call, ensuring all pending output is captured.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(result)` - Contains bytes to buffer, markers to handle, and EOF flag
+    /// - `Err(_)` - I/O error occurred
+    pub fn poll_pty_nonblocking(&mut self) -> Result<EditModeReadResult> {
+        // Check for stale partial sequences first
+        let mut result = EditModeReadResult {
+            bytes: Vec::new(),
+            markers: MarkerVec::new(),
+            eof: false,
+        };
+
+        // Flush any stale sequences
+        if self.marker_parser.is_mid_sequence()
+            && self.last_activity_time.elapsed() > STALE_SEQUENCE_THRESHOLD
+        {
+            if let Some(stale_bytes) = self.marker_parser.flush_stale() {
+                result.bytes.extend_from_slice(stale_bytes);
+                tracing::warn!("Flushed stale marker sequence during edit mode");
+            }
+        }
+
+        // Loop to fully drain the PTY backlog
+        loop {
+            // SAFETY: pty_fd is owned by Pty which outlives Pump
+            let pty_fd = unsafe { BorrowedFd::borrow_raw(self.pty_fd) };
+            let mut pollfds = [PollFd::new(&pty_fd, PollFlags::POLLIN)];
+
+            // Zero timeout for non-blocking poll
+            match poll(&mut pollfds, 0) {
+                Ok(_) => {}
+                Err(nix::errno::Errno::EINTR) => continue, // Interrupted, retry poll
+                Err(e) => return Err(e).context("Non-blocking poll failed"),
+            }
+
+            // Check if PTY has data
+            if let Some(revents) = pollfds[0].revents() {
+                if revents.contains(PollFlags::POLLHUP) || revents.contains(PollFlags::POLLERR) {
+                    // PTY closed - read remaining data then signal EOF
+                    let had_data = self.read_pty_to_buffer(&mut result)?;
+                    if !had_data {
+                        result.eof = true;
+                    }
+                    break;
+                } else if revents.contains(PollFlags::POLLIN) {
+                    let had_data = self.read_pty_to_buffer(&mut result)?;
+                    if !had_data {
+                        // No more data available (EAGAIN), stop draining
+                        break;
+                    }
+                    // Continue loop to check for more data
+                } else {
+                    // No readable events, stop draining
+                    break;
+                }
+            } else {
+                // No events at all, stop draining
+                break;
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Processes pre-read bytes through the marker parser.
+    ///
+    /// This is used during Edit mode when a background thread has already
+    /// read bytes from the PTY. The bytes are fed through the marker parser
+    /// and results are returned without performing any PTY I/O.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - Raw bytes previously read from the PTY
+    /// * `is_eof` - Whether EOF was detected when reading these bytes
+    ///
+    /// # Returns
+    ///
+    /// An `EditModeReadResult` containing parsed bytes, markers, and EOF status.
+    pub fn process_read_bytes(&mut self, bytes: &[u8], is_eof: bool) -> EditModeReadResult {
+        let mut result = EditModeReadResult {
+            bytes: Vec::new(),
+            markers: MarkerVec::new(),
+            eof: is_eof,
+        };
+
+        // Check for stale sequences first
+        if self.marker_parser.is_mid_sequence()
+            && self.last_activity_time.elapsed() > STALE_SEQUENCE_THRESHOLD
+        {
+            if let Some(stale_bytes) = self.marker_parser.flush_stale() {
+                result.bytes.extend_from_slice(stale_bytes);
+                tracing::warn!("Flushed stale marker sequence during background drain");
+            }
+        }
+
+        // Process the provided bytes through the marker parser
+        for output in self.marker_parser.feed(bytes) {
+            match output {
+                ParseOutput::Bytes(cow_bytes) => {
+                    result.bytes.extend_from_slice(&cow_bytes);
+                }
+                ParseOutput::Marker(marker) => {
+                    tracing::debug!(?marker, "Marker detected during background drain");
+                    result.markers.push(marker);
+                }
+            }
+        }
+
+        if !bytes.is_empty() {
+            self.last_activity_time = Instant::now();
+        }
+
+        result
+    }
+
+    /// Reads PTY data into a buffer result (for Edit mode).
+    ///
+    /// Unlike forward_pty_to_stdout, this collects bytes instead of writing them.
+    /// Loops reading until `EAGAIN` or EOF to fully drain available data.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(true)` - Data was read successfully
+    /// - `Ok(false)` - No data available (EAGAIN) or EOF reached
+    fn read_pty_to_buffer(&mut self, result: &mut EditModeReadResult) -> Result<bool> {
+        let mut buf = [0u8; BUFFER_SIZE];
+        let mut read_any = false;
+
+        // Loop reading until EAGAIN or EOF to fully drain the backlog
+        loop {
+            match read(self.pty_fd, &mut buf) {
+                Ok(0) => {
+                    tracing::info!("PTY EOF detected during edit mode read");
+                    result.eof = true;
+                    return Ok(read_any);
+                }
+                Ok(n) => {
+                    read_any = true;
+                    for output in self.marker_parser.feed(&buf[..n]) {
+                        match output {
+                            ParseOutput::Bytes(cow_bytes) => {
+                                result.bytes.extend_from_slice(&cow_bytes);
+                            }
+                            ParseOutput::Marker(marker) => {
+                                tracing::debug!(?marker, "Marker detected during edit mode");
+                                result.markers.push(marker);
+                            }
+                        }
+                    }
+                    self.last_activity_time = Instant::now();
+                    // Continue loop to read more data
+                }
+                Err(nix::errno::Errno::EAGAIN) => {
+                    // No more data available, done draining
+                    return Ok(read_any);
+                }
+                Err(nix::errno::Errno::EIO) => {
+                    tracing::info!("PTY EIO detected during edit mode read");
+                    result.eof = true;
+                    return Ok(read_any);
+                }
+                Err(e) => return Err(e).context("Failed to read PTY in edit mode"),
+            }
         }
     }
 }

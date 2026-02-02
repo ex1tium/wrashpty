@@ -7,9 +7,11 @@
 #![allow(dead_code)]
 
 use anyhow::{Context, Result};
+use nix::sys::termios::{LocalFlags, SetArg, Termios, tcgetattr, tcsetattr};
 use portable_pty::{Child, CommandBuilder, ExitStatus, MasterPty, PtySize, native_pty_system};
 use std::io::Write;
-use std::os::unix::io::RawFd;
+use std::os::fd::{BorrowedFd, RawFd};
+use tracing::debug;
 
 /// Wrapper around a pseudo-terminal with a spawned Bash process.
 ///
@@ -193,6 +195,102 @@ impl Pty {
     pub fn wait(&mut self) -> Result<ExitStatus> {
         self.child.wait().context("Failed to wait for child")
     }
+
+    /// Creates an echo guard for command injection.
+    ///
+    /// The returned guard temporarily disables echo on the PTY to prevent
+    /// injected commands from being echoed back. When the guard is dropped,
+    /// echo is automatically restored.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if terminal attributes cannot be read or modified.
+    pub fn create_echo_guard(&self) -> Result<EchoGuard> {
+        EchoGuard::new(self.master_fd())
+    }
+}
+
+/// RAII guard for echo suppression during command injection.
+///
+/// When created, this guard disables the ECHO flag on the PTY terminal.
+/// When dropped, it restores the original terminal settings. This prevents
+/// injected commands from being echoed back to the terminal.
+///
+/// # Example
+///
+/// ```no_run
+/// use wrashpty::pty::Pty;
+///
+/// let pty = Pty::spawn("/tmp/bashrc", 80, 24).unwrap();
+/// {
+///     let _guard = pty.create_echo_guard().unwrap();
+///     // Echo is now disabled
+///     // ... inject command ...
+/// } // Guard drops here, echo is restored
+/// ```
+pub struct EchoGuard {
+    /// The PTY file descriptor.
+    pty_fd: RawFd,
+    /// Original terminal settings to restore on drop.
+    original_termios: Termios,
+}
+
+impl EchoGuard {
+    /// Creates a new echo guard for the given PTY file descriptor.
+    ///
+    /// # Arguments
+    ///
+    /// * `pty_fd` - The PTY master file descriptor
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if terminal attributes cannot be read or modified.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure the file descriptor is valid for the lifetime
+    /// of the EchoGuard.
+    fn new(pty_fd: RawFd) -> Result<Self> {
+        // SAFETY: The file descriptor comes from the PTY which is owned by App.
+        // The EchoGuard is short-lived (only during command injection) and the
+        // PTY outlives it.
+        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(pty_fd) };
+
+        // Save original settings
+        let original_termios =
+            tcgetattr(borrowed_fd).context("Failed to get PTY terminal attributes")?;
+
+        // Create modified settings with ECHO disabled
+        let mut no_echo = original_termios.clone();
+        no_echo.local_flags &= !LocalFlags::ECHO;
+
+        // Apply the no-echo settings
+        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(pty_fd) };
+        tcsetattr(borrowed_fd, SetArg::TCSANOW, &no_echo).context("Failed to disable PTY echo")?;
+
+        debug!("Echo suppression enabled on PTY");
+
+        Ok(Self {
+            pty_fd,
+            original_termios,
+        })
+    }
+}
+
+impl Drop for EchoGuard {
+    fn drop(&mut self) {
+        // SAFETY: The file descriptor was valid when the guard was created,
+        // and this is best-effort cleanup during Drop.
+        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(self.pty_fd) };
+
+        // Restore original settings - ignore errors in Drop
+        if let Err(e) = tcsetattr(borrowed_fd, SetArg::TCSANOW, &self.original_termios) {
+            // Log at debug level since this is best-effort cleanup
+            debug!("Failed to restore PTY echo (best-effort): {}", e);
+        } else {
+            debug!("Echo suppression disabled, original settings restored");
+        }
+    }
 }
 
 impl Drop for Pty {
@@ -285,6 +383,74 @@ mod tests {
         pty.write_command("exit")
             .expect("Exit write_command failed");
 
+        let exit_status = pty.wait().expect("Failed to wait for child");
+        assert!(exit_status.success(), "Child should exit successfully");
+    }
+
+    #[test]
+    fn test_echo_guard_creation_succeeds() {
+        // Create temporary empty bashrc file
+        let bashrc = NamedTempFile::new().expect("Failed to create temp file");
+        let bashrc_path = bashrc.path().to_str().expect("Invalid path");
+
+        let mut pty = Pty::spawn(bashrc_path, 80, 24).expect("Failed to spawn PTY");
+
+        // Create guard - should succeed
+        {
+            let _guard = pty
+                .create_echo_guard()
+                .expect("Failed to create echo guard");
+            // Guard is active here - echo should be suppressed
+        }
+        // Guard dropped - echo should be restored
+
+        // Clean up
+        pty.write_command("exit").expect("Failed to write command");
+        pty.wait().expect("Failed to wait for child");
+    }
+
+    #[test]
+    fn test_echo_guard_multiple_sequential_guards() {
+        // Create temporary empty bashrc file
+        let bashrc = NamedTempFile::new().expect("Failed to create temp file");
+        let bashrc_path = bashrc.path().to_str().expect("Invalid path");
+
+        let mut pty = Pty::spawn(bashrc_path, 80, 24).expect("Failed to spawn PTY");
+
+        // Create and drop multiple guards sequentially
+        for i in 0..3 {
+            let _guard = pty
+                .create_echo_guard()
+                .unwrap_or_else(|_| panic!("Failed to create echo guard iteration {}", i));
+            // Guard drops at end of iteration
+        }
+
+        // PTY should still be functional
+        pty.write_command("exit").expect("Failed to write command");
+        let exit_status = pty.wait().expect("Failed to wait for child");
+        assert!(exit_status.success(), "Child should exit successfully");
+    }
+
+    #[test]
+    fn test_echo_guard_write_command_during_suppression() {
+        // Create temporary empty bashrc file
+        let bashrc = NamedTempFile::new().expect("Failed to create temp file");
+        let bashrc_path = bashrc.path().to_str().expect("Invalid path");
+
+        let mut pty = Pty::spawn(bashrc_path, 80, 24).expect("Failed to spawn PTY");
+
+        // Create guard and write command while echo is suppressed
+        {
+            let _guard = pty
+                .create_echo_guard()
+                .expect("Failed to create echo guard");
+            pty.write_command("echo test")
+                .expect("Failed to write command with echo guard active");
+        }
+        // Guard drops here
+
+        // Clean up
+        pty.write_command("exit").expect("Failed to write command");
         let exit_status = pty.wait().expect("Failed to wait for child");
         assert!(exit_status.success(), "Child should exit successfully");
     }
