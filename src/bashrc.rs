@@ -241,11 +241,7 @@ mod tests {
 
         // Token should be valid ASCII hex
         for &b in &token {
-            assert!(
-                b.is_ascii_hexdigit(),
-                "Token byte {:02x} is not hex",
-                b
-            );
+            assert!(b.is_ascii_hexdigit(), "Token byte {:02x} is not hex", b);
         }
 
         // Clean up

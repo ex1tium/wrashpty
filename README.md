@@ -151,11 +151,24 @@ cargo test --test marker_tests
 - Test job control: `sleep 100`, Ctrl+Z, `fg`.
 - Benchmark throughput: `time cat /dev/urandom | head -c 100M > /dev/null`.
 
+## Edit Mode Features
+
+Edit mode provides a rich line editing experience:
+
+- **Command editing** — Full line editing with cursor movement, delete, backspace
+- **History navigation** — Up/Down arrows navigate through command history
+- **History search** — Ctrl+R for interactive reverse search through history
+- **Line clearing** — Ctrl+C clears the current line without exiting
+- **Exit** — Ctrl+D at empty prompt exits the shell
+- **Background output** — Output from background jobs is buffered during editing and displayed before the next prompt
+
+History is loaded from `~/.bash_history` (last 10,000 entries) at startup.
+
 ## Roadmap
 
 - [x] Architecture and design documentation
-- [ ] **Phase 0: Foundation** — PTY spawn, marker parser with session tokens, passthrough byte pump, terminal safety (RAII guards with fallback), SIGWINCH/SIGCHLD handling
-- [ ] **Phase 1: Edit Mode** — Mode state machine, reedline integration, EchoGuard for echo suppression, command injection with deadlock prevention, history loading
+- [x] **Phase 0: Foundation** — PTY spawn, marker parser with session tokens, passthrough byte pump, terminal safety (RAII guards with fallback), SIGWINCH/SIGCHLD handling
+- [x] **Phase 1: Edit Mode** — Mode state machine, reedline integration, EchoGuard for echo suppression, command injection with deadlock prevention, history loading
 - [ ] **Phase 2: Features** — Autosuggestions, filesystem/PATH/git completions, Ctrl+R history search, prefix-filtered navigation
 - [ ] **Phase 3: Chrome** (Optional) — Top bar/footer, scroll regions, alternate screen detection (CSI parser), git status caching, minimum size handling
 
