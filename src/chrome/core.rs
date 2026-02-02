@@ -23,13 +23,17 @@
 //! This happens **unconditionally** to prevent terminal corruption from
 //! full-screen applications like vim and htop.
 
+use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 use tracing::{debug, info, warn};
 use unicode_width::UnicodeWidthStr;
 
+use super::buffer_convert::buffer_to_ansi;
 use crate::types::ChromeMode;
 
 /// Minimum terminal columns for chrome to be active.
@@ -51,13 +55,58 @@ pub enum SizeCheckResult {
     Resumed,
 }
 
-/// Chrome layer manager for status bar and scroll regions.
+/// State of expandable panels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelState {
+    /// Normal 1-row context bar only.
+    Collapsed,
+    /// Panel visible with N rows reserved.
+    Expanded { height: u16 },
+}
+
+/// Style for notification messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationStyle {
+    /// Informational message (blue).
+    Info,
+    /// Success message (green).
+    Success,
+    /// Warning message (yellow).
+    Warning,
+    /// Error message (red).
+    Error,
+}
+
+/// A notification to display in the context bar area.
+#[derive(Debug, Clone)]
+pub struct Notification {
+    /// The notification message.
+    pub message: String,
+    /// The style/type of notification.
+    pub style: NotificationStyle,
+    /// When the notification expires.
+    pub expires_at: Instant,
+}
+
+/// A segment of the context bar with priority and styling.
+struct ContextSegment {
+    /// Formatted segment content (with ANSI codes).
+    content: String,
+    /// Display width (excluding ANSI codes).
+    display_width: usize,
+    /// Priority (lower = more important, kept first during truncation).
+    priority: u8,
+}
+
+/// Chrome layer manager for status bar, scroll regions, and panels.
 ///
 /// The Chrome struct manages:
 /// - Mode state (Headless vs Full)
 /// - Auto-suspension when terminal is too small
 /// - Scroll region setup/reset
 /// - Context bar rendering
+/// - Expandable panels
+/// - Notifications
 pub struct Chrome {
     /// Current chrome display mode.
     mode: ChromeMode,
@@ -65,6 +114,12 @@ pub struct Chrome {
     /// Whether chrome is temporarily suspended due to small terminal size.
     /// User preference (mode) is preserved and chrome resumes when terminal grows.
     suspended: bool,
+
+    /// Current panel state (collapsed or expanded).
+    panel_state: PanelState,
+
+    /// Queue of active notifications.
+    notifications: VecDeque<Notification>,
 }
 
 /// Context information for rendering the chrome bar.
@@ -99,6 +154,8 @@ impl Chrome {
         Self {
             mode,
             suspended: false,
+            panel_state: PanelState::Collapsed,
+            notifications: VecDeque::new(),
         }
     }
 
@@ -228,11 +285,7 @@ impl Chrome {
         write!(out, "\x1b[2;{}r", total_rows)?;
         out.flush()?;
 
-        debug!(
-            top = 2,
-            bottom = total_rows,
-            "Scroll region configured"
-        );
+        debug!(top = 2, bottom = total_rows, "Scroll region configured");
         Ok(())
     }
 
@@ -329,11 +382,11 @@ impl Chrome {
     ///
     /// This is the single render point for chrome - called once at transition
     /// to Edit mode before reedline takes control. The bar shows:
-    /// - Success/failure indicator (✓/✗)
-    /// - Command duration
-    /// - Current directory
-    /// - Git branch and dirty status
-    /// - Current time
+    /// - Success/failure indicator (✓/✗) - green/red
+    /// - Command duration - yellow if >= 0.5s
+    /// - Current directory - cyan
+    /// - Git branch and dirty status - magenta (bold if dirty)
+    /// - Current time - dim
     ///
     /// # Arguments
     ///
@@ -348,7 +401,7 @@ impl Chrome {
             return Ok(());
         }
 
-        let content = self.format_context_bar(cols as usize, ctx);
+        let content = self.format_context_bar_colored(cols as usize, ctx);
 
         let stdout = io::stdout();
         let mut out = stdout.lock();
@@ -357,7 +410,8 @@ impl Chrome {
         write!(out, "\x1b[s")?; // Save cursor position
         write!(out, "\x1b[1;1H")?; // Move to row 1, column 1
         write!(out, "\x1b[K")?; // Clear line
-        write!(out, "\x1b[7m{}\x1b[0m", content)?; // Reverse video for bar
+        // Use dark background for the bar
+        write!(out, "\x1b[48;5;236m{}\x1b[0m", content)?;
         write!(out, "\x1b[u")?; // Restore cursor position
         out.flush()?;
 
@@ -365,12 +419,127 @@ impl Chrome {
         Ok(())
     }
 
-    /// Formats the context bar content with rich information.
+    /// Formats the context bar content with ANSI colors.
+    ///
+    /// Uses priority-based truncation: when the bar is too wide, segments
+    /// with higher priority numbers are removed first.
     ///
     /// Layout: [✓/✗] [duration] [cwd] [git:branch●] [time]
+    fn format_context_bar_colored(&self, max_width: usize, ctx: &ChromeContext) -> String {
+        let mut segments: Vec<ContextSegment> = Vec::new();
+
+        // Status icon: priority 0 (always shown), green/red
+        let (status_icon, status_color) = if ctx.last_exit_code == 0 {
+            ("✓", "\x1b[32m") // Green
+        } else {
+            ("✗", "\x1b[31m") // Red
+        };
+        segments.push(ContextSegment {
+            content: format!(" {}{}  \x1b[0m\x1b[48;5;236m", status_color, status_icon),
+            display_width: 4,
+            priority: 0,
+        });
+
+        // Timestamp: priority 1
+        segments.push(ContextSegment {
+            content: format!("\x1b[2m{} \x1b[0m\x1b[48;5;236m", ctx.timestamp),
+            display_width: ctx.timestamp.len() + 1,
+            priority: 1,
+        });
+
+        // CWD: priority 2, cyan
+        let cwd_str = ctx.cwd.file_name().and_then(|n| n.to_str()).unwrap_or("/");
+        segments.push(ContextSegment {
+            content: format!("\x1b[36m{} \x1b[0m\x1b[48;5;236m", cwd_str),
+            display_width: cwd_str.width() + 1,
+            priority: 2,
+        });
+
+        // Duration: priority 3, yellow if >= 0.5s
+        if let Some(dur) = ctx.last_duration {
+            let secs = dur.as_secs_f64();
+            let duration_str = format!("{:.1}s", secs);
+            let color = if secs >= 0.5 {
+                "\x1b[33m"
+            } else {
+                "\x1b[0m\x1b[48;5;236m"
+            }; // Yellow or default
+            segments.push(ContextSegment {
+                content: format!("{}{} \x1b[0m\x1b[48;5;236m", color, duration_str),
+                display_width: duration_str.len() + 1,
+                priority: 3,
+            });
+        }
+
+        // Git: priority 4, magenta (bold if dirty)
+        if let Some(branch) = ctx.git_branch {
+            let (git_content, git_width) = if ctx.git_dirty {
+                (
+                    format!("\x1b[1;35m{}● \x1b[0m\x1b[48;5;236m", branch),
+                    branch.len() + 3,
+                )
+            } else {
+                (
+                    format!("\x1b[35m{} \x1b[0m\x1b[48;5;236m", branch),
+                    branch.len() + 1,
+                )
+            };
+            segments.push(ContextSegment {
+                content: git_content,
+                display_width: git_width,
+                priority: 4,
+            });
+        }
+
+        // Calculate total display width
+        let total_width: usize = segments.iter().map(|s| s.display_width).sum();
+
+        // Truncate segments if needed (remove highest priority first)
+        let mut segments = segments;
+        while total_width > max_width && segments.len() > 1 {
+            // Find and remove the segment with highest priority number
+            let max_priority_idx = segments
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, s)| s.priority)
+                .map(|(i, _)| i);
+
+            if let Some(idx) = max_priority_idx {
+                segments.remove(idx);
+            } else {
+                break;
+            }
+        }
+
+        // Recalculate width after removal
+        let content_width: usize = segments.iter().map(|s| s.display_width).sum();
+
+        // Assemble content
+        let mut result = String::new();
+        for segment in &segments {
+            result.push_str(&segment.content);
+        }
+
+        // Pad to full width
+        if content_width < max_width {
+            let padding = max_width - content_width;
+            result.push_str(&" ".repeat(padding));
+        }
+
+        result
+    }
+
+    /// Formats the context bar content with rich information (plain version).
+    ///
+    /// Layout: [✓/✗] [duration] [cwd] [git:branch●] [time]
+    #[allow(dead_code)]
     fn format_context_bar(&self, max_width: usize, ctx: &ChromeContext) -> String {
         // Build components
-        let status_icon = if ctx.last_exit_code == 0 { "✓" } else { "✗" };
+        let status_icon = if ctx.last_exit_code == 0 {
+            "✓"
+        } else {
+            "✗"
+        };
 
         let duration_str = if let Some(dur) = ctx.last_duration {
             let secs = dur.as_secs_f64();
@@ -383,10 +552,7 @@ impl Chrome {
             String::new()
         };
 
-        let cwd_str = ctx.cwd
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("/");
+        let cwd_str = ctx.cwd.file_name().and_then(|n| n.to_str()).unwrap_or("/");
 
         let git_str = if let Some(branch) = ctx.git_branch {
             if ctx.git_dirty {
@@ -552,6 +718,257 @@ impl Chrome {
             }
         }
         Ok(())
+    }
+
+    // =========================================================================
+    // Panel Lifecycle Methods
+    // =========================================================================
+
+    /// Expands the panel area to the specified height.
+    ///
+    /// Updates the scroll region to reserve space for the panel at the top
+    /// of the terminal.
+    ///
+    /// # Arguments
+    ///
+    /// * `height` - The height of the panel area (in rows)
+    /// * `total_rows` - Total terminal height in rows
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if escape sequences cannot be written to stdout.
+    pub fn expand_panel(&mut self, height: u16, total_rows: u16) -> io::Result<()> {
+        self.panel_state = PanelState::Expanded { height };
+
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
+
+        // Set scroll region from panel_height + 1 to total_rows
+        // Panels occupy rows 1 through height, content is height+1 to total_rows
+        let top_row = height + 1;
+        write!(out, "\x1b[{};{}r", top_row, total_rows)?;
+
+        // Position cursor at bottom of scroll region
+        write!(out, "\x1b[{};1H", total_rows)?;
+
+        out.flush()?;
+
+        debug!(
+            panel_height = height,
+            scroll_top = top_row,
+            scroll_bottom = total_rows,
+            "Panel expanded"
+        );
+
+        Ok(())
+    }
+
+    /// Collapses the panel back to the normal context bar.
+    ///
+    /// Restores the scroll region for normal chrome operation.
+    ///
+    /// # Arguments
+    ///
+    /// * `total_rows` - Total terminal height in rows
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if escape sequences cannot be written to stdout.
+    pub fn collapse_panel(&mut self, total_rows: u16) -> io::Result<()> {
+        let old_height = match self.panel_state {
+            PanelState::Expanded { height } => height,
+            PanelState::Collapsed => return Ok(()),
+        };
+
+        self.panel_state = PanelState::Collapsed;
+
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
+
+        // Clear the panel area (rows 2 through old_height)
+        for row in 2..=old_height {
+            write!(out, "\x1b[{};1H", row)?;
+            write!(out, "\x1b[K")?;
+        }
+
+        out.flush()?;
+
+        // Restore scroll region (row 2 to N for normal chrome)
+        self.setup_scroll_region(total_rows)?;
+
+        debug!(old_height, "Panel collapsed");
+
+        Ok(())
+    }
+
+    /// Returns the current panel height.
+    ///
+    /// Returns 1 if collapsed (just context bar), otherwise returns the
+    /// expanded panel height.
+    pub fn panel_height(&self) -> u16 {
+        match self.panel_state {
+            PanelState::Collapsed => 1,
+            PanelState::Expanded { height } => height,
+        }
+    }
+
+    /// Returns the current panel state.
+    pub fn panel_state(&self) -> PanelState {
+        self.panel_state
+    }
+
+    /// Renders a ratatui buffer to the terminal.
+    ///
+    /// Converts the buffer to ANSI sequences and writes them to stdout.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer` - The ratatui buffer to render
+    /// * `area` - The area of the buffer to render
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if writing to stdout fails.
+    pub fn render_panel_buffer(&self, buffer: &Buffer, area: Rect) -> io::Result<()> {
+        let ansi = buffer_to_ansi(buffer, area);
+
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
+
+        // Save cursor, write buffer content, restore cursor
+        write!(out, "\x1b[s")?;
+        write!(out, "{}", ansi)?;
+        write!(out, "\x1b[u")?;
+        out.flush()?;
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // Notification Methods
+    // =========================================================================
+
+    /// Adds a notification to the queue.
+    ///
+    /// The notification will be displayed instead of the normal context bar
+    /// until it expires.
+    ///
+    /// # Arguments
+    ///
+    /// * `message` - The notification message
+    /// * `style` - The notification style/type
+    /// * `duration` - How long the notification should be displayed
+    pub fn notify(
+        &mut self,
+        message: impl Into<String>,
+        style: NotificationStyle,
+        duration: Duration,
+    ) {
+        let notification = Notification {
+            message: message.into(),
+            style,
+            expires_at: Instant::now() + duration,
+        };
+        self.notifications.push_back(notification);
+        debug!("Notification added");
+    }
+
+    /// Removes expired notifications from the queue.
+    fn expire_notifications(&mut self) {
+        let now = Instant::now();
+        while let Some(notif) = self.notifications.front() {
+            if notif.expires_at <= now {
+                self.notifications.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Renders a notification to the context bar area.
+    ///
+    /// # Arguments
+    ///
+    /// * `cols` - Terminal width in columns
+    /// * `notif` - The notification to render
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if writing to stdout fails.
+    fn render_notification(&self, cols: u16, notif: &Notification) -> io::Result<()> {
+        // Map style to ANSI colors
+        let (bg, fg) = match notif.style {
+            NotificationStyle::Info => ("\x1b[44m", "\x1b[97m"), // Blue bg, white fg
+            NotificationStyle::Success => ("\x1b[42m", "\x1b[30m"), // Green bg, black fg
+            NotificationStyle::Warning => ("\x1b[43m", "\x1b[30m"), // Yellow bg, black fg
+            NotificationStyle::Error => ("\x1b[41m", "\x1b[97m"), // Red bg, white fg
+        };
+
+        // Truncate and pad message
+        let max_len = cols as usize;
+        let display_msg = if notif.message.width() > max_len {
+            let truncated = Self::truncate_to_width(&notif.message, max_len.saturating_sub(3));
+            format!("{}...", truncated)
+        } else {
+            let padding = max_len.saturating_sub(notif.message.width());
+            format!("{}{}", notif.message, " ".repeat(padding))
+        };
+
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
+
+        // Save cursor, draw notification, restore cursor
+        write!(out, "\x1b[s")?;
+        write!(out, "\x1b[1;1H")?;
+        write!(out, "\x1b[K")?;
+        write!(out, "{}{}{}\x1b[0m", bg, fg, display_msg)?;
+        write!(out, "\x1b[u")?;
+        out.flush()?;
+
+        Ok(())
+    }
+
+    /// Renders the context bar, checking for notifications first.
+    ///
+    /// If there's an active notification, it's displayed instead of the
+    /// normal context bar.
+    ///
+    /// # Arguments
+    ///
+    /// * `cols` - Terminal width in columns
+    /// * `ctx` - Context information for normal context bar
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if writing to stdout fails.
+    pub fn render_context_bar_with_notifications(
+        &mut self,
+        cols: u16,
+        ctx: &ChromeContext,
+    ) -> io::Result<()> {
+        if !self.is_active() {
+            return Ok(());
+        }
+
+        // Expire old notifications
+        self.expire_notifications();
+
+        // Check for active notification
+        if let Some(notif) = self.notifications.front().cloned() {
+            self.render_notification(cols, &notif)
+        } else {
+            self.render_context_bar(cols, ctx)
+        }
+    }
+
+    /// Returns whether there are active notifications.
+    pub fn has_notifications(&self) -> bool {
+        !self.notifications.is_empty()
+    }
+
+    /// Clears all notifications.
+    pub fn clear_notifications(&mut self) {
+        self.notifications.clear();
     }
 }
 

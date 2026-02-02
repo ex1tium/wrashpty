@@ -33,18 +33,23 @@
 use std::io::Write;
 use std::os::unix::io::{AsRawFd, BorrowedFd, RawFd};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
-use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use nix::poll::{poll, PollFd, PollFlags};
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use nix::poll::{PollFd, PollFlags, poll};
 use nix::unistd::read;
 use portable_pty::ExitStatus;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 use tracing::{debug, info, warn};
 
+use crate::chrome::panel::{Panel, PanelResult};
+use crate::chrome::tabbed_panel::TabbedPanel;
 use crate::chrome::{Chrome, ChromeContext, SizeCheckResult};
 use crate::editor::{Editor, EditorResult};
 use crate::prompt::WrashPrompt;
@@ -318,7 +323,11 @@ impl App {
     /// - PTY spawn fails
     /// - Signal handler registration fails
     /// - Editor creation fails
-    pub fn new(bashrc_path: &str, session_token: [u8; 16], chrome_mode: ChromeMode) -> Result<Self> {
+    pub fn new(
+        bashrc_path: &str,
+        session_token: [u8; 16],
+        chrome_mode: ChromeMode,
+    ) -> Result<Self> {
         // Create terminal guard first (enables raw mode)
         let terminal_guard =
             TerminalGuard::new().context("Failed to initialize terminal raw mode")?;
@@ -659,11 +668,20 @@ impl App {
         // Handle the editor result
         match editor_result {
             EditorResult::Command(line) => {
-                // Check for built-in exit command
+                // Check for built-in commands
                 let trimmed = line.trim();
+
+                // Exit command
                 if trimmed == "exit" || trimmed.starts_with("exit ") {
                     info!("User typed 'exit' command");
                     self.transition_to_terminating();
+                    return Ok(());
+                }
+
+                // Panel command - opens the command palette
+                if trimmed == ":panel" || trimmed == ":p" {
+                    debug!("User requested panel via command");
+                    self.open_panel()?;
                     return Ok(());
                 }
 
@@ -684,6 +702,18 @@ impl App {
             EditorResult::Exit => {
                 info!("Ctrl+D at empty prompt, exiting");
                 self.transition_to_terminating();
+            }
+            EditorResult::HostCommand(cmd) => {
+                // Handle host commands (like panel open requests)
+                debug!(command = %cmd, "Host command received");
+                match cmd.as_str() {
+                    "open_panel" => {
+                        self.open_panel()?;
+                    }
+                    _ => {
+                        warn!(command = %cmd, "Unknown host command");
+                    }
+                }
             }
         }
 
@@ -739,6 +769,274 @@ impl App {
         }
 
         Ok(None)
+    }
+
+    /// Runs the panel mode with the given panel.
+    ///
+    /// This method handles the panel input loop, rendering the panel and
+    /// processing key events until the user dismisses it or executes a command.
+    ///
+    /// # Arguments
+    ///
+    /// * `panel` - The panel to display and interact with
+    ///
+    /// # Returns
+    ///
+    /// The result of the panel interaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if terminal operations fail.
+    fn run_panel_mode<P: Panel>(&mut self, panel: &mut P) -> Result<PanelResult> {
+        // Ensure raw mode is active - reedline may have toggled terminal modes
+        TerminalGuard::ensure_raw_mode().context("Failed to ensure raw mode for panel")?;
+
+        let (cols, rows) =
+            TerminalGuard::get_size().context("Failed to get terminal size for panel")?;
+
+        // Calculate panel height (min of preferred and half terminal height)
+        let preferred = panel.preferred_height();
+        let max_panel_height = rows / 2;
+        let panel_height = preferred.min(max_panel_height).max(5);
+
+        debug!(cols, rows, panel_height, preferred, "Entering panel mode");
+
+        // Expand panel area
+        self.chrome
+            .expand_panel(panel_height, rows)
+            .context("Failed to expand panel")?;
+
+        // Resize PTY to account for panel
+        let effective_rows = rows.saturating_sub(panel_height);
+        self.pty
+            .resize(cols, effective_rows)
+            .context("Failed to resize PTY for panel")?;
+
+        let result = self.panel_input_loop(panel, cols, panel_height, rows);
+
+        // Collapse panel and restore PTY size
+        self.chrome
+            .collapse_panel(rows)
+            .context("Failed to collapse panel")?;
+
+        // Restore PTY size (accounting for chrome bar if active)
+        let effective_rows = if self.chrome.is_active() {
+            rows.saturating_sub(1)
+        } else {
+            rows
+        };
+        self.pty
+            .resize(cols, effective_rows)
+            .context("Failed to restore PTY size")?;
+
+        debug!("Exited panel mode");
+
+        result
+    }
+
+    /// Inner loop for panel input handling.
+    fn panel_input_loop<P: Panel>(
+        &mut self,
+        panel: &mut P,
+        cols: u16,
+        panel_height: u16,
+        _total_rows: u16,
+    ) -> Result<PanelResult> {
+        use crossterm::terminal::enable_raw_mode;
+
+        // Ensure raw mode is enabled for crossterm event handling
+        enable_raw_mode().context("Failed to enable raw mode for panel")?;
+
+        // Clear the panel area first
+        {
+            let stdout = std::io::stdout();
+            let mut out = stdout.lock();
+            use std::io::Write;
+            for row in 1..=panel_height {
+                write!(out, "\x1b[{};1H\x1b[K", row)?;
+            }
+            out.flush()?;
+        }
+
+        let result = self.panel_input_loop_inner(panel, cols, panel_height);
+
+        // Note: We don't disable raw mode here as wrashpty needs it for PTY handling
+        // The TerminalGuard manages the overall raw mode state
+
+        result
+    }
+
+    /// Inner implementation of panel input loop.
+    fn panel_input_loop_inner<P: Panel>(
+        &mut self,
+        panel: &mut P,
+        cols: u16,
+        panel_height: u16,
+    ) -> Result<PanelResult> {
+        use ratatui::style::{Color, Style};
+        use ratatui::widgets::{Block, Borders, Widget};
+
+        loop {
+            // Create buffer for panel area (starting at row 1, which is terminal row 1)
+            // We use row 0 in buffer coordinates, which maps to terminal row 1
+            let area = Rect::new(0, 0, cols, panel_height);
+            let mut buffer = Buffer::empty(area);
+
+            // Create a bordered block for the panel
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(" Wrashpty Panel (Esc to close) ")
+                .title_style(Style::default().fg(Color::Yellow));
+
+            // Get the inner area for panel content
+            let inner_area = block.inner(area);
+
+            // Render the border
+            block.render(area, &mut buffer);
+
+            // Render panel content inside the border
+            panel.render(&mut buffer, inner_area);
+
+            // Write buffer to terminal (row 0 in buffer = terminal row 1)
+            self.chrome
+                .render_panel_buffer(&buffer, area)
+                .context("Failed to render panel buffer")?;
+
+            // Flush stdout to ensure panel is visible
+            {
+                use std::io::Write;
+                std::io::stdout().flush()?;
+            }
+
+            // Poll for input with timeout - use a shorter timeout for responsiveness
+            match event::poll(std::time::Duration::from_millis(50)) {
+                Ok(true) => {
+                    match event::read() {
+                        Ok(Event::Key(key)) => {
+                            // Skip key release events (only handle press)
+                            if key.kind != crossterm::event::KeyEventKind::Press {
+                                continue;
+                            }
+
+                            debug!(key = ?key.code, "Panel received key");
+
+                            match panel.handle_input(key) {
+                                PanelResult::Continue => {
+                                    // Keep looping
+                                }
+                                result => {
+                                    debug!(result = ?result, "Panel returning result");
+                                    return Ok(result);
+                                }
+                            }
+                        }
+                        Ok(Event::Resize(new_cols, new_rows)) => {
+                            debug!(new_cols, new_rows, "Terminal resized during panel");
+                            // For now, just dismiss on resize - could handle more gracefully
+                            return Ok(PanelResult::Dismiss);
+                        }
+                        Ok(_) => {
+                            // Mouse or other events - ignore
+                        }
+                        Err(e) => {
+                            warn!("Error reading event: {}", e);
+                            return Ok(PanelResult::Dismiss);
+                        }
+                    }
+                }
+                Ok(false) => {
+                    // No event available, continue loop
+                }
+                Err(e) => {
+                    warn!("Error polling for events: {}", e);
+                    return Ok(PanelResult::Dismiss);
+                }
+            }
+
+            // Check for signals
+            self.handle_signals()?;
+
+            if self.should_shutdown() {
+                return Ok(PanelResult::Dismiss);
+            }
+        }
+    }
+
+    /// Opens the command panel.
+    ///
+    /// Creates a tabbed panel with all available panels (command palette,
+    /// file browser, history browser, help) and runs it in panel mode.
+    ///
+    /// # Returns
+    ///
+    /// Ok(()) if the panel was handled successfully (command executed or dismissed).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if terminal operations fail.
+    pub fn open_panel(&mut self) -> Result<()> {
+        let mut panel = TabbedPanel::new();
+        panel.load_context(&self.current_cwd);
+
+        match self.run_panel_mode(&mut panel)? {
+            PanelResult::Execute(cmd) => {
+                debug!(command = %cmd, "Panel executing command");
+                self.pending_command = Some(cmd);
+                self.inject_pending_command()?;
+            }
+            PanelResult::InsertText(text) => {
+                // For now, execute as command since we can't inject into reedline buffer
+                debug!(text = %text, "Panel inserting text (executing as command)");
+                self.pending_command = Some(text);
+                self.inject_pending_command()?;
+            }
+            PanelResult::Dismiss => {
+                debug!("Panel dismissed");
+                // Return to editing - redraw context bar
+                if let Ok((cols, _rows)) = TerminalGuard::get_size() {
+                    let timestamp = chrono::Local::now().format("%H:%M").to_string();
+                    let ctx = ChromeContext {
+                        cwd: &self.current_cwd,
+                        git_branch: self.git_branch.as_deref(),
+                        git_dirty: self.git_dirty,
+                        last_exit_code: self.last_exit_code,
+                        last_command: self.last_command.as_deref(),
+                        last_duration: self.last_command_duration,
+                        timestamp: &timestamp,
+                    };
+                    if let Err(e) = self.chrome.render_context_bar(cols, &ctx) {
+                        warn!("Failed to redraw context bar after panel: {}", e);
+                    }
+                }
+            }
+            PanelResult::Continue => {
+                // Should not happen
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Checks if Ctrl+Space was pressed (for panel activation).
+    ///
+    /// This does a non-blocking poll for key events before reedline takes over.
+    /// If Ctrl+Space is detected, returns true so the caller can open the panel.
+    fn check_panel_keybinding(&self) -> Result<bool> {
+        // Poll with zero timeout - just check if key is available
+        if event::poll(std::time::Duration::from_millis(0))
+            .context("Failed to poll for panel keybinding")?
+        {
+            if let Event::Key(key) = event::read().context("Failed to read key event")? {
+                if key.kind == crossterm::event::KeyEventKind::Press
+                    && key.code == KeyCode::Char(' ')
+                    && key.modifiers.contains(KeyModifiers::CONTROL)
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     /// Injects the pending command into the PTY.
@@ -798,7 +1096,10 @@ impl App {
 
         // Use bounded wait so we can re-check injection_start timeout
         // even when no PTY data arrives
-        match self.pump.run_once_with_timeout(Some(INJECTION_POLL_TIMEOUT))? {
+        match self
+            .pump
+            .run_once_with_timeout(Some(INJECTION_POLL_TIMEOUT))?
+        {
             PumpResult::MarkerDetected(markers) => {
                 for marker in markers {
                     match marker {
@@ -958,7 +1259,12 @@ impl App {
         if let Err(e) = self.pty.resize(cols, effective_rows) {
             warn!("Failed to resize PTY for Edit mode: {}", e);
         }
-        debug!(cols, effective_rows, chrome_active = self.chrome.is_active(), "PTY resized for Edit mode");
+        debug!(
+            cols,
+            effective_rows,
+            chrome_active = self.chrome.is_active(),
+            "PTY resized for Edit mode"
+        );
 
         self.mode = Mode::Edit;
     }
@@ -1008,8 +1314,7 @@ impl App {
 
         // Ensure raw mode is active - reedline may have toggled terminal modes.
         // This is critical for control character passthrough (Ctrl+C -> 0x03, not SIGINT).
-        TerminalGuard::ensure_raw_mode()
-            .context("Failed to ensure raw mode for Passthrough")?;
+        TerminalGuard::ensure_raw_mode().context("Failed to ensure raw mode for Passthrough")?;
 
         // Get terminal size
         let (cols, rows) =
@@ -1036,7 +1341,10 @@ impl App {
         self.pty
             .resize(cols, effective_rows)
             .context("Failed to resize PTY for Passthrough")?;
-        debug!(cols, effective_rows, "PTY sized for Passthrough (within scroll region)");
+        debug!(
+            cols,
+            effective_rows, "PTY sized for Passthrough (within scroll region)"
+        );
 
         self.mode = Mode::Passthrough;
         Ok(())
@@ -1068,8 +1376,7 @@ impl App {
 
         // Ensure raw mode is active - reedline may have toggled terminal modes.
         // This is critical for control character passthrough during command injection.
-        TerminalGuard::ensure_raw_mode()
-            .context("Failed to ensure raw mode for Injecting")?;
+        TerminalGuard::ensure_raw_mode().context("Failed to ensure raw mode for Injecting")?;
 
         // Sync PTY size - terminal may have been resized during Edit mode
         let (cols, rows) =
@@ -1095,7 +1402,10 @@ impl App {
         self.pty
             .resize(cols, effective_rows)
             .context("Failed to resize PTY on transition to Injecting")?;
-        debug!(cols, effective_rows, "PTY size synchronized for command execution");
+        debug!(
+            cols,
+            effective_rows, "PTY size synchronized for command execution"
+        );
 
         self.mode = Mode::Injecting;
         self.injection_start = Some(Instant::now());

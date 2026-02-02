@@ -41,6 +41,18 @@ dirs = "5.0"
 # Unicode display width
 unicode-width = "0.1"
 
+# TUI widgets for panel rendering
+ratatui = "0.29"
+
+# Regex for Makefile/config parsing
+regex = "1.10"
+
+# JSON parsing for package.json
+serde_json = "1.0"
+
+# TOML parsing for Cargo.toml
+toml = "0.8"
+
 # CLI argument parsing
 clap = { version = "4.5", features = ["derive"] }
 
