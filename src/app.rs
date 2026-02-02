@@ -44,13 +44,14 @@ use nix::unistd::read;
 use portable_pty::ExitStatus;
 use tracing::{debug, info, warn};
 
+use crate::chrome::{Chrome, ChromeRefreshGuard, SizeCheckResult};
 use crate::editor::{Editor, EditorResult};
 use crate::prompt::WrashPrompt;
 use crate::pty::Pty;
 use crate::pump::{Pump, PumpResult};
 use crate::signals::SignalHandler;
 use crate::terminal::TerminalGuard;
-use crate::types::{MarkerEvent, Mode, SignalEvent};
+use crate::types::{ChromeMode, MarkerEvent, Mode, SignalEvent};
 
 /// Extracts the actual exit code from an ExitStatus.
 ///
@@ -257,6 +258,9 @@ pub struct App {
     /// Unix signal handler.
     signal_handler: SignalHandler,
 
+    /// Chrome layer for status bars and scroll regions.
+    chrome: Chrome,
+
     /// Exit code from last command execution.
     last_exit_code: i32,
 
@@ -287,6 +291,7 @@ impl App {
     ///
     /// * `bashrc_path` - Path to the generated bashrc file
     /// * `session_token` - 16-byte session token for marker validation
+    /// * `chrome_mode` - Chrome display mode (Headless or Full)
     ///
     /// # Errors
     ///
@@ -296,13 +301,16 @@ impl App {
     /// - PTY spawn fails
     /// - Signal handler registration fails
     /// - Editor creation fails
-    pub fn new(bashrc_path: &str, session_token: [u8; 16]) -> Result<Self> {
+    pub fn new(bashrc_path: &str, session_token: [u8; 16], chrome_mode: ChromeMode) -> Result<Self> {
         // Create terminal guard first (enables raw mode)
         let terminal_guard =
             TerminalGuard::new().context("Failed to initialize terminal raw mode")?;
 
         // Get terminal size for PTY
         let (cols, rows) = TerminalGuard::get_size().context("Failed to get terminal size")?;
+
+        // Create chrome layer
+        let chrome = Chrome::new(chrome_mode);
 
         // Spawn PTY with bash
         let pty = Pty::spawn(bashrc_path, cols, rows).context("Failed to spawn PTY")?;
@@ -328,6 +336,7 @@ impl App {
             pump,
             terminal_guard,
             signal_handler,
+            chrome,
             last_exit_code: 0,
             startup_time: Instant::now(),
             session_token,
@@ -493,8 +502,33 @@ impl App {
             }
         }
 
+        // Redraw chrome bars right before reedline takes over
+        // This ensures bars are visible even if flush_pending wrote output that scrolled
+        if self.chrome.is_active() {
+            if let Ok((cols, rows)) = TerminalGuard::get_size() {
+                if let Err(e) = self.chrome.draw_top_bar(cols) {
+                    warn!("Failed to redraw top bar before prompt: {}", e);
+                }
+                if let Err(e) = self.chrome.draw_footer(cols, rows) {
+                    warn!("Failed to redraw footer before prompt: {}", e);
+                }
+                if let Err(e) = self.chrome.position_cursor_in_scroll_region() {
+                    warn!("Failed to position cursor before prompt: {}", e);
+                }
+            }
+        }
+
         // Create prompt with last exit code
         let prompt = WrashPrompt::new(self.last_exit_code);
+
+        // Get terminal size for chrome refresh
+        let (refresh_cols, refresh_rows) = TerminalGuard::get_size().unwrap_or((80, 24));
+
+        // Start chrome refresh thread to keep footer visible during reedline operation.
+        // Reedline/crossterm may clear or overwrite the footer during initialization
+        // and rendering. This thread periodically redraws it.
+        let mut chrome_refresh_guard =
+            ChromeRefreshGuard::start(refresh_cols, refresh_rows, self.chrome.is_active());
 
         // Start background PTY drain thread to continuously collect output
         // while reedline blocks waiting for user input.
@@ -514,17 +548,19 @@ impl App {
         let mut drain_guard = DrainGuard::new(stop_flag, drain_handle);
 
         // Read line from user (blocks until input)
-        // Use match instead of ? to ensure drain_guard is dropped before returning
+        // Use match instead of ? to ensure guards are dropped before returning
         let editor_result = match self.editor.read_line(&prompt) {
             Ok(result) => result,
             Err(e) => {
-                // Guard will stop and join the drain thread on drop
+                // Guards will stop and join threads on drop
+                drop(chrome_refresh_guard);
                 drop(drain_guard);
                 return Err(e).context("Reedline read_line failed");
             }
         };
 
-        // Explicitly stop the drain thread before processing results
+        // Explicitly stop background threads before processing results
+        chrome_refresh_guard.stop();
         drain_guard.stop();
 
         // Collect and process all bytes from the drain thread
@@ -811,22 +847,99 @@ impl App {
     }
 
     /// Transitions to Edit mode.
+    ///
+    /// Sets up scroll region and draws chrome bars if chrome is active.
+    /// Resizes PTY to effective rows (accounting for chrome bars).
     fn transition_to_edit(&mut self) {
         info!(from = ?self.mode, to = ?Mode::Edit, "Mode transition");
+
+        // Query terminal size for chrome setup
+        let (cols, rows) = match TerminalGuard::get_size() {
+            Ok(size) => size,
+            Err(e) => {
+                warn!("Failed to get terminal size for Edit mode: {}", e);
+                self.mode = Mode::Edit;
+                return;
+            }
+        };
+
+        // Check minimum size and auto-suspend chrome if needed
+        // In transition_to_edit, we don't need to handle the result specially:
+        // - Suspended: is_active() will be false, so we won't draw bars or set scroll region
+        // - Resumed/NoChange: we proceed to set up scroll region and draw bars if active
+        let _ = self.chrome.check_minimum_size(cols, rows);
+
+        // Set up scroll region if chrome is active
+        if let Err(e) = self.chrome.enter_edit_mode(rows) {
+            warn!("Failed to set up chrome scroll region: {}", e);
+        }
+
+        // Draw chrome bars if active
+        if self.chrome.is_active() {
+            if let Err(e) = self.chrome.draw_top_bar(cols) {
+                warn!("Failed to draw top bar: {}", e);
+            }
+            if let Err(e) = self.chrome.draw_footer(cols, rows) {
+                warn!("Failed to draw footer: {}", e);
+            }
+            // Position cursor at start of scroll region so reedline renders there
+            if let Err(e) = self.chrome.position_cursor_in_scroll_region() {
+                warn!("Failed to position cursor in scroll region: {}", e);
+            }
+        }
+
+        // Calculate effective rows for PTY (subtract 2 for bars if chrome active)
+        let effective_rows = if self.chrome.is_active() {
+            rows.saturating_sub(2)
+        } else {
+            rows
+        };
+
+        // Resize PTY to effective rows
+        if let Err(e) = self.pty.resize(cols, effective_rows) {
+            warn!("Failed to resize PTY for Edit mode: {}", e);
+        }
+        debug!(cols, effective_rows, chrome_active = self.chrome.is_active(), "PTY resized for Edit mode");
+
         self.mode = Mode::Edit;
     }
 
     /// Transitions to Passthrough mode.
     ///
-    /// **Critical**: Resets the scroll region before entering Passthrough
-    /// to ensure proper terminal behavior.
+    /// **Critical**: Resets the scroll region and clears chrome before entering
+    /// Passthrough to ensure proper terminal behavior for fullscreen apps.
+    /// Chrome's enter_passthrough_mode() ALWAYS resets scroll region regardless
+    /// of chrome state (defense-in-depth).
     fn transition_to_passthrough(&mut self) -> Result<()> {
         info!(from = ?self.mode, to = ?Mode::Passthrough, "Mode transition");
 
-        // Reset scroll region before entering passthrough
+        // Get terminal size first - needed for clearing bars and PTY resize
+        let (cols, rows) =
+            TerminalGuard::get_size().context("Failed to get terminal size for Passthrough")?;
+
+        // Clear chrome bars from display before resetting scroll region.
+        // This prevents visual artifacts when fullscreen apps (vim, nano, htop) start.
+        if self.chrome.is_active() {
+            if let Err(e) = self.chrome.clear_bars(rows) {
+                warn!("Failed to clear chrome bars: {}", e);
+            }
+        }
+
+        // Chrome ALWAYS resets scroll region on Passthrough entry
+        if let Err(e) = self.chrome.enter_passthrough_mode() {
+            warn!("Chrome failed to reset scroll region: {}", e);
+        }
+
+        // Defense-in-depth: also reset via TerminalGuard
         if let Err(e) = TerminalGuard::reset_scroll_region() {
             warn!("Failed to reset scroll region: {}", e);
         }
+
+        // Resize PTY to full terminal - Passthrough uses all rows
+        self.pty
+            .resize(cols, rows)
+            .context("Failed to resize PTY for Passthrough")?;
+        debug!(cols, rows, "PTY resized for Passthrough (full screen)");
 
         self.mode = Mode::Passthrough;
         Ok(())
@@ -885,6 +998,9 @@ impl App {
     /// Behavior depends on current mode:
     /// - Edit mode: Let reedline handle SIGWINCH internally via crossterm.
     ///   PTY will be synchronized when transitioning out of Edit mode.
+    ///   Chrome scroll region is reapplied and bars are redrawn if active.
+    ///   On suspend: clears bars and resets scroll region.
+    ///   On resume: sets up scroll region and draws bars.
     /// - Passthrough/Injecting/Initializing: Propagate resize to PTY
     /// - Terminating: Ignored
     ///
@@ -902,6 +1018,50 @@ impl App {
                 // Let reedline handle SIGWINCH internally via crossterm.
                 // Do NOT resize PTY here - it will be synced on transition.
                 debug!("SIGWINCH in Edit mode - reedline handles display refresh");
+
+                // Always get terminal size for chrome handling
+                let (cols, rows) = TerminalGuard::get_size()
+                    .context("Failed to get terminal size for chrome handling")?;
+
+                // Check minimum size and handle state transitions
+                match self.chrome.check_minimum_size(cols, rows) {
+                    SizeCheckResult::Suspended => {
+                        // Chrome just suspended - clear bars and reset scroll region
+                        if let Err(e) = self.chrome.clear_bars(rows) {
+                            warn!("Failed to clear chrome bars on suspend: {}", e);
+                        }
+                        if let Err(e) = Chrome::reset_scroll_region() {
+                            warn!("Failed to reset scroll region on suspend: {}", e);
+                        }
+                        debug!("Chrome suspended due to small terminal");
+                    }
+                    SizeCheckResult::Resumed => {
+                        // Chrome just resumed - set up scroll region and draw bars
+                        if let Err(e) = self.chrome.setup_scroll_region(rows) {
+                            warn!("Failed to setup scroll region on resume: {}", e);
+                        }
+                        if let Err(e) = self.chrome.draw_top_bar(cols) {
+                            warn!("Failed to draw top bar on resume: {}", e);
+                        }
+                        if let Err(e) = self.chrome.draw_footer(cols, rows) {
+                            warn!("Failed to draw footer on resume: {}", e);
+                        }
+                        debug!("Chrome resumed after terminal grew");
+                    }
+                    SizeCheckResult::NoChange => {
+                        // No state transition - reapply scroll region and redraw if active
+                        if self.chrome.is_active() {
+                            // Reapply scroll region to match new terminal size
+                            if let Err(e) = self.chrome.setup_scroll_region(rows) {
+                                warn!("Failed to reapply scroll region on resize: {}", e);
+                            }
+                            // Redraw bars for new dimensions
+                            if let Err(e) = self.chrome.redraw_if_active(cols, rows) {
+                                warn!("Failed to redraw chrome bars on resize: {}", e);
+                            }
+                        }
+                    }
+                }
             }
             Mode::Passthrough | Mode::Injecting | Mode::Initializing => {
                 // We own SIGWINCH in these modes - propagate resize to PTY
@@ -939,6 +1099,45 @@ impl App {
     /// Returns whether the application should shut down.
     pub fn should_shutdown(&self) -> bool {
         self.signal_handler.should_shutdown()
+    }
+
+    /// Toggles chrome display mode.
+    ///
+    /// Switches between Headless and Full modes with full terminal update.
+    /// This can be called from keybinding handlers in future tickets.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if terminal operations fail.
+    #[allow(dead_code)]
+    pub fn toggle_chrome(&mut self) -> Result<()> {
+        let (cols, rows) =
+            TerminalGuard::get_size().context("Failed to get terminal size for chrome toggle")?;
+
+        self.chrome
+            .toggle_with_terminal_update(cols, rows)
+            .context("Failed to toggle chrome")?;
+
+        // Calculate new effective rows based on chrome state
+        let effective_rows = if self.chrome.is_active() {
+            rows.saturating_sub(2)
+        } else {
+            rows
+        };
+
+        // Resize PTY to new effective rows
+        self.pty
+            .resize(cols, effective_rows)
+            .context("Failed to resize PTY after chrome toggle")?;
+
+        debug!(
+            cols,
+            effective_rows,
+            chrome_active = self.chrome.is_active(),
+            "PTY resized after chrome toggle"
+        );
+
+        Ok(())
     }
 
     /// Gets the path to the generated bashrc file.
