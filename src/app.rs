@@ -842,10 +842,20 @@ impl App {
         panel_height: u16,
         _total_rows: u16,
     ) -> Result<PanelResult> {
+        use crossterm::cursor::{Hide, Show};
         use crossterm::terminal::enable_raw_mode;
 
         // Ensure raw mode is enabled for crossterm event handling
         enable_raw_mode().context("Failed to enable raw mode for panel")?;
+
+        // Hide cursor during panel mode to avoid blinking cursor in corner
+        {
+            let stdout = std::io::stdout();
+            let mut out = stdout.lock();
+            use std::io::Write;
+            write!(out, "{}", crossterm::cursor::Hide)?;
+            out.flush()?;
+        }
 
         // Clear the panel area first
         {
@@ -859,6 +869,15 @@ impl App {
         }
 
         let result = self.panel_input_loop_inner(panel, cols, panel_height);
+
+        // Show cursor again after panel closes
+        {
+            let stdout = std::io::stdout();
+            let mut out = stdout.lock();
+            use std::io::Write;
+            write!(out, "{}", crossterm::cursor::Show)?;
+            out.flush()?;
+        }
 
         // Note: We don't disable raw mode here as wrashpty needs it for PTY handling
         // The TerminalGuard manages the overall raw mode state
@@ -991,28 +1010,45 @@ impl App {
                 self.pending_command = Some(text);
                 self.inject_pending_command()?;
             }
-            PanelResult::Dismiss => {
-                debug!("Panel dismissed");
-                // Return to editing - redraw context bar
-                if let Ok((cols, _rows)) = TerminalGuard::get_size() {
-                    let timestamp = chrono::Local::now().format("%H:%M").to_string();
-                    let ctx = ChromeContext {
-                        cwd: &self.current_cwd,
-                        git_branch: self.git_branch.as_deref(),
-                        git_dirty: self.git_dirty,
-                        last_exit_code: self.last_exit_code,
-                        last_command: self.last_command.as_deref(),
-                        last_duration: self.last_command_duration,
-                        timestamp: &timestamp,
-                    };
-                    if let Err(e) = self.chrome.render_context_bar(cols, &ctx) {
-                        warn!("Failed to redraw context bar after panel: {}", e);
-                    }
-                }
+            PanelResult::Dismiss | PanelResult::Continue => {
+                debug!("Panel dismissed, restoring chrome");
+                // Return to editing - redraw context bar and restore terminal state
+                self.restore_after_panel()?;
             }
-            PanelResult::Continue => {
-                // Should not happen
-            }
+        }
+
+        Ok(())
+    }
+
+    /// Restores terminal state after panel closes without executing a command.
+    fn restore_after_panel(&mut self) -> Result<()> {
+        let (cols, rows) = TerminalGuard::get_size()
+            .context("Failed to get terminal size after panel")?;
+
+        // Re-establish scroll region for chrome
+        if self.chrome.is_active() {
+            self.chrome.setup_scroll_region(rows)?;
+        }
+
+        // Redraw context bar
+        let timestamp = chrono::Local::now().format("%H:%M").to_string();
+        let ctx = ChromeContext {
+            cwd: &self.current_cwd,
+            git_branch: self.git_branch.as_deref(),
+            git_dirty: self.git_dirty,
+            last_exit_code: self.last_exit_code,
+            last_command: self.last_command.as_deref(),
+            last_duration: self.last_command_duration,
+            timestamp: &timestamp,
+        };
+
+        if let Err(e) = self.chrome.render_context_bar(cols, &ctx) {
+            warn!("Failed to redraw context bar after panel: {}", e);
+        }
+
+        // Position cursor in scroll region (but not at bottom - let reedline handle it)
+        if self.chrome.is_active() {
+            self.chrome.position_cursor_in_scroll_region()?;
         }
 
         Ok(())
