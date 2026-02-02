@@ -473,7 +473,9 @@ impl Chrome {
             return Ok(());
         }
 
-        let mut out = io::stdout();
+        // Lock stdout for atomic writes - prevents interleaving with other threads.
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
 
         // Clear each row in the content area (rows 2 to N-1)
         for row in 2..total_rows {
@@ -502,7 +504,9 @@ impl Chrome {
     ///
     /// Returns an error if escape sequences cannot be written to stdout.
     pub fn clear_bars(&self, total_rows: u16) -> io::Result<()> {
-        let mut out = io::stdout();
+        // Lock stdout for atomic writes - prevents interleaving with other threads.
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
 
         // Clear top bar
         write!(out, "\x1b[1;1H")?; // Move to row 1
