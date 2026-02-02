@@ -1,13 +1,24 @@
 //! Reedline editor bridge.
 //!
 //! This module integrates reedline as the line editor, configuring it with
-//! history support and managing background output buffering during editing.
+//! history support, tab completions, and autosuggestions, while managing
+//! background output buffering during editing.
+//!
+//! # Features
+//!
+//! - **History**: File-backed history with Ctrl+R search and Up/Down prefix filtering
+//!   (provided by reedline's default keybindings)
+//! - **Completions**: Context-aware tab completion for paths, executables, and git branches
+//! - **Autosuggestions**: Fish-style inline suggestions from command history
 
 use std::collections::VecDeque;
 
 use anyhow::{Context, Result};
 use reedline::{FileBackedHistory, HistoryItem, Prompt, Reedline, Signal};
 use tracing::{debug, info, warn};
+
+use crate::complete::WrashCompleter;
+use crate::suggest::HistoryHinter;
 
 /// Maximum size of the pending output buffer (64KB).
 const MAX_PENDING_OUTPUT: usize = 64 * 1024;
@@ -143,8 +154,19 @@ impl Editor {
         )
         .context("Failed to create history storage")?;
 
-        // Create reedline with history
-        let mut reedline = Reedline::create().with_history(Box::new(history));
+        // Create completer for tab completion
+        let completer = Box::new(WrashCompleter::new());
+
+        // Create hinter for fish-style autosuggestions
+        let hinter = Box::new(HistoryHinter::new());
+
+        // Create reedline with history, completions, and autosuggestions
+        // Note: Ctrl+R history search and Up/Down prefix filtering are provided
+        // by reedline's default keybindings when history is configured.
+        let mut reedline = Reedline::create()
+            .with_history(Box::new(history))
+            .with_completer(completer)
+            .with_hinter(hinter);
 
         // Populate reedline history with loaded bash_history entries
         // Use history_mut().save() to add each entry to the history store
@@ -172,7 +194,7 @@ impl Editor {
             loaded = entry_count,
             saved = saved_count,
             failed = failed_count,
-            "Editor created with history support"
+            "Editor created with history, completions, and autosuggestions"
         );
 
         Ok(Self {

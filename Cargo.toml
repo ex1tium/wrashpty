@@ -25,6 +25,9 @@ thiserror = "1.0"
 # Zero-allocation collections for hot paths
 smallvec = "1.15.1"
 
+# ANSI styling (used by reedline)
+nu-ansi-term = "0.50"
+
 # Temporary file handling
 tempfile = "3.8"
 
