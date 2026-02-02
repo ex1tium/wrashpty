@@ -18,7 +18,7 @@ use wrashpty::types::ChromeMode;
 /// Modern interactive shell on stock Bash
 #[derive(Parser)]
 #[command(name = "wrashpty")]
-#[command(version = "0.1.0")]
+#[command(version)]  // Automatically pulls version from Cargo.toml
 #[command(about = "Modern interactive shell on stock Bash")]
 struct Cli {
     /// Disable chrome layer (headless mode)
