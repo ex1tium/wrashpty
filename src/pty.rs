@@ -218,6 +218,18 @@ impl Pty {
     pub fn create_echo_guard(&self) -> Result<EchoGuard> {
         EchoGuard::new(self.master_fd())
     }
+
+    /// Returns the process ID of the child Bash process.
+    ///
+    /// This can be used to query the child's current working directory
+    /// via `/proc/<pid>/cwd`.
+    ///
+    /// # Returns
+    ///
+    /// The child's PID if available, or `None` if the PID cannot be determined.
+    pub fn child_pid(&self) -> Option<u32> {
+        self.child.process_id()
+    }
 }
 
 /// RAII guard for echo suppression during command injection.
