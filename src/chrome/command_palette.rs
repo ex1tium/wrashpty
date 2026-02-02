@@ -393,6 +393,44 @@ impl Panel for CommandPalettePanel {
         ]);
         Paragraph::new(filter_line).render(chunks[0], buffer);
 
+        // Show help message if no commands found
+        if self.items.is_empty() {
+            let help_lines = vec![
+                Line::from(""),
+                Line::from(Span::styled(
+                    "No commands detected in this directory.",
+                    Style::default().fg(Color::DarkGray),
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "This panel auto-discovers commands from:",
+                    Style::default().fg(Color::Gray),
+                )),
+                Line::from(Span::styled(
+                    "  - Makefile targets",
+                    Style::default().fg(Color::DarkGray),
+                )),
+                Line::from(Span::styled(
+                    "  - package.json scripts (npm)",
+                    Style::default().fg(Color::DarkGray),
+                )),
+                Line::from(Span::styled(
+                    "  - Cargo.toml (cargo commands)",
+                    Style::default().fg(Color::DarkGray),
+                )),
+                Line::from(Span::styled(
+                    "  - justfile recipes",
+                    Style::default().fg(Color::DarkGray),
+                )),
+                Line::from(Span::styled(
+                    "  - Scripts in ./scripts/, ./bin/",
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ];
+            Paragraph::new(help_lines).render(chunks[1], buffer);
+            return;
+        }
+
         // Calculate visible items
         let visible_height = chunks[1].height as usize;
         self.ensure_visible(visible_height);
