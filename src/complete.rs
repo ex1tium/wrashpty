@@ -66,10 +66,16 @@ impl FilesystemCompleter {
         // Handle tilde expansion
         let expanded = if partial.starts_with('~') {
             if let Some(home) = dirs::home_dir() {
-                if partial == "~" {
-                    home.to_string_lossy().to_string()
+                if partial == "~" || partial == "~/" {
+                    // Return home path with trailing slash to ensure parent detection works
+                    format!("{}/", home.to_string_lossy())
                 } else if let Some(suffix) = partial.strip_prefix("~/") {
-                    home.join(suffix).to_string_lossy().to_string()
+                    if suffix.is_empty() {
+                        // Handle edge case where strip_prefix returns empty string
+                        format!("{}/", home.to_string_lossy())
+                    } else {
+                        home.join(suffix).to_string_lossy().to_string()
+                    }
                 } else {
                     // ~username style - not supported, return as-is
                     partial.to_string()
@@ -323,9 +329,18 @@ impl GitCompleter {
                 .args(["rev-parse", "--git-dir"])
                 .output();
 
-            if output.is_err() || !output.unwrap().status.success() {
-                debug!("Not in a git repository");
-                return Vec::new();
+            match output {
+                Ok(cmd_output) => {
+                    if !cmd_output.status.success() {
+                        let stderr = String::from_utf8_lossy(&cmd_output.stderr);
+                        debug!(stderr = %stderr, "Not in a git repository (git rev-parse failed)");
+                        return Vec::new();
+                    }
+                }
+                Err(e) => {
+                    debug!(error = %e, "Failed to execute git rev-parse");
+                    return Vec::new();
+                }
             }
         }
 
@@ -575,9 +590,75 @@ mod tests {
 
     #[test]
     fn test_path_completer_new() {
-        let completer = PathCompleter::new();
-        // Should find at least some executables
-        assert!(!completer.executables.is_empty());
+        use std::fs::File;
+        use std::io::Write;
+        use tempfile::TempDir;
+
+        // Save original PATH
+        let original_path = env::var_os("PATH");
+
+        // Check if PATH is missing or empty
+        let path_is_usable = original_path
+            .as_ref()
+            .map(|p| !p.is_empty())
+            .unwrap_or(false);
+
+        if path_is_usable {
+            // PATH is available, use it directly
+            let completer = PathCompleter::new();
+            // Should find at least some executables
+            assert!(!completer.executables.is_empty());
+        } else {
+            // PATH is missing/empty - create a temp directory with a dummy executable
+            let temp_dir = TempDir::new().expect("Failed to create temp directory");
+            let dummy_exe_path = temp_dir.path().join("dummy_test_exe");
+
+            // Create a dummy executable file
+            {
+                let mut file =
+                    File::create(&dummy_exe_path).expect("Failed to create dummy executable");
+                file.write_all(b"#!/bin/sh\n")
+                    .expect("Failed to write to dummy executable");
+            }
+
+            // Make it executable (Unix)
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = fs::metadata(&dummy_exe_path)
+                    .expect("Failed to get metadata")
+                    .permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&dummy_exe_path, perms).expect("Failed to set permissions");
+            }
+
+            // Set PATH to the temp directory
+            // SAFETY: This test is single-threaded and we restore the original PATH afterwards
+            unsafe {
+                env::set_var("PATH", temp_dir.path());
+            }
+
+            let completer = PathCompleter::new();
+
+            // Restore original PATH
+            // SAFETY: This test is single-threaded and we're restoring the original value
+            unsafe {
+                match original_path {
+                    Some(p) => env::set_var("PATH", p),
+                    None => env::remove_var("PATH"),
+                }
+            }
+
+            // Assert that we found the dummy executable
+            assert!(
+                !completer.executables.is_empty(),
+                "PathCompleter should find executables in the temp PATH"
+            );
+            assert!(
+                completer.executables.contains(&"dummy_test_exe".to_string()),
+                "PathCompleter should find the dummy_test_exe"
+            );
+        }
     }
 
     #[test]
