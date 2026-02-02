@@ -214,17 +214,55 @@ impl Pump {
     ///
     /// Returns an error if poll, read, or write syscalls fail.
     pub fn run_once(&mut self) -> Result<PumpResult> {
+        self.run_once_inner(None)
+    }
+
+    /// Runs a single iteration of the pump loop with a bounded wait time.
+    ///
+    /// This is similar to `run_once`, but accepts an optional maximum wait duration.
+    /// When `max_wait` is `Some(duration)`, the poll will return after at most that
+    /// duration even if no I/O is ready. This allows callers to implement their own
+    /// timeout logic by periodically waking to check conditions.
+    ///
+    /// # Arguments
+    ///
+    /// * `max_wait` - Optional maximum duration to wait. If `None`, uses infinite
+    ///   timeout (or mid-sequence timeout if buffering a partial marker).
+    ///
+    /// # Returns
+    ///
+    /// Same as `run_once`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if poll, read, or write syscalls fail.
+    pub fn run_once_with_timeout(&mut self, max_wait: Option<Duration>) -> Result<PumpResult> {
+        self.run_once_inner(max_wait)
+    }
+
+    /// Internal implementation for run_once variants.
+    fn run_once_inner(&mut self, max_wait: Option<Duration>) -> Result<PumpResult> {
         // Check for stale partial sequences that need flushing
         self.check_stale_sequence()?;
 
-        // Calculate poll timeout based on parser state
+        // Calculate poll timeout based on parser state and caller-specified max wait
         // -1 means infinite timeout, positive value is milliseconds
         let poll_timeout_ms: i32 = if self.marker_parser.is_mid_sequence() {
             // Short timeout when buffering partial sequence
-            MID_SEQUENCE_TIMEOUT_MS
+            // Use the minimum of mid-sequence timeout and caller's max_wait
+            match max_wait {
+                Some(d) => {
+                    let max_ms = d.as_millis().min(i32::MAX as u128) as i32;
+                    max_ms.min(MID_SEQUENCE_TIMEOUT_MS)
+                }
+                None => MID_SEQUENCE_TIMEOUT_MS,
+            }
         } else {
-            // Block indefinitely when no partial sequence
-            -1
+            // Use caller's max_wait or block indefinitely
+            match max_wait {
+                Some(d) => d.as_millis().min(i32::MAX as u128) as i32,
+                None => -1,
+            }
         };
 
         // SAFETY: These file descriptors remain valid for the duration of the poll call.
@@ -736,6 +774,18 @@ mod tests {
         assert!(MID_SEQUENCE_TIMEOUT_MS < 1000);
         assert!(STALE_SEQUENCE_THRESHOLD.as_millis() >= 50);
         assert!(STALE_SEQUENCE_THRESHOLD.as_millis() <= 500);
+    }
+
+    /// Test that run_once_with_timeout accepts Duration parameter.
+    /// This is a structural test; full I/O testing is in integration.rs.
+    #[test]
+    fn test_run_once_with_timeout_exists() {
+        // Verify the method signature compiles and accepts Duration
+        let _: fn(&mut Pump, Option<Duration>) -> Result<PumpResult> = Pump::run_once_with_timeout;
+
+        // Verify constants used in timeout calculation are reasonable
+        assert!(MID_SEQUENCE_TIMEOUT_MS > 0);
+        assert!(MID_SEQUENCE_TIMEOUT_MS <= 100);
     }
 
     // Note: Full integration testing of the pump requires a real PTY and is
