@@ -451,7 +451,19 @@ impl WrashCompleter {
     /// Returns (word_start_position, word) where word is the text from the last
     /// whitespace before pos to pos.
     fn word_at_cursor<'a>(&self, line: &'a str, pos: usize) -> (usize, &'a str) {
-        let before_cursor = &line[..pos.min(line.len())];
+        let safe_pos = pos.min(line.len());
+        // Ensure we're at a valid UTF-8 boundary to prevent panics
+        let before_cursor = if line.is_char_boundary(safe_pos) {
+            &line[..safe_pos]
+        } else {
+            // Fall back to the previous valid boundary
+            let valid_pos = line[..safe_pos]
+                .char_indices()
+                .last()
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            &line[..valid_pos]
+        };
 
         // Find the start of the current word (last whitespace + 1)
         let word_start = before_cursor
