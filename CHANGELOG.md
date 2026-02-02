@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Echo suppression during command injection (EchoGuard)
 - Ctrl+C clears line, Ctrl+D exits at empty prompt
 - Injection timeout to prevent deadlocks (500ms)
+- Tab completion for filesystem paths, PATH executables, and git branches
+- Ctrl+R interactive history search with filtering (reedline built-in)
+- Up/Down arrow prefix filtering for history navigation (reedline built-in)
+- Fish-style autosuggestions based on command history
 
 ### Changed
 
