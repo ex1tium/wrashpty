@@ -78,6 +78,12 @@ impl Pty {
         cmd.arg("--rcfile");
         cmd.arg(bashrc_path);
 
+        // Set TERM so ncurses-based applications (nano, htop, vim) work correctly.
+        // Without this, control characters like Ctrl+X may not be interpreted properly.
+        // Inherit TERM from parent if available, otherwise default to xterm-256color.
+        let term = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string());
+        cmd.env("TERM", term);
+
         let child = pair
             .slave
             .spawn_command(cmd)

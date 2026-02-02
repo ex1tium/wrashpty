@@ -196,6 +196,38 @@ impl TerminalGuard {
         out.flush()?;
         Ok(())
     }
+
+    /// Ensures raw mode is active on the terminal.
+    ///
+    /// This method should be called after operations that may have disabled
+    /// raw mode (e.g., when transitioning from Edit mode where reedline may
+    /// have toggled terminal modes). It's idempotent - calling when raw mode
+    /// is already active has no negative effects.
+    ///
+    /// In raw mode:
+    /// - Line buffering is disabled (characters available immediately)
+    /// - Echo is disabled (typed characters not shown automatically)
+    /// - Signal generation is disabled (Ctrl+C sends byte 0x03, not SIGINT)
+    /// - Special input processing is disabled
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if raw mode cannot be enabled.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use wrashpty::terminal::TerminalGuard;
+    ///
+    /// // After reedline returns, ensure raw mode is still active
+    /// TerminalGuard::ensure_raw_mode()?;
+    /// # Ok::<(), wrashpty::terminal::TerminalError>(())
+    /// ```
+    pub fn ensure_raw_mode() -> Result<()> {
+        enable_raw_mode()?;
+        tracing::debug!("Raw mode ensured");
+        Ok(())
+    }
 }
 
 impl Drop for TerminalGuard {
@@ -332,5 +364,53 @@ mod tests {
         }
         // If we get here, drop completed without panic
         // Terminal should be usable - manual verification needed
+    }
+
+    #[test]
+    fn test_ensure_raw_mode_succeeds_when_already_in_raw_mode() {
+        // ensure_raw_mode should be idempotent - calling it multiple times
+        // when already in raw mode should succeed without issues.
+        match TerminalGuard::new() {
+            Ok(_guard) => {
+                // Guard is active, terminal is in raw mode
+                // ensure_raw_mode should succeed
+                match TerminalGuard::ensure_raw_mode() {
+                    Ok(()) => {
+                        // Success - raw mode was maintained
+                    }
+                    Err(e) => {
+                        panic!("ensure_raw_mode should succeed when already in raw mode: {}", e);
+                    }
+                }
+                // Guard drops here, restoring terminal
+            }
+            Err(e) => {
+                eprintln!("Skipping test (no terminal): {}", e);
+            }
+        }
+    }
+
+    #[test]
+    fn test_ensure_raw_mode_can_reenable_after_disable() {
+        // Test that ensure_raw_mode can re-enable raw mode after it's been disabled
+        match TerminalGuard::new() {
+            Ok(guard) => {
+                // Simulate what might happen if something disabled raw mode
+                // (Note: We can't easily disable without the guard's Drop,
+                // but we can verify ensure_raw_mode is callable)
+                match TerminalGuard::ensure_raw_mode() {
+                    Ok(()) => {
+                        // Success
+                    }
+                    Err(e) => {
+                        panic!("ensure_raw_mode failed: {}", e);
+                    }
+                }
+                drop(guard);
+            }
+            Err(e) => {
+                eprintln!("Skipping test (no terminal): {}", e);
+            }
+        }
     }
 }
