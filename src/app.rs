@@ -32,6 +32,7 @@
 
 use std::io::Write;
 use std::os::unix::io::{AsRawFd, BorrowedFd, RawFd};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::Arc;
@@ -44,7 +45,7 @@ use nix::unistd::read;
 use portable_pty::ExitStatus;
 use tracing::{debug, info, warn};
 
-use crate::chrome::{Chrome, ChromeRefreshGuard, SizeCheckResult};
+use crate::chrome::{Chrome, ChromeContext, SizeCheckResult};
 use crate::editor::{Editor, EditorResult};
 use crate::prompt::WrashPrompt;
 use crate::pty::Pty;
@@ -282,6 +283,22 @@ pub struct App {
 
     /// Timestamp when injection started (for timeout).
     injection_start: Option<Instant>,
+
+    // Command execution metadata for context bar
+    /// Current working directory (of the shell, not the parent process).
+    current_cwd: PathBuf,
+    /// Git branch name, if in a repository.
+    git_branch: Option<String>,
+    /// Whether git working directory is dirty.
+    git_dirty: bool,
+    /// Cached git info to avoid repeated expensive queries.
+    git_cache: Option<crate::git::CachedGitInfo>,
+    /// Last command that was executed.
+    last_command: Option<String>,
+    /// Duration of the last command execution.
+    last_command_duration: Option<Duration>,
+    /// Timestamp when command started (for duration tracking).
+    command_start_time: Option<Instant>,
 }
 
 impl App {
@@ -328,6 +345,9 @@ impl App {
         // Create the reedline editor
         let editor = Editor::new().context("Failed to create editor")?;
 
+        // Get initial working directory
+        let current_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+
         info!(mode = ?Mode::Initializing, "App starting");
 
         Ok(Self {
@@ -344,6 +364,13 @@ impl App {
             editor,
             pending_command: None,
             injection_start: None,
+            current_cwd,
+            git_branch: None,
+            git_dirty: false,
+            git_cache: None,
+            last_command: None,
+            last_command_duration: None,
+            command_start_time: None,
         })
     }
 
@@ -502,34 +529,32 @@ impl App {
             }
         }
 
-        // Redraw chrome bars right before reedline takes over
-        // This ensures bars are visible even if flush_pending wrote output that scrolled.
+        // Redraw context bar right before reedline takes over
+        // This ensures the bar is visible even if flush_pending wrote output that scrolled.
         // Note: We do NOT call position_cursor_in_scroll_region() here because:
         // 1. After command execution, cursor should be where output ended
-        // 2. Chrome bar drawing uses save/restore cursor, so it doesn't affect position
+        // 2. Context bar drawing uses save/restore cursor, so it doesn't affect position
         // 3. Reedline will position its prompt at the current cursor location
         if self.chrome.is_active() {
-            if let Ok((cols, rows)) = TerminalGuard::get_size() {
-                if let Err(e) = self.chrome.draw_top_bar(cols) {
-                    warn!("Failed to redraw top bar before prompt: {}", e);
-                }
-                if let Err(e) = self.chrome.draw_footer(cols, rows) {
-                    warn!("Failed to redraw footer before prompt: {}", e);
+            if let Ok((cols, _rows)) = TerminalGuard::get_size() {
+                let timestamp = chrono::Local::now().format("%H:%M").to_string();
+                let ctx = ChromeContext {
+                    cwd: &self.current_cwd,
+                    git_branch: self.git_branch.as_deref(),
+                    git_dirty: self.git_dirty,
+                    last_exit_code: self.last_exit_code,
+                    last_command: self.last_command.as_deref(),
+                    last_duration: self.last_command_duration,
+                    timestamp: &timestamp,
+                };
+                if let Err(e) = self.chrome.render_context_bar(cols, &ctx) {
+                    warn!("Failed to redraw context bar before prompt: {}", e);
                 }
             }
         }
 
         // Create prompt with last exit code
         let prompt = WrashPrompt::new(self.last_exit_code);
-
-        // Get terminal size for chrome refresh
-        let (refresh_cols, refresh_rows) = TerminalGuard::get_size().unwrap_or((80, 24));
-
-        // Start chrome refresh thread to keep footer visible during reedline operation.
-        // Reedline/crossterm may clear or overwrite the footer during initialization
-        // and rendering. This thread periodically redraws it.
-        let mut chrome_refresh_guard =
-            ChromeRefreshGuard::start(refresh_cols, refresh_rows, self.chrome.is_active());
 
         // Start background PTY drain thread to continuously collect output
         // while reedline blocks waiting for user input.
@@ -549,19 +574,17 @@ impl App {
         let mut drain_guard = DrainGuard::new(stop_flag, drain_handle);
 
         // Read line from user (blocks until input)
-        // Use match instead of ? to ensure guards are dropped before returning
+        // Use match instead of ? to ensure drain guard is dropped before returning
         let editor_result = match self.editor.read_line(&prompt) {
             Ok(result) => result,
             Err(e) => {
-                // Guards will stop and join threads on drop
-                drop(chrome_refresh_guard);
+                // Guard will stop and join thread on drop
                 drop(drain_guard);
                 return Err(e).context("Reedline read_line failed");
             }
         };
 
-        // Explicitly stop background threads before processing results
-        chrome_refresh_guard.stop();
+        // Explicitly stop background drain thread before processing results
         drain_guard.stop();
 
         // Collect and process all bytes from the drain thread
@@ -729,7 +752,10 @@ impl App {
 
         debug!(command = %command, "Injecting command");
 
-        // Transition to Injecting mode first (syncs PTY size)
+        // Store command for context bar display
+        self.last_command = Some(command.clone());
+
+        // Transition to Injecting mode first (syncs PTY size, records start time)
         self.transition_to_injecting()?;
 
         // Create echo guard to suppress command echo
@@ -849,8 +875,8 @@ impl App {
 
     /// Transitions to Edit mode.
     ///
-    /// Sets up scroll region and draws chrome bars if chrome is active.
-    /// Resizes PTY to effective rows (accounting for chrome bars).
+    /// Sets up scroll region and renders context bar if chrome is active.
+    /// Resizes PTY to effective rows (accounting for top bar).
     ///
     /// When coming from Passthrough, the scroll region is already set and cursor
     /// is at the end of command output. We preserve cursor position so the prompt
@@ -858,6 +884,15 @@ impl App {
     fn transition_to_edit(&mut self) {
         let from_mode = self.mode;
         info!(from = ?from_mode, to = ?Mode::Edit, "Mode transition");
+
+        // Calculate command duration if coming from command execution
+        if let Some(start) = self.command_start_time.take() {
+            self.last_command_duration = Some(start.elapsed());
+        }
+
+        // Update context information using shell's cwd (not parent process)
+        self.current_cwd = self.get_shell_cwd();
+        self.update_git_info();
 
         // Query terminal size for chrome setup
         let (cols, rows) = match TerminalGuard::get_size() {
@@ -877,25 +912,31 @@ impl App {
         if self.chrome.is_active() {
             if coming_from_passthrough {
                 // Coming from Passthrough: cursor is at end of command output.
-                // Re-establish scroll region in case reedline/crossterm reset it during
-                // the previous Edit mode. Use cursor-preserving variant so prompt appears
-                // after output (natural shell flow).
+                // Re-establish scroll region using cursor-preserving variant.
                 if let Err(e) = self.chrome.setup_scroll_region_preserve_cursor(rows) {
                     warn!("Failed to restore scroll region: {}", e);
                 }
             } else {
-                // Initial startup: set up scroll region and position cursor at top
+                // Initial startup: set up scroll region
                 if let Err(e) = self.chrome.enter_edit_mode(rows) {
                     warn!("Failed to set up chrome scroll region: {}", e);
                 }
             }
 
-            // Redraw chrome bars (they may have been scrolled or overwritten)
-            if let Err(e) = self.chrome.draw_top_bar(cols) {
-                warn!("Failed to draw top bar: {}", e);
-            }
-            if let Err(e) = self.chrome.draw_footer(cols, rows) {
-                warn!("Failed to draw footer: {}", e);
+            // SINGLE RENDER POINT: Render context bar BEFORE reedline starts
+            let timestamp = chrono::Local::now().format("%H:%M").to_string();
+            let ctx = ChromeContext {
+                cwd: &self.current_cwd,
+                git_branch: self.git_branch.as_deref(),
+                git_dirty: self.git_dirty,
+                last_exit_code: self.last_exit_code,
+                last_command: self.last_command.as_deref(),
+                last_duration: self.last_command_duration,
+                timestamp: &timestamp,
+            };
+
+            if let Err(e) = self.chrome.render_context_bar(cols, &ctx) {
+                warn!("Failed to render context bar: {}", e);
             }
 
             // Only position cursor for initial startup
@@ -906,9 +947,9 @@ impl App {
             }
         }
 
-        // Calculate effective rows for PTY (subtract 2 for bars if chrome active)
+        // Calculate effective rows for PTY (subtract 1 for top bar if chrome active)
         let effective_rows = if self.chrome.is_active() {
-            rows.saturating_sub(2)
+            rows.saturating_sub(1)
         } else {
             rows
         };
@@ -920,6 +961,35 @@ impl App {
         debug!(cols, effective_rows, chrome_active = self.chrome.is_active(), "PTY resized for Edit mode");
 
         self.mode = Mode::Edit;
+    }
+
+    /// Updates git information for the current working directory.
+    ///
+    /// Uses a cache to avoid expensive git status queries on every transition.
+    /// The cache is valid for a short duration and is invalidated when the
+    /// working directory changes.
+    fn update_git_info(&mut self) {
+        let git_info = crate::git::get_git_info_cached(&self.current_cwd, &mut self.git_cache);
+        self.git_branch = git_info.branch;
+        self.git_dirty = git_info.dirty;
+    }
+
+    /// Gets the shell's current working directory via /proc/<pid>/cwd.
+    ///
+    /// This reads the symlink at /proc/<pid>/cwd to determine the shell's
+    /// actual working directory, which may differ from the parent process's
+    /// cwd after `cd` commands.
+    ///
+    /// Falls back to the parent process's cwd if the shell's cwd cannot be read.
+    fn get_shell_cwd(&self) -> PathBuf {
+        if let Some(pid) = self.pty.child_pid() {
+            let proc_cwd = format!("/proc/{}/cwd", pid);
+            if let Ok(cwd) = std::fs::read_link(&proc_cwd) {
+                return cwd;
+            }
+        }
+        // Fallback to parent process cwd
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
     }
 
     /// Transitions to Passthrough mode.
@@ -955,8 +1025,9 @@ impl App {
         }
 
         // Calculate effective rows (matching Edit mode) to keep output constrained
+        // Subtract 1 for top bar when chrome is active
         let effective_rows = if self.chrome.is_active() {
-            rows.saturating_sub(2)
+            rows.saturating_sub(1)
         } else {
             rows
         };
@@ -992,6 +1063,9 @@ impl App {
     fn transition_to_injecting(&mut self) -> Result<()> {
         info!(from = ?self.mode, to = ?Mode::Injecting, "Mode transition");
 
+        // Record command start time for duration tracking
+        self.command_start_time = Some(Instant::now());
+
         // Ensure raw mode is active - reedline may have toggled terminal modes.
         // This is critical for control character passthrough during command injection.
         TerminalGuard::ensure_raw_mode()
@@ -1011,8 +1085,9 @@ impl App {
         }
 
         // Use effective_rows to keep output within scroll region
+        // Subtract 1 for top bar when chrome is active
         let effective_rows = if self.chrome.is_active() {
-            rows.saturating_sub(2)
+            rows.saturating_sub(1)
         } else {
             rows
         };
@@ -1096,16 +1171,25 @@ impl App {
                         debug!("Chrome suspended due to small terminal");
                     }
                     SizeCheckResult::Resumed => {
-                        // Chrome just resumed - set up scroll region and draw bars
-                        // Use cursor-preserving variant to not disrupt user's editing
+                        // Chrome just resumed - set up scroll region and draw context bar
                         if let Err(e) = self.chrome.setup_scroll_region_preserve_cursor(rows) {
                             warn!("Failed to setup scroll region on resume: {}", e);
                         }
-                        if let Err(e) = self.chrome.draw_top_bar(cols) {
-                            warn!("Failed to draw top bar on resume: {}", e);
-                        }
-                        if let Err(e) = self.chrome.draw_footer(cols, rows) {
-                            warn!("Failed to draw footer on resume: {}", e);
+
+                        // Render context bar with current context
+                        let timestamp = chrono::Local::now().format("%H:%M").to_string();
+                        let ctx = ChromeContext {
+                            cwd: &self.current_cwd,
+                            git_branch: self.git_branch.as_deref(),
+                            git_dirty: self.git_dirty,
+                            last_exit_code: self.last_exit_code,
+                            last_command: self.last_command.as_deref(),
+                            last_duration: self.last_command_duration,
+                            timestamp: &timestamp,
+                        };
+
+                        if let Err(e) = self.chrome.render_context_bar(cols, &ctx) {
+                            warn!("Failed to render context bar on resume: {}", e);
                         }
                         debug!("Chrome resumed after terminal grew");
                     }
@@ -1113,13 +1197,24 @@ impl App {
                         // No state transition - reapply scroll region and redraw if active
                         if self.chrome.is_active() {
                             // Reapply scroll region to match new terminal size
-                            // Use cursor-preserving variant to not disrupt user's editing
                             if let Err(e) = self.chrome.setup_scroll_region_preserve_cursor(rows) {
                                 warn!("Failed to reapply scroll region on resize: {}", e);
                             }
-                            // Redraw bars for new dimensions
-                            if let Err(e) = self.chrome.redraw_if_active(cols, rows) {
-                                warn!("Failed to redraw chrome bars on resize: {}", e);
+
+                            // Redraw context bar for new dimensions
+                            let timestamp = chrono::Local::now().format("%H:%M").to_string();
+                            let ctx = ChromeContext {
+                                cwd: &self.current_cwd,
+                                git_branch: self.git_branch.as_deref(),
+                                git_dirty: self.git_dirty,
+                                last_exit_code: self.last_exit_code,
+                                last_command: self.last_command.as_deref(),
+                                last_duration: self.last_command_duration,
+                                timestamp: &timestamp,
+                            };
+
+                            if let Err(e) = self.chrome.render_context_bar(cols, &ctx) {
+                                warn!("Failed to redraw context bar on resize: {}", e);
                             }
                         }
                     }
@@ -1141,8 +1236,9 @@ impl App {
                     TerminalGuard::get_size().context("Failed to get terminal size for resize")?;
 
                 // Calculate effective rows to match scroll region
+                // Subtract 1 for top bar when chrome is active
                 let effective_rows = if self.chrome.is_active() {
-                    rows.saturating_sub(2)
+                    rows.saturating_sub(1)
                 } else {
                     rows
                 };
@@ -1158,12 +1254,21 @@ impl App {
                     if let Err(e) = self.chrome.setup_scroll_region_preserve_cursor(rows) {
                         warn!("Failed to reapply scroll region on resize: {}", e);
                     }
-                    // Redraw chrome bars for new dimensions
-                    if let Err(e) = self.chrome.draw_top_bar(cols) {
-                        warn!("Failed to redraw top bar on resize: {}", e);
-                    }
-                    if let Err(e) = self.chrome.draw_footer(cols, rows) {
-                        warn!("Failed to redraw footer on resize: {}", e);
+
+                    // Redraw context bar for new dimensions
+                    let timestamp = chrono::Local::now().format("%H:%M").to_string();
+                    let ctx = ChromeContext {
+                        cwd: &self.current_cwd,
+                        git_branch: self.git_branch.as_deref(),
+                        git_dirty: self.git_dirty,
+                        last_exit_code: self.last_exit_code,
+                        last_command: self.last_command.as_deref(),
+                        last_duration: self.last_command_duration,
+                        timestamp: &timestamp,
+                    };
+
+                    if let Err(e) = self.chrome.render_context_bar(cols, &ctx) {
+                        warn!("Failed to redraw context bar on resize: {}", e);
                     }
                 }
 
@@ -1215,9 +1320,28 @@ impl App {
             .toggle_with_terminal_update(cols, rows)
             .context("Failed to toggle chrome")?;
 
+        // Render context bar immediately after enabling chrome
+        if self.chrome.is_active() {
+            let timestamp = chrono::Local::now().format("%H:%M").to_string();
+            let ctx = ChromeContext {
+                cwd: &self.current_cwd,
+                git_branch: self.git_branch.as_deref(),
+                git_dirty: self.git_dirty,
+                last_exit_code: self.last_exit_code,
+                last_command: self.last_command.as_deref(),
+                last_duration: self.last_command_duration,
+                timestamp: &timestamp,
+            };
+
+            if let Err(e) = self.chrome.render_context_bar(cols, &ctx) {
+                warn!("Failed to render context bar after toggle: {}", e);
+            }
+        }
+
         // Calculate new effective rows based on chrome state
+        // Subtract 1 for top bar when chrome is active
         let effective_rows = if self.chrome.is_active() {
-            rows.saturating_sub(2)
+            rows.saturating_sub(1)
         } else {
             rows
         };

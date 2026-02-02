@@ -20,7 +20,11 @@ pub mod bashrc;
 mod chrome;
 mod complete;
 pub mod editor;
+pub mod git;
 pub mod history;
 pub mod prompt;
 pub mod signals;
 mod suggest;
+
+// Re-export ChromeContext for use in app.rs
+pub use chrome::ChromeContext;
