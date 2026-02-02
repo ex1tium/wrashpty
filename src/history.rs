@@ -8,8 +8,17 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::Context;
+use thiserror::Error;
 use tracing::{debug, info, warn};
+
+/// Errors that can occur when loading history.
+#[derive(Debug, Error)]
+pub enum HistoryError {
+    /// The user's home directory could not be determined.
+    #[error("could not determine home directory")]
+    HomeDirNotFound,
+}
 
 /// Maximum number of history entries to load.
 const MAX_HISTORY_LINES: usize = 10_000;
@@ -30,11 +39,11 @@ const MAX_HISTORY_LINES: usize = 10_000;
 ///
 /// # Errors
 ///
-/// Returns an error if the home directory cannot be determined.
+/// Returns [`HistoryError::HomeDirNotFound`] if the home directory cannot be determined.
 /// Missing or unreadable history files are handled gracefully by returning
 /// an empty vector.
-pub fn load_history() -> Result<Vec<String>> {
-    let history_path = get_history_path()?;
+pub fn load_history() -> Result<Vec<String>, HistoryError> {
+    let history_path = get_history_path().map_err(|_| HistoryError::HomeDirNotFound)?;
 
     if !history_path.exists() {
         info!(path = %history_path.display(), "History file does not exist, starting with empty history");
@@ -95,14 +104,12 @@ pub fn load_history() -> Result<Vec<String>> {
         "Loaded history from bash_history"
     );
 
+    // Log safe metadata only - avoid leaking secrets from command history
     debug!(
-        "History sample: first={:?}, last={:?}",
-        history
-            .first()
-            .map(|s| s.chars().take(50).collect::<String>()),
-        history
-            .last()
-            .map(|s| s.chars().take(50).collect::<String>())
+        entries = history.len(),
+        first_entry_len = history.first().map(|s| s.len()),
+        last_entry_len = history.last().map(|s| s.len()),
+        "History loaded"
     );
 
     Ok(history)
@@ -115,7 +122,7 @@ pub fn load_history() -> Result<Vec<String>> {
 /// # Errors
 ///
 /// Returns an error if the home directory cannot be determined.
-fn get_history_path() -> Result<PathBuf> {
+fn get_history_path() -> anyhow::Result<PathBuf> {
     let home = dirs::home_dir().context("Could not determine home directory")?;
     Ok(home.join(".bash_history"))
 }
