@@ -70,6 +70,11 @@ const TERMINATION_TIMEOUT: Duration = Duration::from_secs(2);
 /// If no PREEXEC arrives within this time, transition to Passthrough anyway.
 const INJECTION_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// Poll timeout for the Injecting mode pump loop.
+/// This allows the loop to wake periodically to check `injection_start` and
+/// trigger the 500ms timeout path even when no PTY data arrives.
+const INJECTION_POLL_TIMEOUT: Duration = Duration::from_millis(50);
+
 /// Poll interval for background PTY drain during Edit mode (milliseconds).
 const EDIT_MODE_DRAIN_POLL_MS: i32 = 50;
 
@@ -728,7 +733,9 @@ impl App {
             }
         }
 
-        match self.pump.run_once()? {
+        // Use bounded wait so we can re-check injection_start timeout
+        // even when no PTY data arrives
+        match self.pump.run_once_with_timeout(Some(INJECTION_POLL_TIMEOUT))? {
             PumpResult::MarkerDetected(markers) => {
                 for marker in markers {
                     match marker {
@@ -981,6 +988,16 @@ mod tests {
         // Verify timeout is reasonable for injection
         assert!(INJECTION_TIMEOUT >= Duration::from_millis(100));
         assert!(INJECTION_TIMEOUT <= Duration::from_secs(2));
+    }
+
+    #[test]
+    fn test_injection_poll_timeout_constant() {
+        // Verify poll timeout is short enough to allow timely timeout detection
+        // but not so short as to cause excessive CPU usage
+        assert!(INJECTION_POLL_TIMEOUT >= Duration::from_millis(10));
+        assert!(INJECTION_POLL_TIMEOUT <= Duration::from_millis(200));
+        // Must be shorter than injection timeout to allow timeout to fire
+        assert!(INJECTION_POLL_TIMEOUT < INJECTION_TIMEOUT);
     }
 
     // =========================================================================
