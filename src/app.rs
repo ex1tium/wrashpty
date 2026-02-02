@@ -503,7 +503,11 @@ impl App {
         }
 
         // Redraw chrome bars right before reedline takes over
-        // This ensures bars are visible even if flush_pending wrote output that scrolled
+        // This ensures bars are visible even if flush_pending wrote output that scrolled.
+        // Note: We do NOT call position_cursor_in_scroll_region() here because:
+        // 1. After command execution, cursor should be where output ended
+        // 2. Chrome bar drawing uses save/restore cursor, so it doesn't affect position
+        // 3. Reedline will position its prompt at the current cursor location
         if self.chrome.is_active() {
             if let Ok((cols, rows)) = TerminalGuard::get_size() {
                 if let Err(e) = self.chrome.draw_top_bar(cols) {
@@ -511,9 +515,6 @@ impl App {
                 }
                 if let Err(e) = self.chrome.draw_footer(cols, rows) {
                     warn!("Failed to redraw footer before prompt: {}", e);
-                }
-                if let Err(e) = self.chrome.position_cursor_in_scroll_region() {
-                    warn!("Failed to position cursor before prompt: {}", e);
                 }
             }
         }
@@ -850,8 +851,13 @@ impl App {
     ///
     /// Sets up scroll region and draws chrome bars if chrome is active.
     /// Resizes PTY to effective rows (accounting for chrome bars).
+    ///
+    /// When coming from Passthrough, the scroll region is already set and cursor
+    /// is at the end of command output. We preserve cursor position so the prompt
+    /// appears after the output (natural shell flow).
     fn transition_to_edit(&mut self) {
-        info!(from = ?self.mode, to = ?Mode::Edit, "Mode transition");
+        let from_mode = self.mode;
+        info!(from = ?from_mode, to = ?Mode::Edit, "Mode transition");
 
         // Query terminal size for chrome setup
         let (cols, rows) = match TerminalGuard::get_size() {
@@ -864,27 +870,36 @@ impl App {
         };
 
         // Check minimum size and auto-suspend chrome if needed
-        // In transition_to_edit, we don't need to handle the result specially:
-        // - Suspended: is_active() will be false, so we won't draw bars or set scroll region
-        // - Resumed/NoChange: we proceed to set up scroll region and draw bars if active
         let _ = self.chrome.check_minimum_size(cols, rows);
 
-        // Set up scroll region if chrome is active
-        if let Err(e) = self.chrome.enter_edit_mode(rows) {
-            warn!("Failed to set up chrome scroll region: {}", e);
-        }
+        let coming_from_passthrough = from_mode == Mode::Passthrough;
 
-        // Draw chrome bars if active
         if self.chrome.is_active() {
+            if coming_from_passthrough {
+                // Coming from Passthrough: scroll region is already set, cursor is at
+                // end of output. DON'T reset scroll region (which would move cursor to
+                // row 2 and cause prompt to overwrite output). Just redraw chrome bars.
+                // The bars use save/restore cursor so they don't affect cursor position.
+            } else {
+                // Initial startup: set up scroll region and position cursor
+                if let Err(e) = self.chrome.enter_edit_mode(rows) {
+                    warn!("Failed to set up chrome scroll region: {}", e);
+                }
+            }
+
+            // Redraw chrome bars (they may have been scrolled or overwritten)
             if let Err(e) = self.chrome.draw_top_bar(cols) {
                 warn!("Failed to draw top bar: {}", e);
             }
             if let Err(e) = self.chrome.draw_footer(cols, rows) {
                 warn!("Failed to draw footer: {}", e);
             }
-            // Position cursor at start of scroll region so reedline renders there
-            if let Err(e) = self.chrome.position_cursor_in_scroll_region() {
-                warn!("Failed to position cursor in scroll region: {}", e);
+
+            // Only position cursor for initial startup
+            if !coming_from_passthrough {
+                if let Err(e) = self.chrome.position_cursor_in_scroll_region() {
+                    warn!("Failed to position cursor in scroll region: {}", e);
+                }
             }
         }
 
@@ -906,40 +921,40 @@ impl App {
 
     /// Transitions to Passthrough mode.
     ///
-    /// **Critical**: Resets the scroll region and clears chrome before entering
-    /// Passthrough to ensure proper terminal behavior for fullscreen apps.
-    /// Chrome's enter_passthrough_mode() ALWAYS resets scroll region regardless
-    /// of chrome state (defense-in-depth).
+    /// **Scroll Region**: The scroll region (rows 2 to N-1) was set in Edit mode
+    /// and persists. We don't re-set it here to avoid moving the cursor.
+    ///
+    /// **PTY Size**: Keeps PTY at effective_rows (total_rows - 2 when chrome is
+    /// active) to match the scroll region. The shell sees the constrained size
+    /// and formats output accordingly.
+    ///
+    /// **Raw Mode**: Ensures terminal raw mode is active so control characters
+    /// are forwarded as bytes to the PTY rather than generating signals.
     fn transition_to_passthrough(&mut self) -> Result<()> {
         info!(from = ?self.mode, to = ?Mode::Passthrough, "Mode transition");
 
-        // Get terminal size first - needed for clearing bars and PTY resize
+        // Ensure raw mode is active - reedline may have toggled terminal modes.
+        // This is critical for control character passthrough (Ctrl+C -> 0x03, not SIGINT).
+        TerminalGuard::ensure_raw_mode()
+            .context("Failed to ensure raw mode for Passthrough")?;
+
+        // Get terminal size
         let (cols, rows) =
             TerminalGuard::get_size().context("Failed to get terminal size for Passthrough")?;
 
-        // Clear chrome bars from display before resetting scroll region.
-        // This prevents visual artifacts when fullscreen apps (vim, nano, htop) start.
-        if self.chrome.is_active() {
-            if let Err(e) = self.chrome.clear_bars(rows) {
-                warn!("Failed to clear chrome bars: {}", e);
-            }
-        }
+        // Calculate effective rows (matching Edit mode) to keep output constrained
+        let effective_rows = if self.chrome.is_active() {
+            rows.saturating_sub(2)
+        } else {
+            rows
+        };
 
-        // Chrome ALWAYS resets scroll region on Passthrough entry
-        if let Err(e) = self.chrome.enter_passthrough_mode() {
-            warn!("Chrome failed to reset scroll region: {}", e);
-        }
-
-        // Defense-in-depth: also reset via TerminalGuard
-        if let Err(e) = TerminalGuard::reset_scroll_region() {
-            warn!("Failed to reset scroll region: {}", e);
-        }
-
-        // Resize PTY to full terminal - Passthrough uses all rows
+        // Keep PTY at effective_rows so command output stays within scroll region.
+        // The scroll region was already set in Edit mode and persists.
         self.pty
-            .resize(cols, rows)
+            .resize(cols, effective_rows)
             .context("Failed to resize PTY for Passthrough")?;
-        debug!(cols, rows, "PTY resized for Passthrough (full screen)");
+        debug!(cols, effective_rows, "PTY sized for Passthrough (within scroll region)");
 
         self.mode = Mode::Passthrough;
         Ok(())
@@ -951,16 +966,37 @@ impl App {
     /// The terminal may have been resized while reedline was active in Edit
     /// mode. Since reedline owns SIGWINCH during Edit mode, we sync here
     /// to ensure the PTY has the correct geometry before command execution.
+    ///
+    /// **PTY Size**: Uses effective_rows (total_rows - 2 when chrome is active)
+    /// to match the scroll region. This ensures command output stays constrained
+    /// to the content area.
+    ///
+    /// **Raw Mode**: Ensures terminal raw mode is active. Reedline may toggle
+    /// terminal modes during Edit mode, so we must explicitly re-enable raw mode
+    /// here to ensure control characters are forwarded correctly to the PTY.
     fn transition_to_injecting(&mut self) -> Result<()> {
         info!(from = ?self.mode, to = ?Mode::Injecting, "Mode transition");
+
+        // Ensure raw mode is active - reedline may have toggled terminal modes.
+        // This is critical for control character passthrough during command injection.
+        TerminalGuard::ensure_raw_mode()
+            .context("Failed to ensure raw mode for Injecting")?;
 
         // Sync PTY size - terminal may have been resized during Edit mode
         let (cols, rows) =
             TerminalGuard::get_size().context("Failed to get terminal size for transition")?;
+
+        // Use effective_rows to keep output within scroll region
+        let effective_rows = if self.chrome.is_active() {
+            rows.saturating_sub(2)
+        } else {
+            rows
+        };
+
         self.pty
-            .resize(cols, rows)
+            .resize(cols, effective_rows)
             .context("Failed to resize PTY on transition to Injecting")?;
-        debug!(cols, rows, "PTY size synchronized for command execution");
+        debug!(cols, effective_rows, "PTY size synchronized for command execution");
 
         self.mode = Mode::Injecting;
         self.injection_start = Some(Instant::now());
@@ -1037,7 +1073,8 @@ impl App {
                     }
                     SizeCheckResult::Resumed => {
                         // Chrome just resumed - set up scroll region and draw bars
-                        if let Err(e) = self.chrome.setup_scroll_region(rows) {
+                        // Use cursor-preserving variant to not disrupt user's editing
+                        if let Err(e) = self.chrome.setup_scroll_region_preserve_cursor(rows) {
                             warn!("Failed to setup scroll region on resume: {}", e);
                         }
                         if let Err(e) = self.chrome.draw_top_bar(cols) {
@@ -1052,7 +1089,8 @@ impl App {
                         // No state transition - reapply scroll region and redraw if active
                         if self.chrome.is_active() {
                             // Reapply scroll region to match new terminal size
-                            if let Err(e) = self.chrome.setup_scroll_region(rows) {
+                            // Use cursor-preserving variant to not disrupt user's editing
+                            if let Err(e) = self.chrome.setup_scroll_region_preserve_cursor(rows) {
                                 warn!("Failed to reapply scroll region on resize: {}", e);
                             }
                             // Redraw bars for new dimensions

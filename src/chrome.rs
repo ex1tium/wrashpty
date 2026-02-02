@@ -192,6 +192,10 @@ impl Chrome {
     /// Emits DECSTBM sequence to set scroll region from row 2 to row N-1,
     /// reserving row 1 for top bar and row N for footer.
     ///
+    /// **Note**: DECSTBM resets the cursor to the home position (top-left of
+    /// scroll region). Use `setup_scroll_region_preserve_cursor` if you need
+    /// to preserve the cursor position after command output.
+    ///
     /// # Arguments
     ///
     /// * `total_rows` - Total terminal height in rows
@@ -214,6 +218,42 @@ impl Chrome {
             top = 2,
             bottom = total_rows - 1,
             "Scroll region configured"
+        );
+        Ok(())
+    }
+
+    /// Sets up the scroll region while preserving cursor position.
+    ///
+    /// Unlike `setup_scroll_region`, this version saves the cursor position
+    /// before setting the scroll region and restores it afterward. This is
+    /// important when returning from Passthrough mode where command output
+    /// should remain visible.
+    ///
+    /// # Arguments
+    ///
+    /// * `total_rows` - Total terminal height in rows
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if escape sequence cannot be written to stdout.
+    pub fn setup_scroll_region_preserve_cursor(&self, total_rows: u16) -> io::Result<()> {
+        if !self.is_active() {
+            return Ok(());
+        }
+
+        let mut out = io::stdout();
+        // Save cursor position before DECSTBM (which resets cursor to home)
+        write!(out, "\x1b[s")?;
+        // DECSTBM: Set scrolling region from row 2 to row (total_rows - 1)
+        write!(out, "\x1b[2;{}r", total_rows - 1)?;
+        // Restore cursor position
+        write!(out, "\x1b[u")?;
+        out.flush()?;
+
+        debug!(
+            top = 2,
+            bottom = total_rows - 1,
+            "Scroll region configured (cursor preserved)"
         );
         Ok(())
     }
@@ -389,9 +429,47 @@ impl Chrome {
         &s[..last_valid_idx]
     }
 
+    /// Clears the content area (between chrome bars) and positions cursor.
+    ///
+    /// Clears rows 2 to N-1 (the scroll region area) and positions the cursor
+    /// at row 2, column 1. This provides a clean slate after fullscreen apps
+    /// or commands, ensuring predictable prompt positioning.
+    ///
+    /// Only performs clearing when chrome is active. When chrome is not active,
+    /// this is a no-op.
+    ///
+    /// # Arguments
+    ///
+    /// * `total_rows` - Total terminal height in rows
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if escape sequences cannot be written to stdout.
+    pub fn clear_content_area(&self, total_rows: u16) -> io::Result<()> {
+        if !self.is_active() {
+            return Ok(());
+        }
+
+        let mut out = io::stdout();
+
+        // Clear each row in the content area (rows 2 to N-1)
+        for row in 2..total_rows {
+            write!(out, "\x1b[{};1H", row)?; // Move to row
+            write!(out, "\x1b[K")?; // Clear line
+        }
+
+        // Position cursor at start of content area
+        write!(out, "\x1b[2;1H")?;
+        out.flush()?;
+
+        debug!("Content area cleared, cursor at row 2");
+        Ok(())
+    }
+
     /// Clears the chrome bars from the terminal.
     ///
-    /// Used when disabling chrome to remove visual artifacts.
+    /// **Note**: This function moves the cursor. The caller should save/restore
+    /// cursor position if needed.
     ///
     /// # Arguments
     ///
@@ -793,5 +871,19 @@ mod tests {
         let chrome = Chrome::new(ChromeMode::Full);
         let content = chrome.render_footer_content(20);
         assert!(content.width() <= 20);
+    }
+
+    #[test]
+    fn test_clear_content_area_noop_when_headless() {
+        let chrome = Chrome::new(ChromeMode::Headless);
+        // Should succeed without doing anything (headless mode)
+        assert!(chrome.clear_content_area(24).is_ok());
+    }
+
+    #[test]
+    fn test_clear_content_area_succeeds_when_active() {
+        let chrome = Chrome::new(ChromeMode::Full);
+        // Should succeed (writes escape sequences to stdout)
+        assert!(chrome.clear_content_area(24).is_ok());
     }
 }
