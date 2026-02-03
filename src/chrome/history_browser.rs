@@ -174,8 +174,15 @@ struct EditModeState {
 impl EditModeState {
     /// Creates a new edit mode state from a command string.
     fn new(command: &str) -> Self {
-        let tokens = tokenize_command(command);
-        let edit_buffer = tokens.first().map(|t| t.text.clone()).unwrap_or_default();
+        let mut tokens = tokenize_command(command);
+        // Ensure tokens is never empty to prevent panics in token-indexing methods
+        if tokens.is_empty() {
+            tokens.push(CommandToken {
+                text: String::new(),
+                token_type: TokenType::Command,
+            });
+        }
+        let edit_buffer = tokens[0].text.clone();
         Self {
             original: command.to_string(),
             tokens,
@@ -1865,6 +1872,24 @@ mod tests {
         assert_eq!(state.token_count(), 2);
         assert_eq!(state.selected, 0);
         assert!(state.undo_stack.is_empty());
+    }
+
+    #[test]
+    fn test_edit_mode_state_new_empty_command_has_placeholder() {
+        let state = EditModeState::new("");
+        // Should have exactly one placeholder token to prevent panics
+        assert_eq!(state.token_count(), 1);
+        assert_eq!(state.selected, 0);
+        assert!(state.tokens[0].text.is_empty());
+        assert_eq!(state.tokens[0].token_type, TokenType::Command);
+    }
+
+    #[test]
+    fn test_edit_mode_insert_after_on_empty_command_succeeds() {
+        let mut state = EditModeState::new("");
+        // This should not panic - we have a placeholder token
+        state.insert_token_after();
+        assert_eq!(state.token_count(), 2);
     }
 
     #[test]
