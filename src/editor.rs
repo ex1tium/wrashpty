@@ -174,6 +174,7 @@ impl Editor {
         );
 
         // Set up keybindings with Tab triggering the completion menu
+        // and Ctrl+Space opening the panel
         let mut keybindings = default_emacs_keybindings();
         keybindings.add_binding(
             KeyModifiers::NONE,
@@ -182,6 +183,11 @@ impl Editor {
                 ReedlineEvent::Menu("completion_menu".to_string()),
                 ReedlineEvent::MenuNext,
             ]),
+        );
+        keybindings.add_binding(
+            KeyModifiers::CONTROL,
+            KeyCode::Char(' '),
+            ReedlineEvent::ExecuteHostCommand("open_panel".to_string()),
         );
 
         // Create reedline with history, completions, menu, and autosuggestions
@@ -248,8 +254,15 @@ impl Editor {
     pub fn read_line(&mut self, prompt: &dyn Prompt) -> Result<EditorResult> {
         match self.reedline.read_line(prompt) {
             Ok(Signal::Success(line)) => {
-                debug!(command = %line, "User submitted command");
-                Ok(EditorResult::Command(line))
+                // Check if this is a host command (from ExecuteHostCommand event)
+                // ExecuteHostCommand returns through Success in reedline 0.45
+                if line == "open_panel" {
+                    debug!("Host command: open_panel");
+                    Ok(EditorResult::HostCommand(line))
+                } else {
+                    debug!(command = %line, "User submitted command");
+                    Ok(EditorResult::Command(line))
+                }
             }
             Ok(Signal::CtrlC) => {
                 debug!("User pressed Ctrl+C");
