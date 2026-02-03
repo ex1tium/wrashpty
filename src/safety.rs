@@ -34,12 +34,16 @@ pub fn install_panic_hook() {
     panic::set_hook(Box::new(move |panic_info| {
         // Async-signal-safe terminal restoration sequence:
         // - \x1b[r    : Reset scroll region to full screen (DECSTBM)
+        // - \x1b[2J   : Clear entire screen (ED)
+        // - \x1b[H    : Move cursor to home position (CUP)
         // - \x1b[?25h : Show cursor (DECTCEM)
+        //
+        // The screen clear prevents "ghost" content from remaining after crash.
         //
         // We use libc::write directly to STDOUT_FILENO and STDERR_FILENO
         // without any buffering or allocation. This is async-signal-safe
         // and works even if the standard library's state is corrupted.
-        let restore_sequence = b"\x1b[r\x1b[?25h";
+        let restore_sequence = b"\x1b[r\x1b[2J\x1b[H\x1b[?25h";
         unsafe {
             // Write to both stdout and stderr to maximize chances of restoration
             libc::write(

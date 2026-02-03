@@ -256,7 +256,13 @@ impl Drop for TerminalGuard {
             tracing::warn!("Failed to reset scroll region: {}", e);
         }
 
-        // Attempt 2: Show cursor
+        // Attempt 2: Clear screen and move cursor to home
+        // This prevents "ghost" content from remaining after exit
+        if let Err(e) = write!(out, "\x1b[2J\x1b[H") {
+            tracing::warn!("Failed to clear screen: {}", e);
+        }
+
+        // Attempt 3: Show cursor
         if let Err(e) = write!(out, "\x1b[?25h") {
             tracing::warn!("Failed to show cursor: {}", e);
         }
