@@ -265,25 +265,27 @@ impl HistoryStore {
         // Open a connection with busy timeout for concurrent access
         let conn = self.open_connection()?;
 
-        // Prefer stored ID to avoid race with concurrent writers
-        let id: i64 = if let Some(stored_id) = self.last_command_id.take() {
-            stored_id.0
-        } else {
-            // Fallback: query for the most recent command (legacy behavior)
-            let last_id: Option<i64> = conn
-                .query_row(
-                    "SELECT id FROM history ORDER BY id DESC LIMIT 1",
-                    [],
-                    |row| row.get(0),
-                )
-                .ok();
+        // Prefer stored ID to avoid race with concurrent writers.
+        // Read without consuming - only clear after successful update.
+        let (id, used_stored_id): (i64, bool) =
+            if let Some(stored_id) = self.last_command_id.as_ref().map(|id| id.0) {
+                (stored_id, true)
+            } else {
+                // Fallback: query for the most recent command (legacy behavior)
+                let last_id: Option<i64> = conn
+                    .query_row(
+                        "SELECT id FROM history ORDER BY id DESC LIMIT 1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .ok();
 
-            let Some(id) = last_id else {
-                debug!("No recent command found to update");
-                return Ok(());
+                let Some(id) = last_id else {
+                    debug!("No recent command found to update");
+                    return Ok(());
+                };
+                (id, false)
             };
-            id
-        };
 
         // Update the entry with metadata
         let duration_ms = duration.map(|d| d.as_millis() as i64);
@@ -293,6 +295,11 @@ impl HistoryStore {
             "UPDATE history SET exit_status = ?1, duration_ms = ?2, cwd = ?3 WHERE id = ?4",
             rusqlite::params![exit_status, duration_ms, cwd_str, id],
         )?;
+
+        // Only clear last_command_id after successful update
+        if used_stored_id {
+            self.last_command_id = None;
+        }
 
         debug!(
             id,
@@ -339,10 +346,12 @@ impl HistoryStore {
         // Note: start_timestamp is stored in milliseconds by reedline
         // Use COALESCE to handle NULL timestamps (treat as very old: 0)
         let mut sql = if needs_full_aggregation {
-            // Full aggregation for frequency/frecency - groups all occurrences
+            // Full aggregation for frequency/frecency - groups all occurrences.
+            // Return NULL for cwd/exit_status/duration_ms since MAX() across different
+            // executions would misrepresent the most recent run's metadata.
             String::from(
                 "SELECT command_line, MAX(COALESCE(start_timestamp, 0)) as start_timestamp,
-                 MAX(cwd) as cwd, MAX(exit_status) as exit_status, MAX(duration_ms) as duration_ms,
+                 NULL as cwd, NULL as exit_status, NULL as duration_ms,
                  COUNT(*) as exec_count,
                  COALESCE(COUNT(*) * (1.0 / (1.0 + COALESCE((julianday('now') - julianday(datetime(MAX(COALESCE(start_timestamp, 0))/1000, 'unixepoch'))), 365) * 24)) * 100, 0.0) as frecency
                  FROM history WHERE 1=1"
