@@ -2,6 +2,7 @@
 
 use std::any::Any;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui_core::buffer::Buffer;
@@ -16,6 +17,7 @@ use super::file_browser::FileBrowserPanel;
 use super::help_panel::HelpPanel;
 use super::history_browser::HistoryBrowserPanel;
 use super::panel::{Panel, PanelResult};
+use crate::history_store::HistoryStore;
 
 /// A tabbed container for multiple panels.
 pub struct TabbedPanel {
@@ -41,6 +43,15 @@ impl TabbedPanel {
         }
     }
 
+    /// Sets the history store for the history browser panel.
+    pub fn set_history_store(&mut self, store: Arc<Mutex<HistoryStore>>) {
+        if let Some(panel) = self.tabs.get_mut(2) {
+            if let Some(hist_panel) = panel.as_any_mut().downcast_mut::<HistoryBrowserPanel>() {
+                hist_panel.set_history_store(store);
+            }
+        }
+    }
+
     /// Loads context for all panels based on the current working directory.
     pub fn load_context(&mut self, cwd: &Path) {
         // Load commands for command palette
@@ -57,9 +68,10 @@ impl TabbedPanel {
             }
         }
 
-        // Load history for history browser
+        // Load history for history browser with cwd context
         if let Some(panel) = self.tabs.get_mut(2) {
             if let Some(hist_panel) = panel.as_any_mut().downcast_mut::<HistoryBrowserPanel>() {
+                hist_panel.set_cwd(cwd.to_path_buf());
                 hist_panel.load_history();
             }
         }
