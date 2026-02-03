@@ -794,6 +794,11 @@ impl Chrome {
         // Restore scroll region (row 2 to N for normal chrome)
         self.setup_scroll_region(total_rows)?;
 
+        // Position cursor at start of scroll region (row 2) to ensure
+        // any subsequent output (e.g., command execution) stays within
+        // the scroll region and doesn't overwrite the context bar.
+        self.position_cursor_in_scroll_region()?;
+
         debug!(old_height, "Panel collapsed");
 
         Ok(())
