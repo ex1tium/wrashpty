@@ -2,6 +2,7 @@
 
 use std::any::Any;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui_core::buffer::Buffer;
@@ -16,6 +17,14 @@ use super::file_browser::FileBrowserPanel;
 use super::help_panel::HelpPanel;
 use super::history_browser::HistoryBrowserPanel;
 use super::panel::{Panel, PanelResult};
+use crate::history_store::HistoryStore;
+
+// Tab indices for type-based access
+const TAB_COMMAND_PALETTE: usize = 0;
+const TAB_FILE_BROWSER: usize = 1;
+const TAB_HISTORY_BROWSER: usize = 2;
+#[allow(dead_code)]
+const TAB_HELP: usize = 3;
 
 /// A tabbed container for multiple panels.
 pub struct TabbedPanel {
@@ -41,25 +50,35 @@ impl TabbedPanel {
         }
     }
 
+    /// Sets the history store for the history browser panel.
+    pub fn set_history_store(&mut self, store: Arc<Mutex<HistoryStore>>) {
+        if let Some(panel) = self.tabs.get_mut(TAB_HISTORY_BROWSER) {
+            if let Some(hist_panel) = panel.as_any_mut().downcast_mut::<HistoryBrowserPanel>() {
+                hist_panel.set_history_store(store);
+            }
+        }
+    }
+
     /// Loads context for all panels based on the current working directory.
     pub fn load_context(&mut self, cwd: &Path) {
         // Load commands for command palette
-        if let Some(panel) = self.tabs.get_mut(0) {
+        if let Some(panel) = self.tabs.get_mut(TAB_COMMAND_PALETTE) {
             if let Some(cmd_panel) = panel.as_any_mut().downcast_mut::<CommandPalettePanel>() {
                 cmd_panel.load_commands(cwd);
             }
         }
 
         // Set cwd for file browser
-        if let Some(panel) = self.tabs.get_mut(1) {
+        if let Some(panel) = self.tabs.get_mut(TAB_FILE_BROWSER) {
             if let Some(file_panel) = panel.as_any_mut().downcast_mut::<FileBrowserPanel>() {
                 let _ = file_panel.navigate_to(cwd);
             }
         }
 
-        // Load history for history browser
-        if let Some(panel) = self.tabs.get_mut(2) {
+        // Load history for history browser with cwd context
+        if let Some(panel) = self.tabs.get_mut(TAB_HISTORY_BROWSER) {
             if let Some(hist_panel) = panel.as_any_mut().downcast_mut::<HistoryBrowserPanel>() {
+                hist_panel.set_cwd(cwd.to_path_buf());
                 hist_panel.load_history();
             }
         }
@@ -152,13 +171,25 @@ impl Panel for TabbedPanel {
 
         tabs_widget.render(chunks[0], buffer);
 
-        // Render a separator line
+        // Render a separator line with tab switch hint
         if chunks[0].height > 1 {
             let sep_area = Rect::new(chunks[0].x, chunks[0].y + 1, chunks[0].width, 1);
             for x in sep_area.x..sep_area.x + sep_area.width {
                 if let Some(cell) = buffer.cell_mut((x, sep_area.y)) {
                     cell.set_char('─');
                     cell.set_style(Style::default().fg(Color::DarkGray));
+                }
+            }
+            // Add hint for tab switching at the right side
+            let hint = "Ctrl+←→ switch tabs";
+            let hint_start = sep_area.x + sep_area.width.saturating_sub(hint.len() as u16 + 2);
+            for (i, ch) in hint.chars().enumerate() {
+                let x = hint_start + i as u16;
+                if x < sep_area.x + sep_area.width {
+                    if let Some(cell) = buffer.cell_mut((x, sep_area.y)) {
+                        cell.set_char(ch);
+                        cell.set_style(Style::default().fg(Color::DarkGray));
+                    }
                 }
             }
         }
@@ -170,30 +201,26 @@ impl Panel for TabbedPanel {
     }
 
     fn handle_input(&mut self, key: KeyEvent) -> PanelResult {
-        match key.code {
-            // Tab switching
-            KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                self.prev_tab();
-                PanelResult::Continue
-            }
-            KeyCode::Tab => {
-                self.next_tab();
-                PanelResult::Continue
-            }
-            KeyCode::BackTab => {
-                self.prev_tab();
-                PanelResult::Continue
-            }
-            // Global dismiss
-            KeyCode::Esc => PanelResult::Dismiss,
-            // Delegate to active panel
-            _ => {
-                if let Some(panel) = self.tabs.get_mut(self.active_tab) {
-                    panel.handle_input(key)
-                } else {
-                    PanelResult::Dismiss
+        // Panel tab switching with Ctrl+Left/Right (frees Tab for inner panel use)
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Left => {
+                    self.prev_tab();
+                    return PanelResult::Continue;
                 }
+                KeyCode::Right => {
+                    self.next_tab();
+                    return PanelResult::Continue;
+                }
+                _ => {}
             }
+        }
+
+        // Delegate all other keys to active panel
+        if let Some(panel) = self.tabs.get_mut(self.active_tab) {
+            panel.handle_input(key)
+        } else {
+            PanelResult::Dismiss
         }
     }
 
