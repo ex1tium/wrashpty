@@ -1367,10 +1367,16 @@ impl App {
             return Ok(code);
         }
 
-        // Try to send exit command
-        debug!("Sending 'exit' command to PTY");
-        if let Err(e) = self.pty.write_command("exit") {
-            warn!("Failed to send exit command: {}", e);
+        // Send SIGHUP to the shell (standard "terminal hangup" signal)
+        // This is cleaner than sending "exit" command which pollutes shell history
+        if let Some(pid) = self.pty.child_pid() {
+            debug!(pid, "Sending SIGHUP to child process");
+            // SAFETY: Sending SIGHUP to our own child process is safe
+            unsafe {
+                libc::kill(pid as i32, libc::SIGHUP);
+            }
+        } else {
+            warn!("Could not get child PID for SIGHUP");
         }
 
         // Wait for child to exit with timeout
