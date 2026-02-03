@@ -51,7 +51,7 @@ use tracing::{debug, info, warn};
 
 use crate::chrome::panel::{Panel, PanelResult};
 use crate::chrome::tabbed_panel::TabbedPanel;
-use crate::chrome::{Chrome, ChromeContext, SizeCheckResult};
+use crate::chrome::{Chrome, ChromeContext, NotificationStyle, SizeCheckResult};
 use crate::editor::{Editor, EditorResult};
 use crate::history_store::HistoryStore;
 use crate::prompt::WrashPrompt;
@@ -342,6 +342,9 @@ pub struct App {
     last_command_duration: Option<Duration>,
     /// Timestamp when command started (for duration tracking).
     command_start_time: Option<Instant>,
+    /// Flag indicating a resize occurred during Edit mode and chrome needs updating.
+    /// This defers scroll region and context bar updates until after reedline yields.
+    pending_resize: bool,
 }
 
 impl App {
@@ -431,6 +434,7 @@ impl App {
             last_command: None,
             last_command_duration: None,
             command_start_time: None,
+            pending_resize: false,
         })
     }
 
@@ -580,12 +584,39 @@ impl App {
                     dropped_bytes = dropped,
                     "Background output exceeded buffer, {} bytes dropped", dropped
                 );
-                // Show warning to user in terminal
-                let _ = writeln!(
-                    std::io::stderr(),
-                    "\x1b[33m[wrashpty: {} bytes of background output dropped due to buffer overflow]\x1b[0m",
-                    dropped
+                // Queue warning notification for display in context bar
+                self.chrome.notify(
+                    format!("{} bytes dropped (buffer overflow)", dropped),
+                    NotificationStyle::Warning,
+                    Duration::from_secs(5),
                 );
+            }
+        }
+
+        // Handle deferred resize from SIGWINCH during Edit mode.
+        // This is done here (before reedline takes control) rather than in the
+        // signal handler to avoid interfering with reedline's internal repaint.
+        if self.pending_resize {
+            self.pending_resize = false;
+            if let Ok((cols, rows)) = TerminalGuard::get_size() {
+                match self.chrome.check_minimum_size(cols, rows) {
+                    SizeCheckResult::Suspended => {
+                        if let Err(e) = self.chrome.clear_bars(rows) {
+                            warn!("Failed to clear chrome bars on suspend: {}", e);
+                        }
+                        if let Err(e) = Chrome::reset_scroll_region() {
+                            warn!("Failed to reset scroll region on suspend: {}", e);
+                        }
+                        debug!("Chrome suspended due to small terminal (deferred)");
+                    }
+                    SizeCheckResult::Resumed | SizeCheckResult::NoChange => {
+                        if self.chrome.is_active() {
+                            if let Err(e) = self.chrome.setup_scroll_region_preserve_cursor(rows) {
+                                warn!("Failed to reapply scroll region on resize: {}", e);
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -607,7 +638,7 @@ impl App {
                     last_duration: self.last_command_duration,
                     timestamp: &timestamp,
                 };
-                if let Err(e) = self.chrome.render_context_bar(cols, &ctx) {
+                if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &ctx) {
                     warn!("Failed to redraw context bar before prompt: {}", e);
                 }
             }
@@ -665,10 +696,11 @@ impl App {
                 dropped_bytes = channel_dropped_bytes,
                 "Background drain channel full, {} bytes dropped", channel_dropped_bytes
             );
-            let _ = writeln!(
-                std::io::stderr(),
-                "\x1b[33m[wrashpty: {} bytes of background output dropped due to channel backpressure]\x1b[0m",
-                channel_dropped_bytes
+            // Queue warning notification for display in context bar
+            self.chrome.notify(
+                format!("{} bytes dropped (channel full)", channel_dropped_bytes),
+                NotificationStyle::Warning,
+                Duration::from_secs(5),
             );
         }
 
@@ -739,9 +771,10 @@ impl App {
                 // History wipe command - sets pending confirmation flag
                 if trimmed == ":wipe" {
                     self.pending_wipe_confirmation = true;
-                    let _ = writeln!(
-                        std::io::stderr(),
-                        "\x1b[33mThis will delete all command history. Type 'wipe' to confirm:\x1b[0m"
+                    self.chrome.notify(
+                        "Type 'wipe' to confirm history deletion",
+                        NotificationStyle::Warning,
+                        Duration::from_secs(10),
                     );
                     return Ok(());
                 }
@@ -749,19 +782,21 @@ impl App {
                 // Handle wipe confirmation (only if :wipe was entered first)
                 if trimmed == "wipe" && self.pending_wipe_confirmation {
                     self.pending_wipe_confirmation = false;
+                    self.chrome.clear_notifications();
                     if let Ok(store) = self.history_store.lock() {
                         match store.wipe("wipe") {
                             Ok(()) => {
-                                let _ = writeln!(
-                                    std::io::stderr(),
-                                    "\x1b[32mHistory database deleted successfully.\x1b[0m"
+                                self.chrome.notify(
+                                    "History database deleted",
+                                    NotificationStyle::Success,
+                                    Duration::from_secs(3),
                                 );
                             }
                             Err(e) => {
-                                let _ = writeln!(
-                                    std::io::stderr(),
-                                    "\x1b[31mFailed to delete history: {}\x1b[0m",
-                                    e
+                                self.chrome.notify(
+                                    format!("Failed to delete history: {}", e),
+                                    NotificationStyle::Error,
+                                    Duration::from_secs(5),
                                 );
                             }
                         }
@@ -1097,14 +1132,19 @@ impl App {
             }
             PanelResult::InsertText(text) => {
                 // Cannot inject text directly into reedline buffer from outside,
-                // so we print the command for the user to copy/paste manually
-                debug!(text = %text, "Panel requested text insertion, printing for copy/paste");
+                // so we show a notification with the command for the user to copy
+                debug!(text = %text, "Panel requested text insertion, showing notification");
                 self.restore_after_panel()?;
-                // Print the command so user can copy it
-                let _ = writeln!(
-                    std::io::stderr(),
-                    "\x1b[33mSelected command (copy to run): {}\x1b[0m",
+                // Truncate long commands for notification display
+                let display_text = if text.len() > 60 {
+                    format!("{}...", &text[..57])
+                } else {
                     text
+                };
+                self.chrome.notify(
+                    format!("Copy: {}", display_text),
+                    NotificationStyle::Info,
+                    Duration::from_secs(8),
                 );
             }
             PanelResult::Dismiss | PanelResult::Continue => {
@@ -1139,7 +1179,7 @@ impl App {
             timestamp: &timestamp,
         };
 
-        if let Err(e) = self.chrome.render_context_bar(cols, &ctx) {
+        if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &ctx) {
             warn!("Failed to redraw context bar after panel: {}", e);
         }
 
@@ -1583,73 +1623,11 @@ impl App {
             Mode::Edit => {
                 // Let reedline handle SIGWINCH internally via crossterm.
                 // Do NOT resize PTY here - it will be synced on transition.
-                debug!("SIGWINCH in Edit mode - reedline handles display refresh");
-
-                // Always get terminal size for chrome handling
-                let (cols, rows) = TerminalGuard::get_size()
-                    .context("Failed to get terminal size for chrome handling")?;
-
-                // Check minimum size and handle state transitions
-                match self.chrome.check_minimum_size(cols, rows) {
-                    SizeCheckResult::Suspended => {
-                        // Chrome just suspended - clear bars and reset scroll region
-                        if let Err(e) = self.chrome.clear_bars(rows) {
-                            warn!("Failed to clear chrome bars on suspend: {}", e);
-                        }
-                        if let Err(e) = Chrome::reset_scroll_region() {
-                            warn!("Failed to reset scroll region on suspend: {}", e);
-                        }
-                        debug!("Chrome suspended due to small terminal");
-                    }
-                    SizeCheckResult::Resumed => {
-                        // Chrome just resumed - set up scroll region and draw context bar
-                        if let Err(e) = self.chrome.setup_scroll_region_preserve_cursor(rows) {
-                            warn!("Failed to setup scroll region on resume: {}", e);
-                        }
-
-                        // Render context bar with current context
-                        let timestamp = chrono::Local::now().format("%H:%M").to_string();
-                        let ctx = ChromeContext {
-                            cwd: &self.current_cwd,
-                            git_branch: self.git_branch.as_deref(),
-                            git_dirty: self.git_dirty,
-                            last_exit_code: self.last_exit_code,
-                            last_command: self.last_command.as_deref(),
-                            last_duration: self.last_command_duration,
-                            timestamp: &timestamp,
-                        };
-
-                        if let Err(e) = self.chrome.render_context_bar(cols, &ctx) {
-                            warn!("Failed to render context bar on resume: {}", e);
-                        }
-                        debug!("Chrome resumed after terminal grew");
-                    }
-                    SizeCheckResult::NoChange => {
-                        // No state transition - reapply scroll region and redraw if active
-                        if self.chrome.is_active() {
-                            // Reapply scroll region to match new terminal size
-                            if let Err(e) = self.chrome.setup_scroll_region_preserve_cursor(rows) {
-                                warn!("Failed to reapply scroll region on resize: {}", e);
-                            }
-
-                            // Redraw context bar for new dimensions
-                            let timestamp = chrono::Local::now().format("%H:%M").to_string();
-                            let ctx = ChromeContext {
-                                cwd: &self.current_cwd,
-                                git_branch: self.git_branch.as_deref(),
-                                git_dirty: self.git_dirty,
-                                last_exit_code: self.last_exit_code,
-                                last_command: self.last_command.as_deref(),
-                                last_duration: self.last_command_duration,
-                                timestamp: &timestamp,
-                            };
-
-                            if let Err(e) = self.chrome.render_context_bar(cols, &ctx) {
-                                warn!("Failed to redraw context bar on resize: {}", e);
-                            }
-                        }
-                    }
-                }
+                // Do NOT emit terminal sequences here - they interfere with reedline's
+                // internal repaint cycle. Instead, set a flag to defer chrome updates
+                // until the next run_edit() iteration, before reedline takes control.
+                debug!("SIGWINCH in Edit mode - deferring chrome update");
+                self.pending_resize = true;
             }
             Mode::Initializing => {
                 // During initialization, chrome isn't fully active yet (scroll region
@@ -1698,7 +1676,7 @@ impl App {
                         timestamp: &timestamp,
                     };
 
-                    if let Err(e) = self.chrome.render_context_bar(cols, &ctx) {
+                    if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &ctx) {
                         warn!("Failed to redraw context bar on resize: {}", e);
                     }
                 }
@@ -1764,7 +1742,7 @@ impl App {
                 timestamp: &timestamp,
             };
 
-            if let Err(e) = self.chrome.render_context_bar(cols, &ctx) {
+            if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &ctx) {
                 warn!("Failed to render context bar after toggle: {}", e);
             }
         }
