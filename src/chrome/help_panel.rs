@@ -5,12 +5,13 @@ use std::any::Any;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui_core::buffer::Buffer;
 use ratatui_core::layout::Rect;
-use ratatui_core::style::{Color, Modifier, Style};
+use ratatui_core::style::{Modifier, Style};
 use ratatui_core::text::{Line, Span};
 use ratatui_core::widgets::Widget;
 use ratatui_widgets::list::{List, ListItem};
 
 use super::panel::{Panel, PanelResult};
+use super::theme::Theme;
 
 /// A section of help content.
 #[derive(Debug, Clone)]
@@ -29,11 +30,13 @@ pub struct HelpPanel {
     scroll_offset: usize,
     /// Total number of lines (for scrolling).
     total_lines: usize,
+    /// Theme for rendering.
+    theme: &'static Theme,
 }
 
 impl HelpPanel {
     /// Creates a new help panel with documentation.
-    pub fn new() -> Self {
+    pub fn new(theme: &'static Theme) -> Self {
         let sections = vec![
             HelpSection {
                 title: "Panel Navigation".to_string(),
@@ -110,15 +113,12 @@ impl HelpPanel {
             sections,
             scroll_offset: 0,
             total_lines,
+            theme,
         }
     }
 }
 
-impl Default for HelpPanel {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// Note: Default is removed since HelpPanel now requires a theme parameter
 
 impl Panel for HelpPanel {
     fn preferred_height(&self) -> u16 {
@@ -144,7 +144,7 @@ impl Panel for HelpPanel {
             lines.push(ListItem::new(Line::from(vec![Span::styled(
                 &section.title,
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(self.theme.header_fg)
                     .add_modifier(Modifier::BOLD),
             )])));
 
@@ -154,8 +154,8 @@ impl Panel for HelpPanel {
                 let padded_key = format!("{:width$}", key, width = key_width);
                 lines.push(ListItem::new(Line::from(vec![
                     Span::styled("  ", Style::default()),
-                    Span::styled(padded_key, Style::default().fg(Color::Yellow)),
-                    Span::styled(desc, Style::default().fg(Color::White)),
+                    Span::styled(padded_key, Style::default().fg(self.theme.text_highlight)),
+                    Span::styled(desc, Style::default().fg(self.theme.text_primary)),
                 ])));
             }
 
@@ -210,17 +210,18 @@ impl Panel for HelpPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::theme::AMBER_THEME;
 
     #[test]
     fn test_help_panel_new() {
-        let panel = HelpPanel::new();
+        let panel = HelpPanel::new(&AMBER_THEME);
         assert!(!panel.sections.is_empty());
         assert_eq!(panel.scroll_offset, 0);
     }
 
     #[test]
     fn test_help_panel_sections() {
-        let panel = HelpPanel::new();
+        let panel = HelpPanel::new(&AMBER_THEME);
         assert!(panel.sections.iter().any(|s| s.title == "Panel Navigation"));
         assert!(panel.sections.iter().any(|s| s.title == "Command Palette"));
         assert!(panel.sections.iter().any(|s| s.title == "File Browser"));

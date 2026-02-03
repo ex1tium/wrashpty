@@ -8,7 +8,7 @@ use std::time::SystemTime;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui_core::buffer::Buffer;
 use ratatui_core::layout::{Constraint, Layout, Rect};
-use ratatui_core::style::{Color, Modifier, Style};
+use ratatui_core::style::{Modifier, Style};
 use ratatui_core::text::{Line, Span};
 use ratatui_core::widgets::Widget;
 use ratatui_widgets::list::{List, ListItem};
@@ -17,6 +17,7 @@ use tracing::debug;
 
 use super::command_knowledge::COMMAND_KNOWLEDGE;
 use super::panel::{Panel, PanelResult};
+use super::theme::Theme;
 
 /// A directory entry in the file browser.
 #[derive(Debug, Clone)]
@@ -310,11 +311,13 @@ pub struct FileBrowserPanel {
     show_hidden: bool,
     /// Edit mode state (None when not in edit mode).
     edit_mode: Option<FileEditModeState>,
+    /// Theme for rendering.
+    theme: &'static Theme,
 }
 
 impl FileBrowserPanel {
     /// Creates a new file browser at the current directory.
-    pub fn new() -> Self {
+    pub fn new(theme: &'static Theme) -> Self {
         let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
         let mut panel = Self {
             current_dir: current_dir.clone(),
@@ -323,6 +326,7 @@ impl FileBrowserPanel {
             scroll_offset: 0,
             show_hidden: false,
             edit_mode: None,
+            theme,
         };
         let _ = panel.refresh();
         panel
@@ -454,11 +458,7 @@ impl FileBrowserPanel {
     }
 }
 
-impl Default for FileBrowserPanel {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// Note: Default is removed since FileBrowserPanel now requires a theme parameter
 
 /// Shell-quotes a string to safely handle spaces and special characters.
 ///
@@ -538,28 +538,29 @@ fn format_date_compact(time: Option<SystemTime>) -> String {
 impl FileBrowserPanel {
     /// Renders the file edit mode UI.
     fn render_file_edit_mode(&self, buffer: &mut Buffer, area: Rect, state: &FileEditModeState) {
-        // Layout: 11 rows
+        // Layout: 12 rows (with spacer before Result for consistency with history browser)
         let chunks = Layout::vertical([
-            Constraint::Length(1), // Title with filename
-            Constraint::Length(1), // Separator
-            Constraint::Length(1), // Previous suggestion (dim)
-            Constraint::Length(1), // Command preview row
-            Constraint::Length(1), // Next suggestion (dim)
-            Constraint::Length(1), // Spacer
-            Constraint::Length(1), // Edit input
-            Constraint::Length(1), // Result preview
-            Constraint::Min(1),    // Flexible spacer
-            Constraint::Length(1), // Border
-            Constraint::Length(1), // Keybindings
+            Constraint::Length(1), // 0: Title with filename
+            Constraint::Length(1), // 1: Separator
+            Constraint::Length(1), // 2: Previous suggestion (dim)
+            Constraint::Length(1), // 3: Command preview row
+            Constraint::Length(1), // 4: Next suggestion (dim)
+            Constraint::Length(1), // 5: Spacer after suggestions
+            Constraint::Length(1), // 6: Edit input
+            Constraint::Length(1), // 7: Spacer before Result
+            Constraint::Length(1), // 8: Result preview
+            Constraint::Min(1),    // 9: Flexible spacer
+            Constraint::Length(1), // 10: Border
+            Constraint::Length(1), // 11: Keybindings
         ])
         .split(area);
 
         // Title with filename
         let title = Line::from(vec![
-            Span::styled(" Edit Command for: ", Style::default().fg(Color::Cyan)),
-            Span::styled(&state.filename, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(" Edit Command for: ", Style::default().fg(self.theme.header_fg)),
+            Span::styled(&state.filename, Style::default().fg(self.theme.text_highlight).add_modifier(Modifier::BOLD)),
             if !state.suggestions.is_empty() {
-                Span::styled(format!(" [{} suggestions]", state.suggestions.len()), Style::default().fg(Color::DarkGray))
+                Span::styled(format!(" [{} suggestions]", state.suggestions.len()), Style::default().fg(self.theme.text_secondary))
             } else {
                 Span::raw("")
             },
@@ -567,7 +568,7 @@ impl FileBrowserPanel {
         Paragraph::new(title).render(chunks[0], buffer);
 
         // Separator
-        let border_style = Style::default().fg(Color::DarkGray);
+        let border_style = Style::default().fg(self.theme.panel_border);
         for x in chunks[1].x..chunks[1].x + chunks[1].width {
             if let Some(cell) = buffer.cell_mut((x, chunks[1].y)) {
                 cell.set_char('─');
@@ -603,7 +604,7 @@ impl FileBrowserPanel {
         if let Some(prev_sugg) = state.prev_suggestion() {
             let prev_line = Line::from(vec![
                 Span::styled(&suggestion_padding, Style::default()),
-                Span::styled(prev_sugg, Style::default().fg(Color::DarkGray)),
+                Span::styled(prev_sugg, Style::default().fg(self.theme.text_secondary)),
             ]);
             Paragraph::new(prev_line).render(chunks[2], buffer);
         }
@@ -614,21 +615,21 @@ impl FileBrowserPanel {
 
         // Prefix section
         let prefix_style = if state.selected_section == FileEditSection::Prefix {
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+            Style::default().fg(self.theme.semantic_success).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::Green)
+            Style::default().fg(self.theme.semantic_success)
         };
         spans.push(Span::styled(format!("{} ", prefix_display), prefix_style));
 
         // Filename (non-editable)
-        let filename_style = Style::default().fg(Color::Yellow);
+        let filename_style = Style::default().fg(self.theme.text_highlight);
         spans.push(Span::styled(format!("{} ", state.filename), filename_style));
 
         // Suffix section
         let suffix_style = if state.selected_section == FileEditSection::Suffix {
-            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)
+            Style::default().fg(self.theme.git_fg).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::Magenta)
+            Style::default().fg(self.theme.git_fg)
         };
         let suffix_display = if state.suffix_tokens.is_empty() {
             if state.selected_section == FileEditSection::Suffix && !state.edit_buffer.is_empty() {
@@ -649,7 +650,7 @@ impl FileBrowserPanel {
         if let Some(next_sugg) = state.next_suggestion() {
             let next_line = Line::from(vec![
                 Span::styled(&suggestion_padding, Style::default()),
-                Span::styled(next_sugg, Style::default().fg(Color::DarkGray)),
+                Span::styled(next_sugg, Style::default().fg(self.theme.text_secondary)),
             ]);
             Paragraph::new(next_line).render(chunks[4], buffer);
         }
@@ -668,10 +669,10 @@ impl FileBrowserPanel {
             String::new()
         };
         let edit_line = Line::from(vec![
-            Span::styled(format!("   {} > ", section_label), Style::default().fg(Color::Cyan)),
-            Span::styled(&state.edit_buffer, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::styled("█", Style::default().fg(Color::Cyan)),
-            Span::styled(cycling_indicator, Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("   {} > ", section_label), Style::default().fg(self.theme.header_fg)),
+            Span::styled(&state.edit_buffer, Style::default().fg(self.theme.text_primary).add_modifier(Modifier::BOLD)),
+            Span::styled("█", Style::default().fg(self.theme.header_fg)),
+            Span::styled(cycling_indicator, Style::default().fg(self.theme.text_secondary)),
         ]);
         Paragraph::new(edit_line).render(chunks[6], buffer);
 
@@ -692,22 +693,22 @@ impl FileBrowserPanel {
         let result_preview = parts.join(" ");
 
         let preview_line = Line::from(vec![
-            Span::styled("  Result: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(&result_preview, Style::default().fg(Color::White)),
+            Span::styled("  Result: ", Style::default().fg(self.theme.text_secondary)),
+            Span::styled(&result_preview, Style::default().fg(self.theme.text_primary)),
         ]);
-        Paragraph::new(preview_line).render(chunks[7], buffer);
+        Paragraph::new(preview_line).render(chunks[8], buffer);
 
         // Border
-        for x in chunks[9].x..chunks[9].x + chunks[9].width {
-            if let Some(cell) = buffer.cell_mut((x, chunks[9].y)) {
+        for x in chunks[10].x..chunks[10].x + chunks[10].width {
+            if let Some(cell) = buffer.cell_mut((x, chunks[10].y)) {
                 cell.set_char('─');
                 cell.set_style(border_style);
             }
         }
 
         // Keybindings
-        let key_style = Style::default().fg(Color::Yellow);
-        let label_style = Style::default().fg(Color::DarkGray);
+        let key_style = Style::default().fg(self.theme.text_highlight);
+        let label_style = Style::default().fg(self.theme.text_secondary);
         let hints = Line::from(vec![
             Span::styled("↑↓", key_style),
             Span::styled(" Cycle", label_style),
@@ -727,7 +728,7 @@ impl FileBrowserPanel {
             Span::styled("Esc", key_style),
             Span::styled(" Back", label_style),
         ]);
-        Paragraph::new(hints).render(chunks[10], buffer);
+        Paragraph::new(hints).render(chunks[11], buffer);
     }
 
     /// Handles input in file edit mode.
@@ -808,7 +809,7 @@ impl FileBrowserPanel {
 impl Panel for FileBrowserPanel {
     fn preferred_height(&self) -> u16 {
         if self.edit_mode.is_some() {
-            12
+            13 // 12 rows including spacer before Result
         } else {
             12
         }
@@ -849,15 +850,15 @@ impl Panel for FileBrowserPanel {
             path_str.to_string()
         };
         let header = Line::from(vec![
-            Span::styled(" ", Style::default().fg(Color::Cyan)),
+            Span::styled(" ", Style::default().fg(self.theme.header_fg)),
             Span::styled(
                 truncated_path,
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(self.theme.header_fg)
                     .add_modifier(Modifier::BOLD),
             ),
             if self.show_hidden {
-                Span::styled(" [H]", Style::default().fg(Color::DarkGray))
+                Span::styled(" [H]", Style::default().fg(self.theme.text_secondary))
             } else {
                 Span::raw("")
             },
@@ -881,19 +882,19 @@ impl Panel for FileBrowserPanel {
 
                 let icon = if entry.is_dir { "" } else { "" };
                 let icon_color = if entry.is_dir {
-                    Color::Blue
+                    self.theme.dir_color
                 } else {
-                    Color::Gray
+                    self.theme.file_color
                 };
 
                 let name_style = if is_selected {
                     Style::default()
-                        .fg(Color::Yellow)
+                        .fg(self.theme.selection_fg)
                         .add_modifier(Modifier::BOLD)
                 } else if entry.is_dir {
-                    Style::default().fg(Color::Blue)
+                    Style::default().fg(self.theme.dir_color)
                 } else {
-                    Style::default().fg(Color::White)
+                    Style::default().fg(self.theme.file_color)
                 };
 
                 // Format metadata columns
@@ -927,13 +928,13 @@ impl Panel for FileBrowserPanel {
                     Span::styled(format!("{} ", icon), Style::default().fg(icon_color)),
                     Span::styled(display_name, name_style),
                     Span::styled(" ".repeat(name_padding), Style::default()),
-                    Span::styled(format!(" {} ", perms_str), Style::default().fg(Color::Magenta)),
-                    Span::styled(format!("{:>5} ", date_str), Style::default().fg(Color::Cyan)),
-                    Span::styled(size_str, Style::default().fg(Color::DarkGray)),
+                    Span::styled(format!(" {} ", perms_str), Style::default().fg(self.theme.permissions_color)),
+                    Span::styled(format!("{:>5} ", date_str), Style::default().fg(self.theme.file_date_color)),
+                    Span::styled(size_str, Style::default().fg(self.theme.file_size_color)),
                 ]);
 
                 if is_selected {
-                    ListItem::new(line).style(Style::default().bg(Color::DarkGray))
+                    ListItem::new(line).style(Style::default().bg(self.theme.selection_bg))
                 } else {
                     ListItem::new(line)
                 }
@@ -944,7 +945,7 @@ impl Panel for FileBrowserPanel {
         list.render(chunks[1], buffer);
 
         // Render border line above keybind bar
-        let border_style = Style::default().fg(Color::DarkGray);
+        let border_style = Style::default().fg(self.theme.panel_border);
         for x in chunks[2].x..chunks[2].x + chunks[2].width {
             if let Some(cell) = buffer.cell_mut((x, chunks[2].y)) {
                 cell.set_char('─');
@@ -953,9 +954,9 @@ impl Panel for FileBrowserPanel {
         }
 
         // Render keybind bar
-        let key_style = Style::default().fg(Color::Yellow);
-        let label_style = Style::default().fg(Color::DarkGray);
-        let active_label = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
+        let key_style = Style::default().fg(self.theme.text_highlight);
+        let label_style = Style::default().fg(self.theme.text_secondary);
+        let active_label = Style::default().fg(self.theme.semantic_success).add_modifier(Modifier::BOLD);
         let hints = Line::from(vec![
             Span::styled("^E", key_style),
             Span::styled(" Edit", label_style),
@@ -1046,10 +1047,11 @@ impl Panel for FileBrowserPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::theme::AMBER_THEME;
 
     #[test]
     fn test_file_browser_new() {
-        let panel = FileBrowserPanel::new();
+        let panel = FileBrowserPanel::new(&AMBER_THEME);
         assert!(!panel.show_hidden);
     }
 
@@ -1065,7 +1067,7 @@ mod tests {
 
     #[test]
     fn test_toggle_hidden() {
-        let mut panel = FileBrowserPanel::new();
+        let mut panel = FileBrowserPanel::new(&AMBER_THEME);
         assert!(!panel.show_hidden);
         panel.toggle_hidden();
         assert!(panel.show_hidden);

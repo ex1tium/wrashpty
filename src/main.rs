@@ -14,6 +14,7 @@ use wrashpty::app::App;
 use wrashpty::bashrc;
 use wrashpty::safety::install_panic_hook;
 use wrashpty::types::ChromeMode;
+use wrashpty::Config;
 
 /// Modern interactive shell on stock Bash
 #[derive(Parser)]
@@ -131,6 +132,10 @@ fn main() -> Result<()> {
     };
     info!(chrome_mode = ?chrome_mode, "Chrome mode configured");
 
+    // Load configuration from environment (theme, nerdfonts detection)
+    let config = Config::from_env();
+    info!(symbol_set = ?config.symbol_set, theme = ?config.theme, "Config loaded from environment");
+
     // Validate bash is available
     validate_bash_version()?;
 
@@ -142,7 +147,7 @@ fn main() -> Result<()> {
 
     // Create and run the application in a block to ensure Drop runs before exit
     let exit_code = {
-        let mut app = App::new(bashrc_guard.path(), session_token, chrome_mode)
+        let mut app = App::new(bashrc_guard.path(), session_token, chrome_mode, &config)
             .context("Failed to initialize App")?;
         // App created successfully - disarm guard since App owns bashrc cleanup
         bashrc_guard.disarm();

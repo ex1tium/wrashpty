@@ -52,6 +52,7 @@ use tracing::{debug, info, warn};
 use crate::chrome::panel::{Panel, PanelResult};
 use crate::chrome::tabbed_panel::TabbedPanel;
 use crate::chrome::{Chrome, ChromeContext, NotificationStyle, SizeCheckResult};
+use crate::config::Config;
 use crate::editor::{Editor, EditorResult};
 use crate::history_store::HistoryStore;
 use crate::prompt::WrashPrompt;
@@ -355,6 +356,7 @@ impl App {
     /// * `bashrc_path` - Path to the generated bashrc file
     /// * `session_token` - 16-byte session token for marker validation
     /// * `chrome_mode` - Chrome display mode (Headless or Full)
+    /// * `config` - Application configuration (theme, symbols)
     ///
     /// # Errors
     ///
@@ -368,6 +370,7 @@ impl App {
         bashrc_path: &str,
         session_token: [u8; 16],
         chrome_mode: ChromeMode,
+        config: &Config,
     ) -> Result<Self> {
         // Create terminal guard first (enables raw mode)
         let terminal_guard =
@@ -376,8 +379,8 @@ impl App {
         // Get terminal size for PTY
         let (cols, rows) = TerminalGuard::get_size().context("Failed to get terminal size")?;
 
-        // Create chrome layer
-        let chrome = Chrome::new(chrome_mode);
+        // Create chrome layer with theme and symbols from config
+        let chrome = Chrome::new(chrome_mode, config);
 
         // Spawn PTY with bash
         let pty = Pty::spawn(bashrc_path, cols, rows).context("Failed to spawn PTY")?;
@@ -1079,10 +1082,13 @@ impl App {
         cols: u16,
         panel_height: u16,
     ) -> Result<PanelResult> {
-        use ratatui_core::style::{Color, Style};
+        use ratatui_core::style::Style;
         use ratatui_core::widgets::Widget;
         use ratatui_widgets::block::Block;
         use ratatui_widgets::borders::Borders;
+
+        // Get theme for panel styling
+        let theme = self.chrome.theme();
 
         loop {
             // Create buffer for panel area (starting at row 1, which is terminal row 1)
@@ -1090,12 +1096,12 @@ impl App {
             let area = Rect::new(0, 0, cols, panel_height);
             let mut buffer = Buffer::empty(area);
 
-            // Create a bordered block for the panel
+            // Create a bordered block for the panel with theme colors
             let block = Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
+                .border_style(Style::default().fg(theme.panel_border))
                 .title(" Wrashpty Panel (Esc to close) ")
-                .title_style(Style::default().fg(Color::Yellow));
+                .title_style(Style::default().fg(theme.header_fg));
 
             // Get the inner area for panel content
             let inner_area = block.inner(area);
@@ -1184,7 +1190,7 @@ impl App {
     ///
     /// Returns an error if terminal operations fail.
     pub fn open_panel(&mut self) -> Result<()> {
-        let mut panel = TabbedPanel::new();
+        let mut panel = TabbedPanel::new(self.chrome.theme());
         panel.set_history_store(Arc::clone(&self.history_store));
         panel.load_context(&self.current_cwd);
 
@@ -1198,21 +1204,11 @@ impl App {
                 self.inject_pending_command()?;
             }
             PanelResult::InsertText(text) => {
-                // Cannot inject text directly into reedline buffer from outside,
-                // so we show a notification with the command for the user to copy
-                debug!(text = %text, "Panel requested text insertion, showing notification");
+                // Pre-fill the reedline buffer with the selected text
+                debug!(text = %text, "Panel requested text insertion, pre-filling buffer");
                 self.restore_after_panel()?;
-                // Truncate long commands for notification display (char-safe)
-                let display_text = if text.chars().count() > 60 {
-                    format!("{}...", text.chars().take(57).collect::<String>())
-                } else {
-                    text
-                };
-                self.chrome.notify(
-                    format!("Copy: {}", display_text),
-                    NotificationStyle::Info,
-                    Duration::from_secs(8),
-                );
+                // Insert the text into reedline's buffer before the next read_line call
+                self.editor.prefill_buffer(&text);
             }
             PanelResult::Dismiss | PanelResult::Continue => {
                 debug!("Panel dismissed, restoring chrome");
