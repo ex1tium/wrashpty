@@ -784,8 +784,9 @@ impl Chrome {
         let stdout = io::stdout();
         let mut out = stdout.lock();
 
-        // Clear the panel area (rows 2 through old_height)
-        for row in 2..=old_height {
+        // Clear the entire panel area (rows 1 through old_height)
+        // Row 1 is included because the panel renders its border/title there
+        for row in 1..=old_height {
             write!(out, "\x1b[{};1H", row)?;
             write!(out, "\x1b[K")?;
         }
