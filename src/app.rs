@@ -894,7 +894,46 @@ impl App {
 
         Ok(None)
     }
+}
 
+/// RAII guard that ensures `collapse_panel` is called even on panic or early return.
+///
+/// Construct with [`PanelGuard::new`], which marks it as "armed". If the guarded
+/// code completes successfully, call [`PanelGuard::disarm`] to prevent the cleanup
+/// from running twice. If dropped while still armed (e.g., due to panic or `?`),
+/// the `Drop` impl will call `collapse_panel`.
+struct PanelGuard<'a> {
+    chrome: &'a mut Chrome,
+    total_rows: u16,
+    armed: bool,
+}
+
+impl<'a> PanelGuard<'a> {
+    /// Creates a new armed guard.
+    fn new(chrome: &'a mut Chrome, total_rows: u16) -> Self {
+        Self {
+            chrome,
+            total_rows,
+            armed: true,
+        }
+    }
+
+    /// Disarms the guard, preventing `collapse_panel` from being called in `Drop`.
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PanelGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            // Ignore the Result in Drop - we can't propagate errors here
+            let _ = self.chrome.collapse_panel(self.total_rows);
+        }
+    }
+}
+
+impl App {
     /// Runs the panel mode with the given panel.
     ///
     /// This method handles the panel input loop, rendering the panel and
@@ -945,14 +984,39 @@ impl App {
             .expand_panel(panel_height, rows)
             .context("Failed to expand panel")?;
 
-        // Resize PTY to account for panel
-        self.pty
-            .resize(cols, effective_rows)
-            .context("Failed to resize PTY for panel")?;
+        // Create guard to ensure collapse_panel is called even on panic or early return
+        let guard = PanelGuard::new(&mut self.chrome, rows);
 
-        let result = self.panel_input_loop(panel, cols, panel_height, rows);
+        // Resize PTY to account for panel - access through guard's chrome reference
+        // Note: We need to drop the guard temporarily to access self.pty due to borrow rules
+        // For the resize, we handle errors explicitly to maintain guard safety
+        let resize_result = {
+            // Temporarily disarm and drop guard to access self
+            guard.disarm();
+            self.pty.resize(cols, effective_rows)
+        };
 
-        // Collapse panel and restore PTY size
+        // If resize failed, collapse panel and propagate error
+        if let Err(e) = resize_result {
+            self.chrome
+                .collapse_panel(rows)
+                .context("Failed to collapse panel after resize error")?;
+            return Err(e).context("Failed to resize PTY for panel");
+        }
+
+        // Recreate guard for panel_input_loop - ensures cleanup on panic/error
+        let guard = PanelGuard::new(&mut self.chrome, rows);
+
+        // Run the panel input loop - guard will call collapse_panel in Drop if we panic
+        // We need to drop the guard to call panel_input_loop (requires &mut self)
+        drop(guard);
+
+        // Use catch_unwind for panic safety during panel_input_loop
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.panel_input_loop(panel, cols, panel_height, rows)
+        }));
+
+        // Collapse panel - always runs after panel_input_loop completes or panics
         self.chrome
             .collapse_panel(rows)
             .context("Failed to collapse panel")?;
@@ -969,7 +1033,11 @@ impl App {
 
         debug!("Exited panel mode");
 
-        result
+        // Handle the result from catch_unwind
+        match result {
+            Ok(r) => r,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
     }
 
     /// Inner loop for panel input handling.
@@ -1135,9 +1203,9 @@ impl App {
                 // so we show a notification with the command for the user to copy
                 debug!(text = %text, "Panel requested text insertion, showing notification");
                 self.restore_after_panel()?;
-                // Truncate long commands for notification display
-                let display_text = if text.len() > 60 {
-                    format!("{}...", &text[..57])
+                // Truncate long commands for notification display (char-safe)
+                let display_text = if text.chars().count() > 60 {
+                    format!("{}...", text.chars().take(57).collect::<String>())
                 } else {
                     text
                 };
