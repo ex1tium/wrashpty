@@ -18,6 +18,7 @@ use tracing::{debug, warn};
 
 use super::command_knowledge::COMMAND_KNOWLEDGE;
 use super::panel::{Panel, PanelResult};
+use super::theme::Theme;
 use crate::history_store::{FilterMode, HistoryRecord, HistoryStore, SortMode};
 
 /// Token type for semantic classification.
@@ -86,15 +87,15 @@ fn classify_token(text: &str, position: usize, prev_token: Option<&str>) -> Toke
     TokenType::Argument
 }
 
-/// Returns the style for a token based on its type.
-fn token_type_style(token_type: TokenType) -> Style {
+/// Returns the style for a token based on its type and theme.
+fn token_type_style(token_type: TokenType, theme: &Theme) -> Style {
     match token_type {
-        TokenType::Command => Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-        TokenType::Subcommand => Style::default().fg(Color::Cyan),
-        TokenType::Flag => Style::default().fg(Color::Yellow),
-        TokenType::Path => Style::default().fg(Color::Blue),
-        TokenType::Url => Style::default().fg(Color::Magenta),
-        TokenType::Argument => Style::default().fg(Color::White),
+        TokenType::Command => Style::default().fg(theme.semantic_success).add_modifier(Modifier::BOLD),
+        TokenType::Subcommand => Style::default().fg(theme.header_fg),
+        TokenType::Flag => Style::default().fg(theme.text_highlight),
+        TokenType::Path => Style::default().fg(theme.semantic_info),
+        TokenType::Url => Style::default().fg(theme.git_fg),
+        TokenType::Argument => Style::default().fg(theme.text_primary),
     }
 }
 
@@ -571,11 +572,13 @@ pub struct HistoryBrowserPanel {
     history_store: Option<Arc<Mutex<HistoryStore>>>,
     /// Edit mode state (None when not in edit mode).
     edit_mode: Option<EditModeState>,
+    /// Theme for rendering.
+    theme: &'static Theme,
 }
 
 impl HistoryBrowserPanel {
     /// Creates a new empty history browser.
-    pub fn new() -> Self {
+    pub fn new(theme: &'static Theme) -> Self {
         Self {
             records: Vec::new(),
             selection: 0,
@@ -586,6 +589,7 @@ impl HistoryBrowserPanel {
             current_cwd: None,
             history_store: None,
             edit_mode: None,
+            theme,
         }
     }
 
@@ -705,39 +709,42 @@ impl HistoryBrowserPanel {
             return;
         }
 
-        // Layout with three-row depth UI - 12 rows total
+        // Layout with three-row depth UI and spacing - 15 rows total
         let chunks = Layout::vertical([
-            Constraint::Length(1), // Title
-            Constraint::Length(1), // Original command (dim)
-            Constraint::Length(1), // Previous suggestion row (dim)
-            Constraint::Length(1), // Current token strip (highlighted)
-            Constraint::Length(1), // Next suggestion row (dim)
-            Constraint::Length(1), // Edit input line
-            Constraint::Length(1), // Result preview
-            Constraint::Min(1),    // Flexible spacer
-            Constraint::Length(1), // Border
-            Constraint::Length(1), // Keybind hints
+            Constraint::Length(1), // 0: Title
+            Constraint::Length(1), // 1: Original command (dim)
+            Constraint::Length(1), // 2: Empty line (spacer above token block)
+            Constraint::Length(1), // 3: Previous suggestion row (dim)
+            Constraint::Length(1), // 4: Current token strip (highlighted)
+            Constraint::Length(1), // 5: Next suggestion row (dim)
+            Constraint::Length(1), // 6: Empty line (spacer below token block)
+            Constraint::Length(1), // 7: Edit input line
+            Constraint::Length(1), // 8: Empty line (spacer before result)
+            Constraint::Length(1), // 9: Result preview
+            Constraint::Min(1),    // 10: Flexible spacer
+            Constraint::Length(1), // 11: Border
+            Constraint::Length(1), // 12: Keybind hints
         ])
         .split(area);
 
         // Title with optional unsafe mode indicator and suggestion count
         let mut title_spans = vec![
-            Span::styled(" Edit Command", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(" Edit Command", Style::default().fg(self.theme.header_fg).add_modifier(Modifier::BOLD)),
         ];
         if !edit_state.current_suggestions.is_empty() {
             let sugg_count = format!(" [{} suggestions]", edit_state.current_suggestions.len());
-            title_spans.push(Span::styled(sugg_count, Style::default().fg(Color::DarkGray)));
+            title_spans.push(Span::styled(sugg_count, Style::default().fg(self.theme.text_secondary)));
         }
         if edit_state.skip_danger_check {
-            title_spans.push(Span::styled(" [UNSAFE]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)));
+            title_spans.push(Span::styled(" [UNSAFE]", Style::default().fg(self.theme.semantic_error).add_modifier(Modifier::BOLD)));
         }
         let title = Line::from(title_spans);
         Paragraph::new(title).render(chunks[0], buffer);
 
         // Original command (dimmed reference)
         let original_line = Line::from(vec![
-            Span::styled(" Original: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(&edit_state.original, Style::default().fg(Color::DarkGray)),
+            Span::styled(" Original: ", Style::default().fg(self.theme.text_secondary)),
+            Span::styled(&edit_state.original, Style::default().fg(self.theme.text_secondary)),
         ]);
         Paragraph::new(original_line).render(chunks[1], buffer);
 
@@ -759,17 +766,17 @@ impl HistoryBrowserPanel {
             let padding = " ".repeat(selected_x_offset);
             let prev_line = Line::from(vec![
                 Span::styled(padding, Style::default()),
-                Span::styled(prev_sugg, Style::default().fg(Color::DarkGray)),
+                Span::styled(prev_sugg, Style::default().fg(self.theme.text_secondary)),
             ]);
-            Paragraph::new(prev_line).render(chunks[2], buffer);
+            Paragraph::new(prev_line).render(chunks[3], buffer);
         }
 
         // Current token strip with double brackets and superscript numbers
         let mut spans = Vec::new();
         spans.push(Span::styled("   ", Style::default()));
 
-        let bracket_style = Style::default().fg(Color::DarkGray);
-        let bracket_selected_style = Style::default().fg(Color::Cyan);
+        let bracket_style = Style::default().fg(self.theme.text_secondary);
+        let bracket_selected_style = Style::default().fg(self.theme.header_fg);
 
         for (i, token) in edit_state.tokens.iter().enumerate() {
             let is_selected = i == edit_state.selected;
@@ -777,9 +784,9 @@ impl HistoryBrowserPanel {
 
             // Superscript number
             let num_style = if is_selected {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                Style::default().fg(self.theme.text_highlight).add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::DarkGray)
+                Style::default().fg(self.theme.text_secondary)
             };
             spans.push(Span::styled(superscript_digit(slot_num), num_style));
 
@@ -788,7 +795,7 @@ impl HistoryBrowserPanel {
             spans.push(Span::styled("⟦", bstyle));
 
             // Token text with type-aware styling
-            let base_style = token_type_style(token.token_type);
+            let base_style = token_type_style(token.token_type, self.theme);
             let token_style = if is_selected {
                 base_style.add_modifier(Modifier::BOLD)
             } else {
@@ -815,16 +822,16 @@ impl HistoryBrowserPanel {
         }
 
         let token_line = Line::from(spans);
-        Paragraph::new(token_line).render(chunks[3], buffer);
+        Paragraph::new(token_line).render(chunks[4], buffer);
 
         // Next suggestion row (dim, aligned under selected token)
         if let Some(next_sugg) = edit_state.next_suggestion() {
             let padding = " ".repeat(selected_x_offset);
             let next_line = Line::from(vec![
                 Span::styled(padding, Style::default()),
-                Span::styled(next_sugg, Style::default().fg(Color::DarkGray)),
+                Span::styled(next_sugg, Style::default().fg(self.theme.text_secondary)),
             ]);
-            Paragraph::new(next_line).render(chunks[4], buffer);
+            Paragraph::new(next_line).render(chunks[5], buffer);
         }
 
         // Edit input line with type hint and cycling indicator
@@ -845,12 +852,12 @@ impl HistoryBrowserPanel {
         };
         let edit_label = format!("   {} {} > ", superscript_digit(edit_state.selected + 1), type_hint);
         let edit_line = Line::from(vec![
-            Span::styled(edit_label, Style::default().fg(Color::Magenta)),
-            Span::styled(&edit_state.edit_buffer, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::styled("█", Style::default().fg(Color::Cyan)),
-            Span::styled(cycling_indicator, Style::default().fg(Color::DarkGray)),
+            Span::styled(edit_label, Style::default().fg(self.theme.git_fg)),
+            Span::styled(&edit_state.edit_buffer, Style::default().fg(self.theme.text_primary).add_modifier(Modifier::BOLD)),
+            Span::styled("█", Style::default().fg(self.theme.header_fg)),
+            Span::styled(cycling_indicator, Style::default().fg(self.theme.text_secondary)),
         ]);
-        Paragraph::new(edit_line).render(chunks[5], buffer);
+        Paragraph::new(edit_line).render(chunks[7], buffer);
 
         // Build and show result preview
         let result_preview: String = edit_state.tokens.iter().enumerate().map(|(i, t)| {
@@ -863,28 +870,28 @@ impl HistoryBrowserPanel {
 
         let preview_changed = result_preview != edit_state.original;
         let preview_style = if preview_changed {
-            Style::default().fg(Color::Green)
+            Style::default().fg(self.theme.semantic_success)
         } else {
-            Style::default().fg(Color::White)
+            Style::default().fg(self.theme.text_primary)
         };
         let preview_line = Line::from(vec![
-            Span::styled("  Result: ", Style::default().fg(Color::DarkGray)),
+            Span::styled("  Result: ", Style::default().fg(self.theme.text_secondary)),
             Span::styled(&result_preview, preview_style),
         ]);
-        Paragraph::new(preview_line).render(chunks[6], buffer);
+        Paragraph::new(preview_line).render(chunks[9], buffer);
 
         // Border
-        let border_style = Style::default().fg(Color::DarkGray);
-        for x in chunks[8].x..chunks[8].x + chunks[8].width {
-            if let Some(cell) = buffer.cell_mut((x, chunks[8].y)) {
+        let border_style = Style::default().fg(self.theme.panel_border);
+        for x in chunks[11].x..chunks[11].x + chunks[11].width {
+            if let Some(cell) = buffer.cell_mut((x, chunks[11].y)) {
                 cell.set_char('─');
                 cell.set_style(border_style);
             }
         }
 
         // Keybind hints - updated to show Up/Down for cycling
-        let key_style = Style::default().fg(Color::Yellow);
-        let label_style = Style::default().fg(Color::DarkGray);
+        let key_style = Style::default().fg(self.theme.text_highlight);
+        let label_style = Style::default().fg(self.theme.text_secondary);
 
         let hints = Line::from(vec![
             Span::styled("←→", key_style),
@@ -908,7 +915,7 @@ impl HistoryBrowserPanel {
             Span::styled("Esc", key_style),
             Span::styled(" Back", label_style),
         ]);
-        Paragraph::new(hints).render(chunks[9], buffer);
+        Paragraph::new(hints).render(chunks[12], buffer);
     }
 
     /// Renders the danger confirmation dialog.
@@ -925,7 +932,7 @@ impl HistoryBrowserPanel {
 
         // Warning header
         let header = Line::from(vec![
-            Span::styled(" ⚠ WARNING ", Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(" ⚠ WARNING ", Style::default().fg(self.theme.bar_bg).bg(self.theme.semantic_warning).add_modifier(Modifier::BOLD)),
         ]);
         Paragraph::new(header).render(chunks[0], buffer);
 
@@ -933,20 +940,20 @@ impl HistoryBrowserPanel {
         let warning_msg = edit_state.danger_warning.unwrap_or("Potentially dangerous command");
         let warning_line = Line::from(vec![
             Span::styled(" ", Style::default()),
-            Span::styled(warning_msg, Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::styled(warning_msg, Style::default().fg(self.theme.semantic_error).add_modifier(Modifier::BOLD)),
         ]);
         Paragraph::new(warning_line).render(chunks[1], buffer);
 
         // Command
         let cmd = edit_state.pending_confirm.as_deref().unwrap_or("");
         let cmd_line = Line::from(vec![
-            Span::styled(" Command: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(cmd, Style::default().fg(Color::White)),
+            Span::styled(" Command: ", Style::default().fg(self.theme.text_secondary)),
+            Span::styled(cmd, Style::default().fg(self.theme.text_primary)),
         ]);
         Paragraph::new(cmd_line).render(chunks[2], buffer);
 
         // Border
-        let border_style = Style::default().fg(Color::DarkGray);
+        let border_style = Style::default().fg(self.theme.panel_border);
         for x in chunks[4].x..chunks[4].x + chunks[4].width {
             if let Some(cell) = buffer.cell_mut((x, chunks[4].y)) {
                 cell.set_char('─');
@@ -955,8 +962,8 @@ impl HistoryBrowserPanel {
         }
 
         // Keybind hints
-        let key_style = Style::default().fg(Color::Yellow);
-        let label_style = Style::default().fg(Color::DarkGray);
+        let key_style = Style::default().fg(self.theme.text_highlight);
+        let label_style = Style::default().fg(self.theme.text_secondary);
         let hints = Line::from(vec![
             Span::styled("Enter", key_style),
             Span::styled(" Confirm & Run", label_style),
@@ -1189,22 +1196,22 @@ impl HistoryBrowserPanel {
     /// Formats the exit status indicator.
     fn format_exit_status(&self, record: &HistoryRecord) -> (&'static str, Color) {
         match record.exit_status {
-            Some(0) => ("ok", Color::Green),
+            Some(0) => ("ok", self.theme.semantic_success),
             Some(code) => {
                 if code > 128 {
-                    ("!!", Color::Red)  // Signal
+                    ("!!", self.theme.semantic_error)  // Signal
                 } else {
-                    ("!!", Color::Yellow)  // Non-zero exit
+                    ("!!", self.theme.semantic_warning)  // Non-zero exit
                 }
             }
-            None => ("  ", Color::DarkGray),
+            None => ("  ", self.theme.text_secondary),
         }
     }
 
     /// Renders the table header row.
     fn render_header(&self, buffer: &mut Buffer, area: Rect, cols: &ColumnWidths) {
-        let style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
-        let dim = Style::default().fg(Color::DarkGray);
+        let style = Style::default().fg(self.theme.header_fg).add_modifier(Modifier::BOLD);
+        let dim = Style::default().fg(self.theme.text_secondary);
 
         let mut x = area.x;
 
@@ -1295,11 +1302,11 @@ impl HistoryBrowserPanel {
     /// Renders a single table row.
     fn render_row(&self, buffer: &mut Buffer, area: Rect, record: &HistoryRecord, cols: &ColumnWidths, is_selected: bool) {
         let base_style = if is_selected {
-            Style::default().bg(Color::DarkGray)
+            Style::default().bg(self.theme.selection_bg)
         } else {
             Style::default()
         };
-        let dim = Style::default().fg(Color::DarkGray);
+        let dim = Style::default().fg(self.theme.text_secondary);
 
         // Fill background for selected row
         if is_selected {
@@ -1314,9 +1321,9 @@ impl HistoryBrowserPanel {
 
         // Command column (first)
         let cmd_style = if is_selected {
-            base_style.fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            base_style.fg(self.theme.selection_fg).add_modifier(Modifier::BOLD)
         } else {
-            base_style.fg(Color::White)
+            base_style.fg(self.theme.text_primary)
         };
         let cmd_width = cols.command.saturating_sub(1) as usize;
         // Use char-based truncation to avoid panicking on UTF-8 boundaries
@@ -1342,13 +1349,13 @@ impl HistoryBrowserPanel {
         // Separator
         if let Some(cell) = buffer.cell_mut((x, area.y)) {
             cell.set_char('|');
-            cell.set_style(if is_selected { base_style.fg(Color::DarkGray) } else { dim });
+            cell.set_style(if is_selected { base_style.fg(self.theme.text_secondary) } else { dim });
         }
         x += 1;
 
         // When column
         let time_text = self.format_relative_time(record);
-        let time_style = base_style.fg(Color::Blue);
+        let time_style = base_style.fg(self.theme.semantic_info);
         for (i, ch) in format!("{:>5}", time_text).chars().take(cols.time as usize - 1).enumerate() {
             if let Some(cell) = buffer.cell_mut((x + i as u16, area.y)) {
                 cell.set_char(ch);
@@ -1360,13 +1367,13 @@ impl HistoryBrowserPanel {
         // Separator
         if let Some(cell) = buffer.cell_mut((x, area.y)) {
             cell.set_char('|');
-            cell.set_style(if is_selected { base_style.fg(Color::DarkGray) } else { dim });
+            cell.set_style(if is_selected { base_style.fg(self.theme.text_secondary) } else { dim });
         }
         x += 1;
 
         // Duration column
         let dur_text = self.format_duration(record);
-        let dur_style = base_style.fg(Color::Magenta);
+        let dur_style = base_style.fg(self.theme.git_fg);
         for (i, ch) in format!("{:>7}", dur_text).chars().take(cols.duration as usize - 1).enumerate() {
             if let Some(cell) = buffer.cell_mut((x + i as u16, area.y)) {
                 cell.set_char(ch);
@@ -1378,7 +1385,7 @@ impl HistoryBrowserPanel {
         // Separator
         if let Some(cell) = buffer.cell_mut((x, area.y)) {
             cell.set_char('|');
-            cell.set_style(if is_selected { base_style.fg(Color::DarkGray) } else { dim });
+            cell.set_style(if is_selected { base_style.fg(self.theme.text_secondary) } else { dim });
         }
         x += 1;
 
@@ -1386,11 +1393,11 @@ impl HistoryBrowserPanel {
         if cols.count > 0 {
             let count_text = format!("{:>4}", record.execution_count);
             let count_style = if record.execution_count > 10 {
-                base_style.fg(Color::Yellow)
+                base_style.fg(self.theme.text_highlight)
             } else if record.execution_count > 1 {
-                base_style.fg(Color::White)
+                base_style.fg(self.theme.text_primary)
             } else {
-                base_style.fg(Color::DarkGray)
+                base_style.fg(self.theme.text_secondary)
             };
             for (i, ch) in count_text.chars().take(cols.count as usize - 1).enumerate() {
                 if let Some(cell) = buffer.cell_mut((x + i as u16, area.y)) {
@@ -1403,7 +1410,7 @@ impl HistoryBrowserPanel {
             // Separator
             if let Some(cell) = buffer.cell_mut((x, area.y)) {
                 cell.set_char('|');
-                cell.set_style(if is_selected { base_style.fg(Color::DarkGray) } else { dim });
+                cell.set_style(if is_selected { base_style.fg(self.theme.text_secondary) } else { dim });
             }
             x += 1;
         }
@@ -1420,17 +1427,13 @@ impl HistoryBrowserPanel {
     }
 }
 
-impl Default for HistoryBrowserPanel {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// Note: Default is removed since HistoryBrowserPanel now requires a theme parameter
 
 impl Panel for HistoryBrowserPanel {
     fn preferred_height(&self) -> u16 {
-        // Enhanced edit mode needs 12 rows, list mode needs 15
+        // Enhanced edit mode needs 15 rows (with spacing), list mode needs 15
         if self.edit_mode.is_some() {
-            12
+            15
         } else {
             15
         }
@@ -1468,16 +1471,16 @@ impl Panel for HistoryBrowserPanel {
 
         // Render filter input
         let filter_text = if self.filter.is_empty() {
-            Span::styled("Type to filter...", Style::default().fg(Color::DarkGray))
+            Span::styled("Type to filter...", Style::default().fg(self.theme.text_secondary))
         } else {
-            Span::styled(&self.filter, Style::default().fg(Color::White))
+            Span::styled(&self.filter, Style::default().fg(self.theme.text_primary))
         };
         let mut filter_spans = vec![
-            Span::styled(" > ", Style::default().fg(Color::Magenta)),
+            Span::styled(" > ", Style::default().fg(self.theme.git_fg)),
             filter_text,
             Span::styled(
                 format!("  [{} entries]", self.records.len()),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(self.theme.text_secondary),
             ),
         ];
         // Show current directory when filtering by it
@@ -1486,7 +1489,7 @@ impl Panel for HistoryBrowserPanel {
                 let path_str = cwd.to_string_lossy();
                 filter_spans.push(Span::styled(
                     format!("  in {}", path_str),
-                    Style::default().fg(Color::Cyan),
+                    Style::default().fg(self.theme.header_fg),
                 ));
             }
         }
@@ -1496,7 +1499,7 @@ impl Panel for HistoryBrowserPanel {
         self.render_header(buffer, chunks[1], &cols);
 
         // Render separator line
-        let sep_style = Style::default().fg(Color::DarkGray);
+        let sep_style = Style::default().fg(self.theme.panel_border);
         for x in chunks[2].x..chunks[2].x + chunks[2].width {
             if let Some(cell) = buffer.cell_mut((x, chunks[2].y)) {
                 cell.set_char('─');
@@ -1526,7 +1529,7 @@ impl Panel for HistoryBrowserPanel {
         }
 
         // Render border line above keybind bar
-        let border_style = Style::default().fg(Color::DarkGray);
+        let border_style = Style::default().fg(self.theme.panel_border);
         for x in chunks[4].x..chunks[4].x + chunks[4].width {
             if let Some(cell) = buffer.cell_mut((x, chunks[4].y)) {
                 cell.set_char('─');
@@ -1535,10 +1538,10 @@ impl Panel for HistoryBrowserPanel {
         }
 
         // Render keybind bar
-        let key_style = Style::default().fg(Color::Yellow);
-        let label_style = Style::default().fg(Color::DarkGray);
-        let active_label = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
-        let sort_style = Style::default().fg(Color::Cyan);
+        let key_style = Style::default().fg(self.theme.text_highlight);
+        let label_style = Style::default().fg(self.theme.text_secondary);
+        let active_label = Style::default().fg(self.theme.semantic_success).add_modifier(Modifier::BOLD);
+        let sort_style = Style::default().fg(self.theme.header_fg);
 
         let hints = Line::from(vec![
             Span::styled("^E", key_style),
@@ -1667,17 +1670,18 @@ impl Panel for HistoryBrowserPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::theme::AMBER_THEME;
 
     #[test]
     fn test_history_browser_new() {
-        let panel = HistoryBrowserPanel::new();
+        let panel = HistoryBrowserPanel::new(&AMBER_THEME);
         assert!(panel.records.is_empty());
         assert_eq!(panel.selection, 0);
     }
 
     #[test]
     fn test_filter_mode_default() {
-        let panel = HistoryBrowserPanel::new();
+        let panel = HistoryBrowserPanel::new(&AMBER_THEME);
         assert!(!panel.filter_mode.dedupe);
         assert!(!panel.filter_mode.current_dir_only);
         assert!(!panel.filter_mode.failed_only);
@@ -1685,7 +1689,7 @@ mod tests {
 
     #[test]
     fn test_sort_mode_cycle() {
-        let mut panel = HistoryBrowserPanel::new();
+        let mut panel = HistoryBrowserPanel::new(&AMBER_THEME);
         assert_eq!(panel.sort_mode, SortMode::Recency);
         panel.sort_mode = panel.sort_mode.next();
         assert_eq!(panel.sort_mode, SortMode::Frequency);
