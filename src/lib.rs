@@ -22,6 +22,7 @@ mod complete;
 pub mod editor;
 pub mod git;
 pub mod history;
+pub mod history_store;
 pub mod prompt;
 pub mod signals;
 mod suggest;

@@ -7,7 +7,8 @@ rust-version = "1.86"
 [dependencies]
 # PTY and terminal control
 portable-pty = "0.8"
-reedline = "0.45"
+reedline = { version = "0.45", features = ["sqlite"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
 crossterm = "0.29"
 
 # POSIX syscalls and signal handling
