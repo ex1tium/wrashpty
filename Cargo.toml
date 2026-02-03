@@ -2,7 +2,7 @@
 name = "wrashpty"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.86"
 
 [dependencies]
 # PTY and terminal control
@@ -41,8 +41,10 @@ dirs = "5.0"
 # Unicode display width
 unicode-width = "0.1"
 
-# TUI widgets for panel rendering
-ratatui = "0.29"
+# TUI rendering primitives (Buffer, Rect, Style, Layout)
+ratatui-core = "0.1"
+# TUI widgets (Block, List, Paragraph, Tabs)
+ratatui-widgets = "0.3"
 
 # Regex for Makefile/config parsing
 regex = "1.10"

@@ -3,8 +3,8 @@
 use std::any::Any;
 
 use crossterm::event::KeyEvent;
-use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
+use ratatui_core::buffer::Buffer;
+use ratatui_core::layout::Rect;
 
 /// Result of handling panel input.
 #[derive(Debug, Clone)]

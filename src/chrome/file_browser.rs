@@ -6,11 +6,13 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::buffer::Buffer;
-use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, Paragraph, Widget};
+use ratatui_core::buffer::Buffer;
+use ratatui_core::layout::{Constraint, Layout, Rect};
+use ratatui_core::style::{Color, Modifier, Style};
+use ratatui_core::text::{Line, Span};
+use ratatui_core::widgets::Widget;
+use ratatui_widgets::list::{List, ListItem};
+use ratatui_widgets::paragraph::Paragraph;
 use tracing::debug;
 
 use super::panel::{Panel, PanelResult};

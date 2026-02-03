@@ -44,8 +44,8 @@ use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use nix::poll::{PollFd, PollFlags, poll};
 use nix::unistd::read;
 use portable_pty::ExitStatus;
-use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
+use ratatui_core::buffer::Buffer;
+use ratatui_core::layout::Rect;
 use tracing::{debug, info, warn};
 
 use crate::chrome::panel::{Panel, PanelResult};
@@ -891,8 +891,10 @@ impl App {
         cols: u16,
         panel_height: u16,
     ) -> Result<PanelResult> {
-        use ratatui::style::{Color, Style};
-        use ratatui::widgets::{Block, Borders, Widget};
+        use ratatui_core::style::{Color, Style};
+        use ratatui_core::widgets::Widget;
+        use ratatui_widgets::block::Block;
+        use ratatui_widgets::borders::Borders;
 
         loop {
             // Create buffer for panel area (starting at row 1, which is terminal row 1)
