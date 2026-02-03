@@ -59,6 +59,12 @@ pub struct Symbols {
     pub history: &'static str,
     /// Help/info icon.
     pub help: &'static str,
+
+    // Notifications
+    /// Info notification icon.
+    pub notif_info: &'static str,
+    /// Warning notification icon.
+    pub notif_warning: &'static str,
 }
 
 impl Symbols {
@@ -109,6 +115,10 @@ pub static NERD_FONT_SYMBOLS: Symbols = Symbols {
     search: "\u{f002}",  //  (fa-search)
     history: "\u{f1da}", //  (fa-history)
     help: "\u{f059}",    //  (fa-question-circle)
+
+    // Notifications
+    notif_info: "\u{f05a}",    //  (fa-info-circle)
+    notif_warning: "\u{f071}", //  (fa-exclamation-triangle)
 };
 
 /// Fallback symbol set using basic Unicode.
@@ -148,6 +158,10 @@ pub static FALLBACK_SYMBOLS: Symbols = Symbols {
     search: "",  // No icon
     history: "", // No icon
     help: "?",   // Question mark
+
+    // Notifications
+    notif_info: "\u{2139}",    // ℹ (information source)
+    notif_warning: "\u{26a0}", // ⚠ (warning sign)
 };
 
 #[cfg(test)]
