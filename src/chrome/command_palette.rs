@@ -116,8 +116,9 @@ impl CommandPalettePanel {
         self.load_detected_scripts(cwd);
 
         // Sort by frecency (higher is better)
+        // Use total_cmp for NaN-safe comparison (treats NaN as greater than all values)
         self.items
-            .sort_by(|a, b| b.frecency_score.partial_cmp(&a.frecency_score).unwrap());
+            .sort_by(|a, b| b.frecency_score.total_cmp(&a.frecency_score));
 
         self.apply_filter();
 

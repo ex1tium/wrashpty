@@ -490,7 +490,7 @@ impl Chrome {
         }
 
         // Calculate total display width
-        let total_width: usize = segments.iter().map(|s| s.display_width).sum();
+        let mut total_width: usize = segments.iter().map(|s| s.display_width).sum();
 
         // Truncate segments if needed (remove highest priority first)
         let mut segments = segments;
@@ -503,14 +503,15 @@ impl Chrome {
                 .map(|(i, _)| i);
 
             if let Some(idx) = max_priority_idx {
-                segments.remove(idx);
+                let removed = segments.remove(idx);
+                total_width = total_width.saturating_sub(removed.display_width);
             } else {
                 break;
             }
         }
 
-        // Recalculate width after removal
-        let content_width: usize = segments.iter().map(|s| s.display_width).sum();
+        // Use the tracked width (already updated by the loop)
+        let content_width = total_width;
 
         // Assemble content
         let mut result = String::new();
