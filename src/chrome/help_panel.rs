@@ -3,11 +3,12 @@
 use std::any::Any;
 
 use crossterm::event::{KeyCode, KeyEvent};
-use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, Widget};
+use ratatui_core::buffer::Buffer;
+use ratatui_core::layout::Rect;
+use ratatui_core::style::{Color, Modifier, Style};
+use ratatui_core::text::{Line, Span};
+use ratatui_core::widgets::Widget;
+use ratatui_widgets::list::{List, ListItem};
 
 use super::panel::{Panel, PanelResult};
 

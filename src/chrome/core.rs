@@ -28,8 +28,8 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
+use ratatui_core::buffer::Buffer;
+use ratatui_core::layout::Rect;
 use tracing::{debug, info, warn};
 use unicode_width::UnicodeWidthStr;
 

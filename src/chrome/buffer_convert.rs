@@ -4,9 +4,9 @@
 //! ANSI escape sequences for direct terminal output, bypassing ratatui's
 //! Terminal abstraction to avoid conflicts with reedline.
 
-use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui_core::buffer::Buffer;
+use ratatui_core::layout::Rect;
+use ratatui_core::style::{Color, Modifier, Style};
 
 /// Converts a ratatui buffer to ANSI escape sequences.
 ///

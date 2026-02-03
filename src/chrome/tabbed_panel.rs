@@ -4,11 +4,12 @@ use std::any::Any;
 use std::path::Path;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::buffer::Buffer;
-use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Tabs, Widget};
+use ratatui_core::buffer::Buffer;
+use ratatui_core::layout::{Constraint, Layout, Rect};
+use ratatui_core::style::{Color, Modifier, Style};
+use ratatui_core::text::{Line, Span};
+use ratatui_core::widgets::Widget;
+use ratatui_widgets::tabs::Tabs;
 
 use super::command_palette::CommandPalettePanel;
 use super::file_browser::FileBrowserPanel;
