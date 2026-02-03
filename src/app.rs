@@ -40,7 +40,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, Event};
 use nix::poll::{PollFd, PollFlags, poll};
 use nix::unistd::read;
 use portable_pty::ExitStatus;
@@ -1053,27 +1053,6 @@ impl App {
         }
 
         Ok(())
-    }
-
-    /// Checks if Ctrl+Space was pressed (for panel activation).
-    ///
-    /// This does a non-blocking poll for key events before reedline takes over.
-    /// If Ctrl+Space is detected, returns true so the caller can open the panel.
-    fn check_panel_keybinding(&self) -> Result<bool> {
-        // Poll with zero timeout - just check if key is available
-        if event::poll(std::time::Duration::from_millis(0))
-            .context("Failed to poll for panel keybinding")?
-        {
-            if let Event::Key(key) = event::read().context("Failed to read key event")? {
-                if key.kind == crossterm::event::KeyEventKind::Press
-                    && key.code == KeyCode::Char(' ')
-                    && key.modifiers.contains(KeyModifiers::CONTROL)
-                {
-                    return Ok(true);
-                }
-            }
-        }
-        Ok(false)
     }
 
     /// Injects the pending command into the PTY.
