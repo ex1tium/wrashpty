@@ -198,6 +198,10 @@ impl HistoryStore {
 
     /// Updates metadata for the last executed command.
     ///
+    /// Uses `self.last_command_id` if set (preferred), otherwise falls back to
+    /// querying for the most recent entry. Using the stored ID avoids race
+    /// conditions with concurrent writers.
+    ///
     /// # Arguments
     ///
     /// * `exit_status` - Exit code of the command
@@ -213,18 +217,24 @@ impl HistoryStore {
         let conn = Connection::open(&self.db_path)
             .context("Failed to open history database")?;
 
-        // Get the ID of the most recent command
-        let last_id: Option<i64> = conn
-            .query_row(
-                "SELECT id FROM history ORDER BY id DESC LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .ok();
+        // Prefer stored ID to avoid race with concurrent writers
+        let id: i64 = if let Some(stored_id) = self.last_command_id.take() {
+            stored_id.0
+        } else {
+            // Fallback: query for the most recent command (legacy behavior)
+            let last_id: Option<i64> = conn
+                .query_row(
+                    "SELECT id FROM history ORDER BY id DESC LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .ok();
 
-        let Some(id) = last_id else {
-            debug!("No recent command found to update");
-            return Ok(());
+            let Some(id) = last_id else {
+                debug!("No recent command found to update");
+                return Ok(());
+            };
+            id
         };
 
         // Update the entry with metadata
