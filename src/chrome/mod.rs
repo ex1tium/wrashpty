@@ -13,4 +13,4 @@ pub mod panel;
 pub mod tabbed_panel;
 
 // Re-export core types for backward compatibility
-pub use core::{Chrome, ChromeContext, SizeCheckResult};
+pub use core::{Chrome, ChromeContext, NotificationStyle, SizeCheckResult};
