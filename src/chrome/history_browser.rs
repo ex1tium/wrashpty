@@ -19,13 +19,128 @@ use tracing::{debug, warn};
 use super::panel::{Panel, PanelResult};
 use crate::history_store::{FilterMode, HistoryRecord, HistoryStore, SortMode};
 
+/// Token type for semantic classification.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum TokenType {
+    Command,    // First token (ls, git, etc.)
+    Subcommand, // Second token for compound commands (checkout, push)
+    Flag,       // Starts with - or --
+    Path,       // Contains / or starts with . or ~
+    Url,        // Contains :// or looks like git@...
+    Argument,   // Generic argument
+}
+
+/// Quote style for tokens.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum QuoteStyle {
+    None,
+    Single, // 'text'
+    Double, // "text"
+}
+
 /// A token from a shell command (word, flag, or quoted string).
 #[derive(Debug, Clone)]
 struct CommandToken {
     /// The text content of this token.
     text: String,
-    /// Whether this token is likely editable (not a flag or command).
-    editable: bool,
+    /// Semantic type of this token.
+    token_type: TokenType,
+}
+
+/// Returns a superscript digit for display (¹²³...²⁰).
+fn superscript_digit(n: usize) -> &'static str {
+    const SUPERSCRIPTS: [&str; 20] = [
+        "¹", "²", "³", "⁴", "⁵", "⁶", "⁷", "⁸", "⁹", "¹⁰",
+        "¹¹", "¹²", "¹³", "¹⁴", "¹⁵", "¹⁶", "¹⁷", "¹⁸", "¹⁹", "²⁰",
+    ];
+    if n >= 1 && n <= 20 {
+        SUPERSCRIPTS[n - 1]
+    } else {
+        "·" // Fallback for >20 tokens
+    }
+}
+
+/// Classifies a token based on its content and position.
+fn classify_token(text: &str, position: usize, prev_token: Option<&str>) -> TokenType {
+    if position == 0 {
+        return TokenType::Command;
+    }
+    if text.starts_with('-') {
+        return TokenType::Flag;
+    }
+    if text.contains("://") || text.starts_with("git@") {
+        return TokenType::Url;
+    }
+    if text.contains('/') || text.starts_with('.') || text.starts_with('~') {
+        return TokenType::Path;
+    }
+    // Check for subcommand (second token after known compound commands)
+    if position == 1 {
+        if let Some(cmd) = prev_token {
+            if matches!(cmd, "git" | "docker" | "kubectl" | "cargo" | "npm" | "yarn" | "systemctl" | "journalctl") {
+                return TokenType::Subcommand;
+            }
+        }
+    }
+    TokenType::Argument
+}
+
+/// Returns the style for a token based on its type.
+fn token_type_style(token_type: TokenType) -> Style {
+    match token_type {
+        TokenType::Command => Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+        TokenType::Subcommand => Style::default().fg(Color::Cyan),
+        TokenType::Flag => Style::default().fg(Color::Yellow),
+        TokenType::Path => Style::default().fg(Color::Blue),
+        TokenType::Url => Style::default().fg(Color::Magenta),
+        TokenType::Argument => Style::default().fg(Color::White),
+    }
+}
+
+/// Parses quote style from a token.
+fn parse_quotes(text: &str) -> (String, QuoteStyle) {
+    if text.starts_with('\'') && text.ends_with('\'') && text.len() >= 2 {
+        (text[1..text.len() - 1].to_string(), QuoteStyle::Single)
+    } else if text.starts_with('"') && text.ends_with('"') && text.len() >= 2 {
+        (text[1..text.len() - 1].to_string(), QuoteStyle::Double)
+    } else {
+        (text.to_string(), QuoteStyle::None)
+    }
+}
+
+/// Applies a quote style to text.
+fn apply_quotes(text: &str, style: QuoteStyle) -> String {
+    match style {
+        QuoteStyle::None => text.to_string(),
+        QuoteStyle::Single => format!("'{}'", text),
+        QuoteStyle::Double => format!("\"{}\"", text),
+    }
+}
+
+/// Checks if a command is potentially dangerous.
+fn is_dangerous_command(command: &str) -> Option<&'static str> {
+    let lower = command.to_lowercase();
+
+    if lower.contains("rm -rf") || lower.contains("rm -fr") {
+        return Some("Recursive force delete");
+    }
+    if lower.contains("dd if=") && lower.contains("of=/dev/") {
+        return Some("Direct disk write");
+    }
+    if lower.contains("mkfs") {
+        return Some("Filesystem format");
+    }
+    if lower.contains("> /dev/sd") || lower.contains(">/dev/sd") {
+        return Some("Direct device write");
+    }
+    if lower.contains("chmod -r 777") || lower.contains("chmod 777 -r") {
+        return Some("Overly permissive chmod");
+    }
+    if lower.contains(":(){ :|:& };:") {
+        return Some("Fork bomb");
+    }
+
+    None
 }
 
 /// State for edit mode.
@@ -41,6 +156,14 @@ struct EditModeState {
     edit_buffer: String,
     /// Whether we're actively editing the current token.
     editing: bool,
+    /// Undo stack for reverting changes.
+    undo_stack: Vec<Vec<CommandToken>>,
+    /// Pending command awaiting confirmation (for dangerous commands).
+    pending_confirm: Option<String>,
+    /// Warning message for dangerous command.
+    danger_warning: Option<&'static str>,
+    /// Skip dangerous command checks (toggled with Ctrl+!)
+    skip_danger_check: bool,
 }
 
 impl EditModeState {
@@ -54,6 +177,10 @@ impl EditModeState {
             selected: 0,
             edit_buffer,
             editing: false,
+            undo_stack: Vec::new(),
+            pending_confirm: None,
+            danger_warning: None,
+            skip_danger_check: false,
         }
     }
 
@@ -97,16 +224,126 @@ impl EditModeState {
         }
         self.tokens.iter().map(|t| t.text.as_str()).collect::<Vec<_>>().join(" ")
     }
+
+    /// Saves current state to undo stack.
+    fn save_undo(&mut self) {
+        self.undo_stack.push(self.tokens.clone());
+        // Limit stack size
+        if self.undo_stack.len() > 50 {
+            self.undo_stack.remove(0);
+        }
+    }
+
+    /// Restores previous state from undo stack.
+    fn undo(&mut self) {
+        if let Some(prev) = self.undo_stack.pop() {
+            self.tokens = prev;
+            self.selected = self.selected.min(self.tokens.len().saturating_sub(1));
+            self.edit_buffer = self.tokens.get(self.selected)
+                .map(|t| t.text.clone())
+                .unwrap_or_default();
+        }
+    }
+
+    /// Deletes the currently selected token.
+    fn delete_token(&mut self) {
+        if self.tokens.len() <= 1 {
+            return; // Don't delete last token
+        }
+        self.save_undo();
+        self.tokens.remove(self.selected);
+        if self.selected >= self.tokens.len() {
+            self.selected = self.tokens.len() - 1;
+        }
+        self.edit_buffer = self.tokens[self.selected].text.clone();
+    }
+
+    /// Inserts a new token after the current one.
+    fn insert_token_after(&mut self) {
+        self.save_undo();
+        // Save current edit first
+        if let Some(token) = self.tokens.get_mut(self.selected) {
+            token.text = self.edit_buffer.clone();
+        }
+        let new_token = CommandToken {
+            text: String::new(),
+            token_type: TokenType::Argument,
+        };
+        self.tokens.insert(self.selected + 1, new_token);
+        self.selected += 1;
+        self.edit_buffer.clear();
+        self.editing = true;
+    }
+
+    /// Inserts a new token before the current one.
+    fn insert_token_before(&mut self) {
+        self.save_undo();
+        // Save current edit first
+        if let Some(token) = self.tokens.get_mut(self.selected) {
+            token.text = self.edit_buffer.clone();
+        }
+        let new_token = CommandToken {
+            text: String::new(),
+            token_type: TokenType::Argument,
+        };
+        self.tokens.insert(self.selected, new_token);
+        self.edit_buffer.clear();
+        self.editing = true;
+    }
+
+    /// Cycles through quote styles for current token.
+    fn cycle_quote(&mut self) {
+        let (inner, current_style) = parse_quotes(&self.edit_buffer);
+
+        let new_style = match current_style {
+            QuoteStyle::None => QuoteStyle::Single,
+            QuoteStyle::Single => QuoteStyle::Double,
+            QuoteStyle::Double => QuoteStyle::None,
+        };
+
+        self.edit_buffer = apply_quotes(&inner, new_style);
+    }
+
+    /// Clears any pending confirmation state.
+    fn clear_confirm(&mut self) {
+        self.pending_confirm = None;
+        self.danger_warning = None;
+    }
+
+    /// Returns true if waiting for confirmation.
+    fn is_confirming(&self) -> bool {
+        self.pending_confirm.is_some()
+    }
+
+    /// Returns true if there are any unsaved changes.
+    fn has_changes(&self) -> bool {
+        // Build current command to compare
+        let current: String = self.tokens.iter().enumerate().map(|(i, t)| {
+            if i == self.selected {
+                self.edit_buffer.clone()
+            } else {
+                t.text.clone()
+            }
+        }).collect::<Vec<_>>().join(" ");
+        current != self.original
+    }
+
+    /// Reverts all changes back to the original command.
+    fn revert(&mut self) {
+        self.tokens = tokenize_command(&self.original);
+        self.selected = 0;
+        self.edit_buffer = self.tokens.first().map(|t| t.text.clone()).unwrap_or_default();
+        self.undo_stack.clear();
+    }
 }
 
 /// Tokenizes a shell command into words, respecting quotes.
 fn tokenize_command(command: &str) -> Vec<CommandToken> {
-    let mut tokens = Vec::new();
+    let mut raw_tokens: Vec<String> = Vec::new();
     let mut current = String::new();
     let mut in_single_quote = false;
     let mut in_double_quote = false;
     let mut escape_next = false;
-    let mut is_first = true;
 
     for ch in command.chars() {
         if escape_next {
@@ -130,13 +367,8 @@ fn tokenize_command(command: &str) -> Vec<CommandToken> {
             }
             ' ' | '\t' if !in_single_quote && !in_double_quote => {
                 if !current.is_empty() {
-                    let editable = !is_first && !current.starts_with('-');
-                    tokens.push(CommandToken {
-                        text: current.clone(),
-                        editable,
-                    });
+                    raw_tokens.push(current.clone());
                     current.clear();
-                    is_first = false;
                 }
             }
             _ => {
@@ -147,10 +379,17 @@ fn tokenize_command(command: &str) -> Vec<CommandToken> {
 
     // Don't forget the last token
     if !current.is_empty() {
-        let editable = !is_first && !current.starts_with('-');
+        raw_tokens.push(current);
+    }
+
+    // Now classify each token
+    let mut tokens = Vec::new();
+    for (i, text) in raw_tokens.iter().enumerate() {
+        let prev = if i > 0 { Some(raw_tokens[i - 1].as_str()) } else { None };
+        let token_type = classify_token(text, i, prev);
         tokens.push(CommandToken {
-            text: current,
-            editable,
+            text: text.clone(),
+            token_type,
         });
     }
 
@@ -321,124 +560,319 @@ impl HistoryBrowserPanel {
     fn render_edit_mode(&self, buffer: &mut Buffer, area: Rect) {
         let Some(edit_state) = &self.edit_mode else { return };
 
-        // Layout: title (1) + command display (2) + separator (1) + edit area (2) + border (1) + keybinds (1)
+        // Check if showing danger confirmation
+        if edit_state.is_confirming() {
+            self.render_danger_confirm(buffer, area, edit_state);
+            return;
+        }
+
+        // Compact layout - 10 rows total to fit panel
         let chunks = Layout::vertical([
             Constraint::Length(1), // Title
-            Constraint::Length(2), // Command with tokens
-            Constraint::Length(1), // Separator
-            Constraint::Length(2), // Edit input area
+            Constraint::Length(1), // Original command (dim)
+            Constraint::Length(1), // Spacer
+            Constraint::Length(1), // Token strip
+            Constraint::Length(1), // Edit input line
+            Constraint::Length(1), // Spacer
+            Constraint::Length(1), // Result preview
+            Constraint::Min(1),    // Flexible spacer
+            Constraint::Length(1), // Border
+            Constraint::Length(1), // Keybind hints
+        ])
+        .split(area);
+
+        // Title with optional unsafe mode indicator
+        let mut title_spans = vec![
+            Span::styled(" Edit Command", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        ];
+        if edit_state.skip_danger_check {
+            title_spans.push(Span::styled(" [UNSAFE]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)));
+        }
+        let title = Line::from(title_spans);
+        Paragraph::new(title).render(chunks[0], buffer);
+
+        // Original command (dimmed reference)
+        let original_line = Line::from(vec![
+            Span::styled(" Original: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(&edit_state.original, Style::default().fg(Color::DarkGray)),
+        ]);
+        Paragraph::new(original_line).render(chunks[1], buffer);
+
+        // Token strip with double brackets and superscript numbers
+        let mut spans = Vec::new();
+        spans.push(Span::styled("   ", Style::default()));
+
+        let bracket_style = Style::default().fg(Color::DarkGray);
+        let bracket_selected_style = Style::default().fg(Color::Cyan);
+
+        for (i, token) in edit_state.tokens.iter().enumerate() {
+            let is_selected = i == edit_state.selected;
+            let slot_num = i + 1;
+
+            // Superscript number
+            let num_style = if is_selected {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            spans.push(Span::styled(superscript_digit(slot_num), num_style));
+
+            // Opening bracket
+            let bstyle = if is_selected { bracket_selected_style } else { bracket_style };
+            spans.push(Span::styled("⟦", bstyle));
+
+            // Token text with type-aware styling
+            let base_style = token_type_style(token.token_type);
+            let token_style = if is_selected {
+                base_style.add_modifier(Modifier::BOLD)
+            } else {
+                base_style
+            };
+
+            // Show edit buffer for selected token, original text for others
+            let display_text = if is_selected {
+                if edit_state.edit_buffer.is_empty() {
+                    "_".to_string()
+                } else {
+                    edit_state.edit_buffer.clone()
+                }
+            } else {
+                token.text.clone()
+            };
+            spans.push(Span::styled(display_text, token_style));
+
+            // Closing bracket
+            spans.push(Span::styled("⟧", bstyle));
+
+            // Spacing between tokens
+            spans.push(Span::raw("   "));
+        }
+
+        let token_line = Line::from(spans);
+        Paragraph::new(token_line).render(chunks[3], buffer);
+
+        // Edit input line
+        let type_hint = match edit_state.tokens.get(edit_state.selected).map(|t| t.token_type) {
+            Some(TokenType::Command) => "cmd",
+            Some(TokenType::Subcommand) => "sub",
+            Some(TokenType::Flag) => "flag",
+            Some(TokenType::Path) => "path",
+            Some(TokenType::Url) => "url",
+            Some(TokenType::Argument) | None => "arg",
+        };
+        let edit_label = format!("   {} {} > ", superscript_digit(edit_state.selected + 1), type_hint);
+        let edit_line = Line::from(vec![
+            Span::styled(edit_label, Style::default().fg(Color::Magenta)),
+            Span::styled(&edit_state.edit_buffer, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled("█", Style::default().fg(Color::Cyan)),
+        ]);
+        Paragraph::new(edit_line).render(chunks[4], buffer);
+
+        // Build and show result preview
+        let result_preview: String = edit_state.tokens.iter().enumerate().map(|(i, t)| {
+            if i == edit_state.selected {
+                edit_state.edit_buffer.clone()
+            } else {
+                t.text.clone()
+            }
+        }).collect::<Vec<_>>().join(" ");
+
+        let preview_changed = result_preview != edit_state.original;
+        let preview_style = if preview_changed {
+            Style::default().fg(Color::Green)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let preview_line = Line::from(vec![
+            Span::styled("  Edited: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(&result_preview, preview_style),
+        ]);
+        Paragraph::new(preview_line).render(chunks[6], buffer);
+
+        // Border
+        let border_style = Style::default().fg(Color::DarkGray);
+        for x in chunks[8].x..chunks[8].x + chunks[8].width {
+            if let Some(cell) = buffer.cell_mut((x, chunks[8].y)) {
+                cell.set_char('─');
+                cell.set_style(border_style);
+            }
+        }
+
+        // Keybind hints
+        let key_style = Style::default().fg(Color::Yellow);
+        let label_style = Style::default().fg(Color::DarkGray);
+
+        let hints = Line::from(vec![
+            Span::styled("←→", key_style),
+            Span::styled(" Nav", label_style),
+            Span::raw("   "),
+            Span::styled("^D", key_style),
+            Span::styled(" Del", label_style),
+            Span::raw("   "),
+            Span::styled("^A/I", key_style),
+            Span::styled(" Ins", label_style),
+            Span::raw("   "),
+            Span::styled("^Q", key_style),
+            Span::styled(" Quote", label_style),
+            Span::raw("   "),
+            Span::styled("^Z", key_style),
+            Span::styled(" Undo", label_style),
+            Span::raw("   "),
+            Span::styled("Enter", key_style),
+            Span::styled(" Run", label_style),
+            Span::raw("   "),
+            Span::styled("Esc", key_style),
+            Span::styled(" Back", label_style),
+        ]);
+        Paragraph::new(hints).render(chunks[9], buffer);
+    }
+
+    /// Renders the danger confirmation dialog.
+    fn render_danger_confirm(&self, buffer: &mut Buffer, area: Rect, edit_state: &EditModeState) {
+        let chunks = Layout::vertical([
+            Constraint::Length(1), // Warning header
+            Constraint::Length(1), // Warning message
+            Constraint::Length(1), // Command
             Constraint::Min(1),    // Spacer
             Constraint::Length(1), // Border
             Constraint::Length(1), // Keybind hints
         ])
         .split(area);
 
-        // Title
-        let title = Line::from(vec![
-            Span::styled(" Edit Command ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::styled("- modify tokens and press Enter to run", Style::default().fg(Color::DarkGray)),
+        // Warning header
+        let header = Line::from(vec![
+            Span::styled(" ⚠ WARNING ", Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
         ]);
-        Paragraph::new(title).render(chunks[0], buffer);
+        Paragraph::new(header).render(chunks[0], buffer);
 
-        // Render tokenized command with slot numbers
-        let mut spans = Vec::new();
-        spans.push(Span::raw(" "));
-
-        for (i, token) in edit_state.tokens.iter().enumerate() {
-            let is_selected = i == edit_state.selected;
-            let slot_num = i + 1; // 1-indexed for display
-
-            // Slot number indicator (visual reference for position)
-            let num_style = if is_selected {
-                Style::default().fg(Color::Black).bg(Color::Yellow)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-            spans.push(Span::styled(format!("{}", slot_num), num_style));
-
-            // Token text
-            let token_style = if is_selected {
-                Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
-            } else if token.editable {
-                Style::default().fg(Color::White)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-
-            // Show edit buffer for selected token, original text for others
-            let display_text = if is_selected {
-                &edit_state.edit_buffer
-            } else {
-                &token.text
-            };
-            spans.push(Span::styled(display_text.clone(), token_style));
-            spans.push(Span::raw(" "));
-        }
-
-        let cmd_line = Line::from(spans);
-        Paragraph::new(cmd_line).render(chunks[1], buffer);
-
-        // Separator
-        let sep_style = Style::default().fg(Color::DarkGray);
-        for x in chunks[2].x..chunks[2].x + chunks[2].width {
-            if let Some(cell) = buffer.cell_mut((x, chunks[2].y)) {
-                cell.set_char('─');
-                cell.set_style(sep_style);
-            }
-        }
-
-        // Edit area - show current token being edited
-        let edit_label = format!(" Editing slot {}: ", edit_state.selected + 1);
-        let edit_line = Line::from(vec![
-            Span::styled(edit_label, Style::default().fg(Color::Magenta)),
-            Span::styled(&edit_state.edit_buffer, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-            Span::styled("█", Style::default().fg(Color::White)), // Cursor
+        // Warning message
+        let warning_msg = edit_state.danger_warning.unwrap_or("Potentially dangerous command");
+        let warning_line = Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled(warning_msg, Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
         ]);
-        Paragraph::new(edit_line).render(chunks[3], buffer);
+        Paragraph::new(warning_line).render(chunks[1], buffer);
+
+        // Command
+        let cmd = edit_state.pending_confirm.as_deref().unwrap_or("");
+        let cmd_line = Line::from(vec![
+            Span::styled(" Command: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(cmd, Style::default().fg(Color::White)),
+        ]);
+        Paragraph::new(cmd_line).render(chunks[2], buffer);
 
         // Border
         let border_style = Style::default().fg(Color::DarkGray);
-        for x in chunks[5].x..chunks[5].x + chunks[5].width {
-            if let Some(cell) = buffer.cell_mut((x, chunks[5].y)) {
+        for x in chunks[4].x..chunks[4].x + chunks[4].width {
+            if let Some(cell) = buffer.cell_mut((x, chunks[4].y)) {
                 cell.set_char('─');
                 cell.set_style(border_style);
             }
         }
 
-        // Keybind hints for edit mode
+        // Keybind hints
         let key_style = Style::default().fg(Color::Yellow);
         let label_style = Style::default().fg(Color::DarkGray);
-
         let hints = Line::from(vec![
-            Span::styled("←→/Tab", key_style),
-            Span::styled(" Navigate", label_style),
-            Span::raw("  "),
-            Span::styled("Home/End", key_style),
-            Span::styled(" First/Last", label_style),
-            Span::raw("  "),
             Span::styled("Enter", key_style),
-            Span::styled(" Run", label_style),
+            Span::styled(" Confirm & Run", label_style),
             Span::raw("  "),
             Span::styled("Esc", key_style),
-            Span::styled(" Back", label_style),
+            Span::styled(" Cancel", label_style),
         ]);
-        Paragraph::new(hints).render(chunks[6], buffer);
+        Paragraph::new(hints).render(chunks[5], buffer);
     }
 
     /// Handles input in edit mode. Returns Some(PanelResult) if handled.
     fn handle_edit_input(&mut self, key: KeyEvent) -> Option<PanelResult> {
         let edit_state = self.edit_mode.as_mut()?;
 
+        // Handle danger confirmation mode
+        if edit_state.is_confirming() {
+            return match key.code {
+                KeyCode::Enter => {
+                    // User confirmed - execute the dangerous command
+                    let command = edit_state.pending_confirm.take().unwrap_or_default();
+                    self.exit_edit_mode();
+                    Some(PanelResult::Execute(command))
+                }
+                KeyCode::Esc => {
+                    // Cancel confirmation, go back to editing
+                    edit_state.clear_confirm();
+                    Some(PanelResult::Continue)
+                }
+                _ => Some(PanelResult::Continue),
+            };
+        }
+
+        // Handle Ctrl+key commands (don't interfere with text editing)
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('z') | KeyCode::Char('u') => {
+                    edit_state.undo();
+                    return Some(PanelResult::Continue);
+                }
+                KeyCode::Char('d') => {
+                    edit_state.delete_token();
+                    return Some(PanelResult::Continue);
+                }
+                KeyCode::Char('a') => {
+                    edit_state.insert_token_after();
+                    return Some(PanelResult::Continue);
+                }
+                KeyCode::Char('i') => {
+                    edit_state.insert_token_before();
+                    return Some(PanelResult::Continue);
+                }
+                KeyCode::Char('q') => {
+                    edit_state.cycle_quote();
+                    return Some(PanelResult::Continue);
+                }
+                KeyCode::Char('!') => {
+                    edit_state.skip_danger_check = !edit_state.skip_danger_check;
+                    return Some(PanelResult::Continue);
+                }
+                _ => {}
+            }
+        }
+
         match key.code {
             KeyCode::Esc => {
-                self.exit_edit_mode();
-                Some(PanelResult::Continue)
+                // Three-stage Esc:
+                // 1. If current token edit differs from saved token → revert token
+                // 2. If command differs from original → revert entire command
+                // 3. Exit edit mode
+                let token_text = edit_state.tokens.get(edit_state.selected)
+                    .map(|t| t.text.as_str())
+                    .unwrap_or("");
+
+                if edit_state.edit_buffer != token_text {
+                    // Stage 1: Revert current token to its saved value
+                    edit_state.edit_buffer = token_text.to_string();
+                    Some(PanelResult::Continue)
+                } else if edit_state.has_changes() {
+                    // Stage 2: Revert entire command to original
+                    edit_state.revert();
+                    Some(PanelResult::Continue)
+                } else {
+                    // Stage 3: Exit edit mode
+                    self.exit_edit_mode();
+                    Some(PanelResult::Continue)
+                }
             }
             KeyCode::Enter => {
-                // Build and execute the edited command
+                // Build the edited command
                 let command = edit_state.build_command();
+
+                // Check for dangerous patterns (unless bypassed)
+                if !edit_state.skip_danger_check {
+                    if let Some(warning) = is_dangerous_command(&command) {
+                        edit_state.pending_confirm = Some(command);
+                        edit_state.danger_warning = Some(warning);
+                        return Some(PanelResult::Continue);
+                    }
+                }
                 self.exit_edit_mode();
-                // Execute directly since reedline doesn't support buffer injection
                 Some(PanelResult::Execute(command))
             }
             KeyCode::Left => {
@@ -459,12 +893,10 @@ impl HistoryBrowserPanel {
                 Some(PanelResult::Continue)
             }
             KeyCode::Tab => {
-                // Tab moves to next token (more intuitive than right arrow for some)
                 edit_state.next();
                 Some(PanelResult::Continue)
             }
             KeyCode::BackTab => {
-                // Shift+Tab moves to previous token
                 edit_state.prev();
                 Some(PanelResult::Continue)
             }
@@ -475,6 +907,10 @@ impl HistoryBrowserPanel {
             }
             KeyCode::Backspace => {
                 edit_state.edit_buffer.pop();
+                // If buffer becomes empty, reset editing state
+                if edit_state.edit_buffer.is_empty() {
+                    edit_state.editing = false;
+                }
                 Some(PanelResult::Continue)
             }
             _ => Some(PanelResult::Continue),
@@ -1029,11 +1465,11 @@ mod tests {
         let tokens = tokenize_command("ls -la /tmp");
         assert_eq!(tokens.len(), 3);
         assert_eq!(tokens[0].text, "ls");
-        assert!(!tokens[0].editable); // First token (command)
+        assert_eq!(tokens[0].token_type, TokenType::Command);
         assert_eq!(tokens[1].text, "-la");
-        assert!(!tokens[1].editable); // Flag
+        assert_eq!(tokens[1].token_type, TokenType::Flag);
         assert_eq!(tokens[2].text, "/tmp");
-        assert!(tokens[2].editable); // Path argument
+        assert_eq!(tokens[2].token_type, TokenType::Path);
     }
 
     #[test]
@@ -1042,7 +1478,7 @@ mod tests {
         assert_eq!(tokens.len(), 2);
         assert_eq!(tokens[0].text, "echo");
         assert_eq!(tokens[1].text, "\"hello world\"");
-        assert!(tokens[1].editable);
+        assert_eq!(tokens[1].token_type, TokenType::Argument);
     }
 
     #[test]
@@ -1050,7 +1486,7 @@ mod tests {
         let tokens = tokenize_command("grep 'pattern with spaces' file.txt");
         assert_eq!(tokens.len(), 3);
         assert_eq!(tokens[1].text, "'pattern with spaces'");
-        assert!(tokens[1].editable);
+        assert_eq!(tokens[1].token_type, TokenType::Argument);
     }
 
     #[test]
@@ -1058,21 +1494,121 @@ mod tests {
         let tokens = tokenize_command("git checkout -b feature/new-branch origin/main");
         assert_eq!(tokens.len(), 5);
         assert_eq!(tokens[0].text, "git");
-        assert!(!tokens[0].editable);
+        assert_eq!(tokens[0].token_type, TokenType::Command);
         assert_eq!(tokens[1].text, "checkout");
-        assert!(tokens[1].editable);
+        assert_eq!(tokens[1].token_type, TokenType::Subcommand);
         assert_eq!(tokens[2].text, "-b");
-        assert!(!tokens[2].editable);
+        assert_eq!(tokens[2].token_type, TokenType::Flag);
         assert_eq!(tokens[3].text, "feature/new-branch");
-        assert!(tokens[3].editable);
+        assert_eq!(tokens[3].token_type, TokenType::Path);
         assert_eq!(tokens[4].text, "origin/main");
-        assert!(tokens[4].editable);
+        assert_eq!(tokens[4].token_type, TokenType::Path);
     }
 
     #[test]
     fn test_tokenize_empty() {
         let tokens = tokenize_command("");
         assert!(tokens.is_empty());
+    }
+
+    #[test]
+    fn test_tokenize_url() {
+        let tokens = tokenize_command("git remote add origin git@github.com:user/repo.git");
+        assert_eq!(tokens.len(), 5);
+        assert_eq!(tokens[4].text, "git@github.com:user/repo.git");
+        assert_eq!(tokens[4].token_type, TokenType::Url);
+    }
+
+    // =========================================================================
+    // Token Type Tests
+    // =========================================================================
+
+    #[test]
+    fn test_classify_command() {
+        assert_eq!(classify_token("ls", 0, None), TokenType::Command);
+        assert_eq!(classify_token("git", 0, None), TokenType::Command);
+    }
+
+    #[test]
+    fn test_classify_subcommand() {
+        assert_eq!(classify_token("checkout", 1, Some("git")), TokenType::Subcommand);
+        assert_eq!(classify_token("build", 1, Some("cargo")), TokenType::Subcommand);
+        // Not a known compound command
+        assert_eq!(classify_token("something", 1, Some("echo")), TokenType::Argument);
+    }
+
+    #[test]
+    fn test_classify_flag() {
+        assert_eq!(classify_token("-la", 1, Some("ls")), TokenType::Flag);
+        assert_eq!(classify_token("--help", 2, Some("checkout")), TokenType::Flag);
+    }
+
+    #[test]
+    fn test_classify_path() {
+        assert_eq!(classify_token("/tmp", 1, Some("ls")), TokenType::Path);
+        assert_eq!(classify_token("./file.txt", 2, Some("-la")), TokenType::Path);
+        assert_eq!(classify_token("~/Documents", 1, Some("cd")), TokenType::Path);
+    }
+
+    #[test]
+    fn test_classify_url() {
+        assert_eq!(classify_token("https://example.com", 1, Some("curl")), TokenType::Url);
+        assert_eq!(classify_token("git@github.com:user/repo.git", 4, Some("origin")), TokenType::Url);
+    }
+
+    // =========================================================================
+    // Quote Handling Tests
+    // =========================================================================
+
+    #[test]
+    fn test_parse_quotes_none() {
+        let (inner, style) = parse_quotes("hello");
+        assert_eq!(inner, "hello");
+        assert_eq!(style, QuoteStyle::None);
+    }
+
+    #[test]
+    fn test_parse_quotes_single() {
+        let (inner, style) = parse_quotes("'hello world'");
+        assert_eq!(inner, "hello world");
+        assert_eq!(style, QuoteStyle::Single);
+    }
+
+    #[test]
+    fn test_parse_quotes_double() {
+        let (inner, style) = parse_quotes("\"hello world\"");
+        assert_eq!(inner, "hello world");
+        assert_eq!(style, QuoteStyle::Double);
+    }
+
+    #[test]
+    fn test_apply_quotes() {
+        assert_eq!(apply_quotes("hello", QuoteStyle::None), "hello");
+        assert_eq!(apply_quotes("hello", QuoteStyle::Single), "'hello'");
+        assert_eq!(apply_quotes("hello", QuoteStyle::Double), "\"hello\"");
+    }
+
+    // =========================================================================
+    // Dangerous Command Tests
+    // =========================================================================
+
+    #[test]
+    fn test_dangerous_rm_rf() {
+        assert!(is_dangerous_command("rm -rf /").is_some());
+        assert!(is_dangerous_command("sudo rm -rf /tmp/build").is_some());
+        assert!(is_dangerous_command("rm -fr ~/").is_some());
+    }
+
+    #[test]
+    fn test_dangerous_dd() {
+        assert!(is_dangerous_command("dd if=/dev/zero of=/dev/sda").is_some());
+    }
+
+    #[test]
+    fn test_safe_commands() {
+        assert!(is_dangerous_command("ls -la").is_none());
+        assert!(is_dangerous_command("git push origin main").is_none());
+        assert!(is_dangerous_command("rm file.txt").is_none()); // No -rf
     }
 
     // =========================================================================
@@ -1085,6 +1621,7 @@ mod tests {
         assert_eq!(state.original, "echo hello");
         assert_eq!(state.token_count(), 2);
         assert_eq!(state.selected, 0);
+        assert!(state.undo_stack.is_empty());
     }
 
     #[test]
@@ -1110,5 +1647,112 @@ mod tests {
 
         let result = state.build_command();
         assert_eq!(result, "echo world");
+    }
+
+    #[test]
+    fn test_edit_mode_delete_token() {
+        let mut state = EditModeState::new("git push origin main");
+        assert_eq!(state.token_count(), 4);
+
+        state.select(2); // Select "origin"
+        state.delete_token();
+
+        assert_eq!(state.token_count(), 3);
+        assert_eq!(state.build_command(), "git push main");
+    }
+
+    #[test]
+    fn test_edit_mode_insert_token() {
+        let mut state = EditModeState::new("git push");
+        assert_eq!(state.token_count(), 2);
+
+        state.select(1); // Select "push"
+        state.insert_token_after();
+        state.edit_buffer = "origin".to_string();
+
+        assert_eq!(state.token_count(), 3);
+        assert_eq!(state.build_command(), "git push origin");
+    }
+
+    #[test]
+    fn test_edit_mode_undo() {
+        let mut state = EditModeState::new("git push origin main");
+        assert_eq!(state.token_count(), 4);
+
+        state.select(2);
+        state.delete_token();
+        assert_eq!(state.token_count(), 3);
+
+        state.undo();
+        assert_eq!(state.token_count(), 4);
+        assert_eq!(state.build_command(), "git push origin main");
+    }
+
+    #[test]
+    fn test_edit_mode_quote_cycling() {
+        let mut state = EditModeState::new("echo hello");
+        state.select(1);
+
+        // Start with no quotes
+        assert_eq!(state.edit_buffer, "hello");
+
+        state.cycle_quote();
+        assert_eq!(state.edit_buffer, "'hello'");
+
+        state.cycle_quote();
+        assert_eq!(state.edit_buffer, "\"hello\"");
+
+        state.cycle_quote();
+        assert_eq!(state.edit_buffer, "hello");
+    }
+
+    #[test]
+    fn test_edit_mode_danger_confirm() {
+        let mut state = EditModeState::new("rm -rf /");
+        assert!(!state.is_confirming());
+
+        state.pending_confirm = Some("rm -rf /".to_string());
+        state.danger_warning = Some("Test warning");
+
+        assert!(state.is_confirming());
+
+        state.clear_confirm();
+        assert!(!state.is_confirming());
+    }
+
+    #[test]
+    fn test_edit_mode_has_changes() {
+        let mut state = EditModeState::new("echo hello");
+        assert!(!state.has_changes()); // No changes yet
+
+        state.select(1);
+        state.edit_buffer = "world".to_string();
+        assert!(state.has_changes()); // Now has changes
+    }
+
+    #[test]
+    fn test_edit_mode_revert() {
+        let mut state = EditModeState::new("echo hello");
+        state.select(1);
+        state.edit_buffer = "world".to_string();
+        assert!(state.has_changes());
+
+        state.revert();
+        assert!(!state.has_changes());
+        assert_eq!(state.selected, 0);
+        assert_eq!(state.edit_buffer, "echo");
+    }
+
+    // =========================================================================
+    // Helper Function Tests
+    // =========================================================================
+
+    #[test]
+    fn test_superscript_digit() {
+        assert_eq!(superscript_digit(1), "¹");
+        assert_eq!(superscript_digit(10), "¹⁰");
+        assert_eq!(superscript_digit(20), "²⁰");
+        assert_eq!(superscript_digit(21), "·"); // Fallback
+        assert_eq!(superscript_digit(0), "·"); // Fallback
     }
 }
