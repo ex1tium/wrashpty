@@ -404,10 +404,10 @@ impl Chrome {
         let stdout = io::stdout();
         let mut out = stdout.lock();
 
-        // Save cursor, move to row 1, clear line, draw content, restore cursor
+        // Save cursor, move to row 1, clear entire line, draw content, restore cursor
         write!(out, "\x1b[s")?; // Save cursor position
         write!(out, "\x1b[1;1H")?; // Move to row 1, column 1
-        write!(out, "\x1b[K")?; // Clear line
+        write!(out, "\x1b[2K")?; // Clear ENTIRE line (not just to end)
         // Use dark background for the bar
         write!(out, "\x1b[48;5;236m{}\x1b[0m", content)?;
         write!(out, "\x1b[u")?; // Restore cursor position
@@ -781,24 +781,24 @@ impl Chrome {
 
         self.panel_state = PanelState::Collapsed;
 
-        let stdout = io::stdout();
-        let mut out = stdout.lock();
+        let mut stdout = io::stdout();
 
-        // Clear the entire panel area (rows 1 through old_height)
-        // Row 1 is included because the panel renders its border/title there
+        // Reset scroll region to full screen first (required to clear rows outside
+        // the panel's scroll region which was height+1 to total_rows)
+        write!(stdout, "\x1b[0m")?;   // Reset attributes
+        write!(stdout, "\x1b[r")?;    // Reset scroll region to full screen
+        stdout.flush()?;
+
+        // Clear each panel row
         for row in 1..=old_height {
-            write!(out, "\x1b[{};1H", row)?;
-            write!(out, "\x1b[K")?;
+            write!(stdout, "\x1b[{};1H\x1b[2K", row)?;
         }
+        stdout.flush()?;
 
-        out.flush()?;
-
-        // Restore scroll region (row 2 to N for normal chrome)
+        // Restore scroll region for chrome mode
         self.setup_scroll_region(total_rows)?;
 
-        // Position cursor at start of scroll region (row 2) to ensure
-        // any subsequent output (e.g., command execution) stays within
-        // the scroll region and doesn't overwrite the context bar.
+        // Position cursor at row 2 for subsequent output
         self.position_cursor_in_scroll_region()?;
 
         debug!(old_height, "Panel collapsed");
@@ -925,7 +925,7 @@ impl Chrome {
         // Save cursor, draw notification, restore cursor
         write!(out, "\x1b[s")?;
         write!(out, "\x1b[1;1H")?;
-        write!(out, "\x1b[K")?;
+        write!(out, "\x1b[2K")?; // Clear ENTIRE line
         write!(out, "{}{}{}\x1b[0m", bg, fg, display_msg)?;
         write!(out, "\x1b[u")?;
         out.flush()?;
