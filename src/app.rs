@@ -117,6 +117,36 @@ struct DrainGuard {
     handle: Option<JoinHandle<()>>,
 }
 
+/// RAII guard for cursor visibility.
+///
+/// Ensures the cursor is shown again on all exit paths, including
+/// panics and early returns during panel mode.
+struct CursorGuard;
+
+impl CursorGuard {
+    /// Creates a new cursor guard and hides the cursor.
+    ///
+    /// The cursor will be shown again when the guard is dropped.
+    fn new() -> std::io::Result<Self> {
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        use std::io::Write;
+        write!(out, "{}", crossterm::cursor::Hide)?;
+        out.flush()?;
+        Ok(Self)
+    }
+}
+
+impl Drop for CursorGuard {
+    fn drop(&mut self) {
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        use std::io::Write;
+        let _ = write!(out, "{}", crossterm::cursor::Show);
+        let _ = out.flush();
+    }
+}
+
 impl DrainGuard {
     /// Creates a new drain guard with the given stop flag and thread handle.
     fn new(stop_flag: Arc<AtomicBool>, handle: JoinHandle<()>) -> Self {
@@ -794,12 +824,27 @@ impl App {
         let (cols, rows) =
             TerminalGuard::get_size().context("Failed to get terminal size for panel")?;
 
-        // Calculate panel height (min of preferred and half terminal height)
-        let preferred = panel.preferred_height();
-        let max_panel_height = rows / 2;
-        let panel_height = preferred.min(max_panel_height).max(5);
+        // Minimum terminal height needed for panel mode (panel + at least 1 row for PTY)
+        const MIN_PANEL_ROWS: u16 = 6; // 5 for panel + 1 for PTY
+        if rows < MIN_PANEL_ROWS {
+            debug!(rows, min = MIN_PANEL_ROWS, "Terminal too small for panel");
+            return Ok(PanelResult::Dismiss);
+        }
 
-        debug!(cols, rows, panel_height, preferred, "Entering panel mode");
+        // Calculate panel height (min of preferred and half terminal height)
+        // Clamp to ensure at least 1 row remains for the PTY
+        let preferred = panel.preferred_height();
+        let max_panel_height = rows.saturating_sub(1); // Leave at least 1 row for PTY
+        let panel_height = preferred.min(max_panel_height / 2).max(5).min(max_panel_height);
+
+        // Calculate effective rows and verify it's valid
+        let effective_rows = rows.saturating_sub(panel_height);
+        if effective_rows == 0 {
+            debug!(rows, panel_height, "Cannot open panel: no space for PTY");
+            return Ok(PanelResult::Dismiss);
+        }
+
+        debug!(cols, rows, panel_height, effective_rows, preferred, "Entering panel mode");
 
         // Expand panel area
         self.chrome
@@ -807,7 +852,6 @@ impl App {
             .context("Failed to expand panel")?;
 
         // Resize PTY to account for panel
-        let effective_rows = rows.saturating_sub(panel_height);
         self.pty
             .resize(cols, effective_rows)
             .context("Failed to resize PTY for panel")?;
@@ -847,14 +891,8 @@ impl App {
         // Ensure raw mode is enabled for crossterm event handling
         enable_raw_mode().context("Failed to enable raw mode for panel")?;
 
-        // Hide cursor during panel mode to avoid blinking cursor in corner
-        {
-            let stdout = std::io::stdout();
-            let mut out = stdout.lock();
-            use std::io::Write;
-            write!(out, "{}", crossterm::cursor::Hide)?;
-            out.flush()?;
-        }
+        // RAII guard ensures cursor is shown on all exit paths (including panics/errors)
+        let _cursor_guard = CursorGuard::new().context("Failed to hide cursor for panel")?;
 
         // Clear the panel area first
         {
@@ -869,17 +907,9 @@ impl App {
 
         let result = self.panel_input_loop_inner(panel, cols, panel_height);
 
-        // Show cursor again after panel closes
-        {
-            let stdout = std::io::stdout();
-            let mut out = stdout.lock();
-            use std::io::Write;
-            write!(out, "{}", crossterm::cursor::Show)?;
-            out.flush()?;
-        }
-
         // Note: We don't disable raw mode here as wrashpty needs it for PTY handling
         // The TerminalGuard manages the overall raw mode state
+        // Cursor will be shown when _cursor_guard is dropped
 
         result
     }
