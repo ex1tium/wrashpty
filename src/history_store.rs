@@ -136,6 +136,14 @@ impl HistoryStore {
 
         std::fs::create_dir_all(&data_dir)?;
 
+        // Set restrictive permissions on Unix (owner read/write/execute only)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir_perms = std::fs::Permissions::from_mode(0o700);
+            std::fs::set_permissions(&data_dir, dir_perms)?;
+        }
+
         let db_path = data_dir.join("history.db");
 
         // Check if this is a first run (database doesn't exist)
@@ -148,6 +156,14 @@ impl HistoryStore {
             None,  // No session filtering
             None,  // No timestamp retention filtering
         )?;
+
+        // Set restrictive permissions on the DB file (owner read/write only)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let file_perms = std::fs::Permissions::from_mode(0o600);
+            std::fs::set_permissions(&db_path, file_perms)?;
+        }
 
         let mut store = Self {
             db_path,
