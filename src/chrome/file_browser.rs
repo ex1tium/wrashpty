@@ -511,10 +511,34 @@ impl FileBrowserPanel {
             }
         }
 
+        // Calculate prefix display string and its length for alignment
+        let prefix_display = if state.prefix_tokens.is_empty() && state.selected_section == FileEditSection::Prefix {
+            if state.edit_buffer.is_empty() {
+                "[command]".to_string()
+            } else {
+                format!("⟦{}⟧", state.edit_buffer)
+            }
+        } else {
+            let tokens: Vec<&str> = state.prefix_tokens.iter().map(|s| s.as_str()).collect();
+            if tokens.is_empty() {
+                "[command]".to_string()
+            } else {
+                tokens.join(" ")
+            }
+        };
+
+        // Calculate suggestion alignment offset based on selected section
+        let suggestion_offset = match state.selected_section {
+            FileEditSection::Prefix => 3, // Initial "   " padding
+            FileEditSection::Filename => 3 + prefix_display.len() + 1, // After prefix + space
+            FileEditSection::Suffix => 3 + prefix_display.len() + 1 + state.filename.len() + 1, // After filename + space
+        };
+        let suggestion_padding = " ".repeat(suggestion_offset);
+
         // Previous suggestion (dim)
         if let Some(prev_sugg) = state.prev_suggestion() {
             let prev_line = Line::from(vec![
-                Span::styled("        ", Style::default()),
+                Span::styled(&suggestion_padding, Style::default()),
                 Span::styled(prev_sugg, Style::default().fg(Color::DarkGray)),
             ]);
             Paragraph::new(prev_line).render(chunks[2], buffer);
@@ -529,20 +553,6 @@ impl FileBrowserPanel {
             Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::Green)
-        };
-        let prefix_display = if state.prefix_tokens.is_empty() && state.selected_section == FileEditSection::Prefix {
-            if state.edit_buffer.is_empty() {
-                "[command]".to_string()
-            } else {
-                format!("⟦{}⟧", state.edit_buffer)
-            }
-        } else {
-            let tokens: Vec<&str> = state.prefix_tokens.iter().map(|s| s.as_str()).collect();
-            if tokens.is_empty() {
-                "[command]".to_string()
-            } else {
-                tokens.join(" ")
-            }
         };
         spans.push(Span::styled(format!("{} ", prefix_display), prefix_style));
 
@@ -574,7 +584,7 @@ impl FileBrowserPanel {
         // Next suggestion (dim)
         if let Some(next_sugg) = state.next_suggestion() {
             let next_line = Line::from(vec![
-                Span::styled("        ", Style::default()),
+                Span::styled(&suggestion_padding, Style::default()),
                 Span::styled(next_sugg, Style::default().fg(Color::DarkGray)),
             ]);
             Paragraph::new(next_line).render(chunks[4], buffer);
@@ -739,8 +749,14 @@ impl Panel for FileBrowserPanel {
             return;
         }
 
-        // Create layout: path header at top, list below
-        let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(area);
+        // Create layout: path header at top, list in middle, border + keybinds at bottom
+        let chunks = Layout::vertical([
+            Constraint::Length(1), // Path header
+            Constraint::Min(1),    // File list
+            Constraint::Length(1), // Border line
+            Constraint::Length(1), // Keybind hints bar
+        ])
+        .split(area);
 
         // Render path header
         let path_str = self.current_dir.to_string_lossy();
@@ -839,6 +855,40 @@ impl Panel for FileBrowserPanel {
 
         let list = List::new(items);
         list.render(chunks[1], buffer);
+
+        // Render border line above keybind bar
+        let border_style = Style::default().fg(Color::DarkGray);
+        for x in chunks[2].x..chunks[2].x + chunks[2].width {
+            if let Some(cell) = buffer.cell_mut((x, chunks[2].y)) {
+                cell.set_char('─');
+                cell.set_style(border_style);
+            }
+        }
+
+        // Render keybind bar
+        let key_style = Style::default().fg(Color::Yellow);
+        let label_style = Style::default().fg(Color::DarkGray);
+        let active_label = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
+        let hints = Line::from(vec![
+            Span::styled("^E", key_style),
+            Span::styled(" Edit", label_style),
+            Span::raw("  "),
+            Span::styled("^H", key_style),
+            Span::styled(" Hidden", if self.show_hidden { active_label } else { label_style }),
+            Span::raw("  "),
+            Span::styled(".", key_style),
+            Span::styled(" Toggle", label_style),
+            Span::raw("  "),
+            Span::styled("⌫", key_style),
+            Span::styled(" Parent", label_style),
+            Span::raw("  "),
+            Span::styled("Enter", key_style),
+            Span::styled(" Open/Insert", label_style),
+            Span::raw("  "),
+            Span::styled("Esc", key_style),
+            Span::styled(" Close", label_style),
+        ]);
+        Paragraph::new(hints).render(chunks[3], buffer);
     }
 
     fn handle_input(&mut self, key: KeyEvent) -> PanelResult {
