@@ -19,6 +19,13 @@ use super::history_browser::HistoryBrowserPanel;
 use super::panel::{Panel, PanelResult};
 use crate::history_store::HistoryStore;
 
+// Tab indices for type-based access
+const TAB_COMMAND_PALETTE: usize = 0;
+const TAB_FILE_BROWSER: usize = 1;
+const TAB_HISTORY_BROWSER: usize = 2;
+#[allow(dead_code)]
+const TAB_HELP: usize = 3;
+
 /// A tabbed container for multiple panels.
 pub struct TabbedPanel {
     /// Panel instances.
@@ -45,7 +52,7 @@ impl TabbedPanel {
 
     /// Sets the history store for the history browser panel.
     pub fn set_history_store(&mut self, store: Arc<Mutex<HistoryStore>>) {
-        if let Some(panel) = self.tabs.get_mut(2) {
+        if let Some(panel) = self.tabs.get_mut(TAB_HISTORY_BROWSER) {
             if let Some(hist_panel) = panel.as_any_mut().downcast_mut::<HistoryBrowserPanel>() {
                 hist_panel.set_history_store(store);
             }
@@ -55,21 +62,21 @@ impl TabbedPanel {
     /// Loads context for all panels based on the current working directory.
     pub fn load_context(&mut self, cwd: &Path) {
         // Load commands for command palette
-        if let Some(panel) = self.tabs.get_mut(0) {
+        if let Some(panel) = self.tabs.get_mut(TAB_COMMAND_PALETTE) {
             if let Some(cmd_panel) = panel.as_any_mut().downcast_mut::<CommandPalettePanel>() {
                 cmd_panel.load_commands(cwd);
             }
         }
 
         // Set cwd for file browser
-        if let Some(panel) = self.tabs.get_mut(1) {
+        if let Some(panel) = self.tabs.get_mut(TAB_FILE_BROWSER) {
             if let Some(file_panel) = panel.as_any_mut().downcast_mut::<FileBrowserPanel>() {
                 let _ = file_panel.navigate_to(cwd);
             }
         }
 
         // Load history for history browser with cwd context
-        if let Some(panel) = self.tabs.get_mut(2) {
+        if let Some(panel) = self.tabs.get_mut(TAB_HISTORY_BROWSER) {
             if let Some(hist_panel) = panel.as_any_mut().downcast_mut::<HistoryBrowserPanel>() {
                 hist_panel.set_cwd(cwd.to_path_buf());
                 hist_panel.load_history();

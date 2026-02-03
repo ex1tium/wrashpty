@@ -169,9 +169,13 @@ impl HistoryStore {
     ///
     /// Note: This transfers ownership of the internal history instance to reedline.
     /// After calling this, the history store will create a new connection for queries.
-    pub fn create_reedline_history(&mut self) -> Box<dyn History> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if creating a new SQLite history connection fails.
+    pub fn create_reedline_history(&mut self) -> Result<Box<dyn History>> {
         if let Some(history) = self.reedline_history.take() {
-            Box::new(history)
+            Ok(Box::new(history))
         } else {
             // Create a new instance if already taken
             let history = SqliteBackedHistory::with_file(
@@ -179,8 +183,8 @@ impl HistoryStore {
                 None,
                 None,
             )
-            .expect("Failed to create SQLite history");
-            Box::new(history)
+            .context("Failed to create SQLite history")?;
+            Ok(Box::new(history))
         }
     }
 
@@ -374,7 +378,20 @@ impl HistoryStore {
             })
         })?;
 
-        let records: Vec<HistoryRecord> = rows.filter_map(|r| r.ok()).collect();
+        let mut records = Vec::new();
+        let mut parse_errors = 0;
+        for row in rows {
+            match row {
+                Ok(record) => records.push(record),
+                Err(e) => {
+                    parse_errors += 1;
+                    debug!(error = %e, "Failed to parse history row");
+                }
+            }
+        }
+        if parse_errors > 0 {
+            warn!(count = parse_errors, "Some history rows failed to parse");
+        }
         debug!(count = records.len(), "Query returned records");
 
         Ok(records)
