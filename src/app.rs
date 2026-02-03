@@ -321,6 +321,9 @@ pub struct App {
     /// Command pending injection after transitioning to Injecting mode.
     pending_command: Option<String>,
 
+    /// Whether we're waiting for wipe confirmation (after `:wipe` was entered).
+    pending_wipe_confirmation: bool,
+
     /// Timestamp when injection started (for timeout).
     injection_start: Option<Instant>,
 
@@ -394,8 +397,8 @@ impl App {
         // Create reedline history from the store
         let reedline_history = history_store
             .lock()
-            .expect("History store lock poisoned")
-            .create_reedline_history();
+            .map_err(|_| anyhow::anyhow!("History store lock poisoned"))?
+            .create_reedline_history()?;
 
         // Create the reedline editor with the history
         let editor = Editor::new(reedline_history).context("Failed to create editor")?;
@@ -419,6 +422,7 @@ impl App {
             editor,
             history_store,
             pending_command: None,
+            pending_wipe_confirmation: false,
             injection_start: None,
             current_cwd,
             git_branch: None,
@@ -732,9 +736,9 @@ impl App {
                     return Ok(());
                 }
 
-                // History wipe command
+                // History wipe command - sets pending confirmation flag
                 if trimmed == ":wipe" {
-                    // Show confirmation prompt
+                    self.pending_wipe_confirmation = true;
                     let _ = writeln!(
                         std::io::stderr(),
                         "\x1b[33mThis will delete all command history. Type 'wipe' to confirm:\x1b[0m"
@@ -742,8 +746,9 @@ impl App {
                     return Ok(());
                 }
 
-                // Handle wipe confirmation (user typed "wipe" after :wipe prompt)
-                if trimmed == "wipe" {
+                // Handle wipe confirmation (only if :wipe was entered first)
+                if trimmed == "wipe" && self.pending_wipe_confirmation {
+                    self.pending_wipe_confirmation = false;
                     if let Ok(store) = self.history_store.lock() {
                         match store.wipe("wipe") {
                             Ok(()) => {
@@ -762,6 +767,11 @@ impl App {
                         }
                     }
                     return Ok(());
+                }
+
+                // Clear pending wipe confirmation if user enters anything else
+                if self.pending_wipe_confirmation && trimmed != "wipe" {
+                    self.pending_wipe_confirmation = false;
                 }
 
                 // Skip empty commands
@@ -1086,9 +1096,9 @@ impl App {
                 self.inject_pending_command()?;
             }
             PanelResult::InsertText(text) => {
-                // Cannot inject text into reedline buffer from outside,
+                // Cannot inject text directly into reedline buffer from outside,
                 // so we print the command for the user to copy/paste manually
-                debug!(text = %text, "Panel requested text insertion (not supported)");
+                debug!(text = %text, "Panel requested text insertion, printing for copy/paste");
                 self.restore_after_panel()?;
                 // Print the command so user can copy it
                 let _ = writeln!(

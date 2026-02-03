@@ -1097,8 +1097,13 @@ impl HistoryBrowserPanel {
             base_style.fg(Color::White)
         };
         let cmd_width = cols.command.saturating_sub(1) as usize;
-        let cmd_display = if record.command.len() > cmd_width {
-            format!("{}...", &record.command[..cmd_width.saturating_sub(3)])
+        // Use char-based truncation to avoid panicking on UTF-8 boundaries
+        let cmd_display = if record.command.chars().count() > cmd_width {
+            let truncated: String = record.command
+                .chars()
+                .take(cmd_width.saturating_sub(3))
+                .collect();
+            format!("{}...", truncated)
         } else {
             record.command.clone()
         };
@@ -1363,6 +1368,14 @@ impl Panel for HistoryBrowserPanel {
             KeyCode::Enter => {
                 if let Some(cmd) = self.selected_command() {
                     PanelResult::Execute(cmd.to_string())
+                } else {
+                    PanelResult::Dismiss
+                }
+            }
+            KeyCode::Tab => {
+                // Insert command into buffer without executing
+                if let Some(cmd) = self.selected_command() {
+                    PanelResult::InsertText(cmd.to_string())
                 } else {
                     PanelResult::Dismiss
                 }

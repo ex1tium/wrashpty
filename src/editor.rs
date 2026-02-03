@@ -26,6 +26,9 @@ use crate::suggest::HistoryHinter;
 /// Maximum size of the pending output buffer (64KB).
 const MAX_PENDING_OUTPUT: usize = 64 * 1024;
 
+/// Prefix for internal host commands to avoid collision with user input.
+const HOST_COMMAND_PREFIX: &str = "__wrashpty_";
+
 /// Buffer for PTY output received during Edit mode.
 ///
 /// Uses a VecDeque for efficient push/pop operations. When the buffer
@@ -171,7 +174,7 @@ impl Editor {
         keybindings.add_binding(
             KeyModifiers::CONTROL,
             KeyCode::Char(' '),
-            ReedlineEvent::ExecuteHostCommand("open_panel".to_string()),
+            ReedlineEvent::ExecuteHostCommand(format!("{}open_panel", HOST_COMMAND_PREFIX)),
         );
 
         // Create reedline with history, completions, menu, and autosuggestions
@@ -213,9 +216,11 @@ impl Editor {
             Ok(Signal::Success(line)) => {
                 // Check if this is a host command (from ExecuteHostCommand event)
                 // ExecuteHostCommand returns through Success in reedline 0.45
-                if line == "open_panel" {
-                    debug!("Host command: open_panel");
-                    Ok(EditorResult::HostCommand(line))
+                // Use prefix check to avoid collision with user input
+                if line.starts_with(HOST_COMMAND_PREFIX) {
+                    let cmd = line.strip_prefix(HOST_COMMAND_PREFIX).unwrap_or(&line);
+                    debug!(command = %cmd, "Host command received");
+                    Ok(EditorResult::HostCommand(cmd.to_string()))
                 } else {
                     debug!(command = %line, "User submitted command");
                     Ok(EditorResult::Command(line))
