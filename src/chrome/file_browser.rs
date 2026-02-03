@@ -250,6 +250,49 @@ impl FileEditModeState {
         self.edit_buffer.clear();
         self.suggestion_index = None;
     }
+
+    /// Updates suggestions based on current context.
+    ///
+    /// In suffix section, if the current token or preceding tokens contain a pipe,
+    /// suggest pipeable commands instead of file-type commands.
+    fn update_suggestions(&mut self) {
+        if self.selected_section == FileEditSection::Suffix {
+            // Check if current edit buffer starts after a pipe, or if any suffix token is just "|"
+            let has_pipe_before = self.suffix_tokens.iter()
+                .take(self.selected_index)
+                .any(|t| t == "|" || t.ends_with('|'));
+
+            // Also check if we're immediately after typing a pipe
+            let editing_after_pipe = if self.selected_index > 0 {
+                self.suffix_tokens.get(self.selected_index.saturating_sub(1))
+                    .map(|t| t == "|")
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+
+            if has_pipe_before || editing_after_pipe {
+                self.suggestions = COMMAND_KNOWLEDGE
+                    .pipeable_commands()
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+                return;
+            }
+        }
+
+        // Default: use file-type suggestions for prefix section
+        if self.selected_section == FileEditSection::Prefix {
+            self.suggestions = COMMAND_KNOWLEDGE
+                .commands_for_filetype(&self.filename)
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+        } else {
+            // For suffix without pipe, clear suggestions or provide generic ones
+            self.suggestions.clear();
+        }
+    }
 }
 
 /// File browser panel.
@@ -696,10 +739,12 @@ impl FileBrowserPanel {
             }
             KeyCode::Tab => {
                 state.next_section();
+                state.update_suggestions();
                 Some(PanelResult::Continue)
             }
             KeyCode::BackTab => {
                 state.prev_section();
+                state.update_suggestions();
                 Some(PanelResult::Continue)
             }
             KeyCode::Up => {
@@ -708,6 +753,19 @@ impl FileBrowserPanel {
             }
             KeyCode::Down => {
                 state.cycle_suggestion(1);
+                Some(PanelResult::Continue)
+            }
+            KeyCode::Char('|') if state.selected_section == FileEditSection::Suffix => {
+                // Pipe in suffix: commit current token, add pipe, start new token with pipeable suggestions
+                if !state.edit_buffer.is_empty() {
+                    state.commit_edit();
+                }
+                // Add the pipe as its own token
+                state.suffix_tokens.push("|".to_string());
+                state.selected_index = state.suffix_tokens.len();
+                state.edit_buffer.clear();
+                state.suggestion_index = None;
+                state.update_suggestions();
                 Some(PanelResult::Continue)
             }
             KeyCode::Char(c) => {

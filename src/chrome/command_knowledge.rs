@@ -167,19 +167,19 @@ impl Default for CommandKnowledge {
         );
 
         // File type commands
-        file_type_commands.insert("rs", vec!["cargo run", "cargo test", "rustfmt", "vim", "cat"]);
-        file_type_commands.insert("py", vec!["python", "python3", "pytest", "vim", "cat"]);
-        file_type_commands.insert("js", vec!["node", "npm run", "vim", "cat"]);
-        file_type_commands.insert("ts", vec!["npx ts-node", "npm run", "vim", "cat"]);
-        file_type_commands.insert("sh", vec!["bash", "./", "chmod +x", "vim", "cat"]);
-        file_type_commands.insert("bash", vec!["bash", "./", "chmod +x", "vim", "cat"]);
-        file_type_commands.insert("zsh", vec!["zsh", "./", "chmod +x", "vim", "cat"]);
-        file_type_commands.insert("json", vec!["cat", "jq .", "vim", "less"]);
-        file_type_commands.insert("yaml", vec!["cat", "vim", "less"]);
-        file_type_commands.insert("yml", vec!["cat", "vim", "less"]);
-        file_type_commands.insert("toml", vec!["cat", "vim", "less"]);
-        file_type_commands.insert("md", vec!["cat", "vim", "less", "glow"]);
-        file_type_commands.insert("txt", vec!["cat", "vim", "less", "head", "tail"]);
+        file_type_commands.insert("rs", vec!["cargo run", "cargo test", "rustfmt", "vim", "nano", "cat"]);
+        file_type_commands.insert("py", vec!["python", "python3", "pytest", "vim", "nano", "cat"]);
+        file_type_commands.insert("js", vec!["node", "npm run", "vim", "nano", "cat"]);
+        file_type_commands.insert("ts", vec!["npx ts-node", "npm run", "vim", "nano", "cat"]);
+        file_type_commands.insert("sh", vec!["bash", "./", "chmod +x", "vim", "nano", "cat"]);
+        file_type_commands.insert("bash", vec!["bash", "./", "chmod +x", "vim", "nano", "cat"]);
+        file_type_commands.insert("zsh", vec!["zsh", "./", "chmod +x", "vim", "nano", "cat"]);
+        file_type_commands.insert("json", vec!["cat", "jq .", "vim", "nano", "less"]);
+        file_type_commands.insert("yaml", vec!["cat", "vim", "nano", "less"]);
+        file_type_commands.insert("yml", vec!["cat", "vim", "nano", "less"]);
+        file_type_commands.insert("toml", vec!["cat", "vim", "nano", "less"]);
+        file_type_commands.insert("md", vec!["cat", "vim", "nano", "less", "glow"]);
+        file_type_commands.insert("txt", vec!["cat", "vim", "nano", "less", "head", "tail"]);
         file_type_commands.insert("log", vec!["tail -f", "less", "cat", "grep"]);
         file_type_commands.insert("gz", vec!["tar -xzf", "tar -tzf", "zcat", "gunzip"]);
         file_type_commands.insert("tar", vec!["tar -xf", "tar -tf"]);
@@ -190,9 +190,9 @@ impl Default for CommandKnowledge {
         file_type_commands.insert("gif", vec!["xdg-open", "feh", "imv", "file"]);
         file_type_commands.insert("svg", vec!["xdg-open", "inkscape", "file"]);
         file_type_commands.insert("pdf", vec!["xdg-open", "zathura", "evince", "file"]);
-        file_type_commands.insert("html", vec!["xdg-open", "firefox", "chromium", "vim"]);
-        file_type_commands.insert("css", vec!["vim", "cat", "less"]);
-        file_type_commands.insert("sql", vec!["cat", "vim", "sqlite3"]);
+        file_type_commands.insert("html", vec!["xdg-open", "firefox", "chromium", "vim", "nano"]);
+        file_type_commands.insert("css", vec!["vim", "nano", "cat", "less"]);
+        file_type_commands.insert("sql", vec!["cat", "vim", "nano", "sqlite3"]);
         file_type_commands.insert("db", vec!["sqlite3"]);
 
         // Filename-specific commands (files without extensions)
@@ -312,7 +312,31 @@ impl CommandKnowledge {
         self.file_type_commands
             .get(extension)
             .cloned()
-            .unwrap_or_else(|| vec!["cat", "vim", "less"])
+            .unwrap_or_else(|| vec!["cat", "vim", "nano", "less"])
+    }
+
+    /// Returns commands that can receive piped input.
+    ///
+    /// These commands are suggested after a `|` in the suffix position.
+    pub fn pipeable_commands(&self) -> Vec<&'static str> {
+        vec![
+            "grep", "grep -i", "grep -v",
+            "head", "head -n 10",
+            "tail", "tail -n 10",
+            "sort", "sort -r", "sort -n",
+            "uniq", "uniq -c",
+            "wc", "wc -l",
+            "less", "more",
+            "cat",
+            "tee",
+            "xargs",
+            "awk", "sed",
+            "cut", "cut -d' ' -f1",
+            "tr",
+            "jq", "jq .",
+            "bat",
+            "fzf",
+        ]
     }
 }
 
