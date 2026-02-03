@@ -20,9 +20,9 @@ use super::panel::{Panel, PanelResult};
 use crate::history_store::HistoryStore;
 
 // Tab indices for type-based access
-const TAB_COMMAND_PALETTE: usize = 0;
+const TAB_HISTORY_BROWSER: usize = 0;
 const TAB_FILE_BROWSER: usize = 1;
-const TAB_HISTORY_BROWSER: usize = 2;
+const TAB_COMMAND_PALETTE: usize = 2;
 #[allow(dead_code)]
 const TAB_HELP: usize = 3;
 
@@ -32,29 +32,56 @@ pub struct TabbedPanel {
     tabs: Vec<Box<dyn Panel>>,
     /// Currently selected tab index.
     active_tab: usize,
+    /// Reference to history store for settings persistence.
+    history_store: Option<Arc<Mutex<HistoryStore>>>,
 }
 
 impl TabbedPanel {
     /// Creates a new tabbed panel with all panel types.
     pub fn new() -> Self {
         let tabs: Vec<Box<dyn Panel>> = vec![
-            Box::new(CommandPalettePanel::new()),
-            Box::new(FileBrowserPanel::new()),
             Box::new(HistoryBrowserPanel::new()),
+            Box::new(FileBrowserPanel::new()),
+            Box::new(CommandPalettePanel::new()),
             Box::new(HelpPanel::new()),
         ];
 
         Self {
             tabs,
             active_tab: 0,
+            history_store: None,
         }
     }
 
     /// Sets the history store for the history browser panel.
     pub fn set_history_store(&mut self, store: Arc<Mutex<HistoryStore>>) {
+        // Store reference for settings persistence
+        self.history_store = Some(Arc::clone(&store));
+
+        // Load last active tab from settings
+        if let Ok(guard) = store.lock() {
+            if let Ok(Some(tab_str)) = guard.get_setting("last_active_tab") {
+                if let Ok(tab_idx) = tab_str.parse::<usize>() {
+                    if tab_idx < self.tabs.len() {
+                        self.active_tab = tab_idx;
+                    }
+                }
+            }
+        }
+
+        // Pass store to history browser panel
         if let Some(panel) = self.tabs.get_mut(TAB_HISTORY_BROWSER) {
             if let Some(hist_panel) = panel.as_any_mut().downcast_mut::<HistoryBrowserPanel>() {
                 hist_panel.set_history_store(store);
+            }
+        }
+    }
+
+    /// Saves the current active tab to settings.
+    fn save_active_tab(&self) {
+        if let Some(store) = &self.history_store {
+            if let Ok(guard) = store.lock() {
+                let _ = guard.set_setting("last_active_tab", &self.active_tab.to_string());
             }
         }
     }
@@ -98,6 +125,7 @@ impl TabbedPanel {
     fn next_tab(&mut self) {
         if !self.tabs.is_empty() {
             self.active_tab = (self.active_tab + 1) % self.tabs.len();
+            self.save_active_tab();
         }
     }
 
@@ -109,6 +137,7 @@ impl TabbedPanel {
             } else {
                 self.active_tab - 1
             };
+            self.save_active_tab();
         }
     }
 }

@@ -16,6 +16,7 @@ use ratatui_core::widgets::Widget;
 use ratatui_widgets::paragraph::Paragraph;
 use tracing::{debug, warn};
 
+use super::command_knowledge::COMMAND_KNOWLEDGE;
 use super::panel::{Panel, PanelResult};
 use crate::history_store::{FilterMode, HistoryRecord, HistoryStore, SortMode};
 
@@ -164,6 +165,10 @@ struct EditModeState {
     danger_warning: Option<&'static str>,
     /// Skip dangerous command checks (toggled with Ctrl+!)
     skip_danger_check: bool,
+    /// Current suggestions for the selected token position.
+    current_suggestions: Vec<String>,
+    /// Index into current_suggestions (None = using custom/typed value).
+    suggestion_index: Option<usize>,
 }
 
 impl EditModeState {
@@ -181,6 +186,8 @@ impl EditModeState {
             pending_confirm: None,
             danger_warning: None,
             skip_danger_check: false,
+            current_suggestions: Vec::new(),
+            suggestion_index: None,
         }
     }
 
@@ -356,6 +363,102 @@ impl EditModeState {
         self.selected = 0;
         self.edit_buffer = self.tokens.first().map(|t| t.text.clone()).unwrap_or_default();
         self.undo_stack.clear();
+    }
+
+    /// Updates suggestions for the currently selected token position.
+    fn update_suggestions(&mut self, history_store: Option<&HistoryStore>) {
+        // Get preceding tokens
+        let preceding: Vec<&str> = self.tokens[..self.selected]
+            .iter()
+            .map(|t| t.text.as_str())
+            .collect();
+
+        // Get static suggestions from command knowledge
+        let static_suggestions: Vec<String> = COMMAND_KNOWLEDGE
+            .suggestions_for_position(&preceding)
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+
+        // Get history-based suggestions
+        let mut history_suggestions = Vec::new();
+        if let Some(store) = history_store {
+            if let Ok(suggestions) = store.tokens_at_position(&preceding, 20) {
+                history_suggestions = suggestions;
+            }
+        }
+
+        // Merge suggestions: history first (more relevant), then static
+        let mut merged = Vec::new();
+        for hist_sugg in &history_suggestions {
+            if !merged.contains(hist_sugg) {
+                merged.push(hist_sugg.clone());
+            }
+        }
+        for static_sugg in &static_suggestions {
+            if !merged.contains(static_sugg) {
+                merged.push(static_sugg.clone());
+            }
+        }
+
+        self.current_suggestions = merged;
+        self.suggestion_index = None;
+    }
+
+    /// Cycles through suggestions in the given direction.
+    ///
+    /// # Arguments
+    ///
+    /// * `direction` - Positive for forward (down), negative for backward (up)
+    fn cycle_suggestion(&mut self, direction: i32) {
+        if self.current_suggestions.is_empty() {
+            return;
+        }
+
+        let new_index = match self.suggestion_index {
+            None => {
+                // First press: enter suggestion mode
+                if direction > 0 {
+                    0
+                } else {
+                    self.current_suggestions.len() - 1
+                }
+            }
+            Some(idx) => {
+                // Cycle with wrapping
+                let len = self.current_suggestions.len();
+                if direction > 0 {
+                    (idx + 1) % len
+                } else {
+                    (idx + len - 1) % len
+                }
+            }
+        };
+
+        self.suggestion_index = Some(new_index);
+        self.edit_buffer = self.current_suggestions[new_index].clone();
+    }
+
+    /// Returns the previous suggestion (for three-row display).
+    fn prev_suggestion(&self) -> Option<&str> {
+        if self.current_suggestions.is_empty() {
+            return None;
+        }
+        let idx = self.suggestion_index.unwrap_or(0);
+        let len = self.current_suggestions.len();
+        let prev_idx = if idx == 0 { len - 1 } else { idx - 1 };
+        self.current_suggestions.get(prev_idx).map(|s| s.as_str())
+    }
+
+    /// Returns the next suggestion (for three-row display).
+    fn next_suggestion(&self) -> Option<&str> {
+        if self.current_suggestions.is_empty() {
+            return None;
+        }
+        let idx = self.suggestion_index.unwrap_or(0);
+        let len = self.current_suggestions.len();
+        let next_idx = (idx + 1) % len;
+        self.current_suggestions.get(next_idx).map(|s| s.as_str())
     }
 }
 
@@ -564,7 +667,14 @@ impl HistoryBrowserPanel {
     fn enter_edit_mode(&mut self) {
         if let Some(cmd) = self.selected_command() {
             debug!(command = %cmd, "Entering edit mode");
-            self.edit_mode = Some(EditModeState::new(cmd));
+            let mut edit_state = EditModeState::new(cmd);
+
+            // Initialize suggestions with history store
+            let history_store = self.history_store.as_ref().and_then(|s| s.lock().ok());
+            edit_state.update_suggestions(history_store.as_deref());
+            drop(history_store);
+
+            self.edit_mode = Some(edit_state);
         }
     }
 
@@ -578,7 +688,7 @@ impl HistoryBrowserPanel {
         self.edit_mode.is_some()
     }
 
-    /// Renders the edit mode UI.
+    /// Renders the edit mode UI with three-row depth display.
     fn render_edit_mode(&self, buffer: &mut Buffer, area: Rect) {
         let Some(edit_state) = &self.edit_mode else { return };
 
@@ -588,14 +698,14 @@ impl HistoryBrowserPanel {
             return;
         }
 
-        // Compact layout - 10 rows total to fit panel
+        // Layout with three-row depth UI - 12 rows total
         let chunks = Layout::vertical([
             Constraint::Length(1), // Title
             Constraint::Length(1), // Original command (dim)
-            Constraint::Length(1), // Spacer
-            Constraint::Length(1), // Token strip
+            Constraint::Length(1), // Previous suggestion row (dim)
+            Constraint::Length(1), // Current token strip (highlighted)
+            Constraint::Length(1), // Next suggestion row (dim)
             Constraint::Length(1), // Edit input line
-            Constraint::Length(1), // Spacer
             Constraint::Length(1), // Result preview
             Constraint::Min(1),    // Flexible spacer
             Constraint::Length(1), // Border
@@ -603,10 +713,14 @@ impl HistoryBrowserPanel {
         ])
         .split(area);
 
-        // Title with optional unsafe mode indicator
+        // Title with optional unsafe mode indicator and suggestion count
         let mut title_spans = vec![
             Span::styled(" Edit Command", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
         ];
+        if !edit_state.current_suggestions.is_empty() {
+            let sugg_count = format!(" [{} suggestions]", edit_state.current_suggestions.len());
+            title_spans.push(Span::styled(sugg_count, Style::default().fg(Color::DarkGray)));
+        }
         if edit_state.skip_danger_check {
             title_spans.push(Span::styled(" [UNSAFE]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)));
         }
@@ -620,7 +734,30 @@ impl HistoryBrowserPanel {
         ]);
         Paragraph::new(original_line).render(chunks[1], buffer);
 
-        // Token strip with double brackets and superscript numbers
+        // Calculate the x-position where the selected token starts
+        // We'll align prev/next suggestions under the selected token
+        let mut selected_x_offset: usize = 3; // Initial padding
+        for (i, token) in edit_state.tokens.iter().enumerate() {
+            if i == edit_state.selected {
+                break;
+            }
+            // Add superscript + bracket + token + bracket + spacing
+            selected_x_offset += 1 + 1 + token.text.len() + 1 + 3;
+        }
+        // Add superscript + opening bracket for selected token
+        selected_x_offset += 1 + 1;
+
+        // Previous suggestion row (dim, aligned under selected token)
+        if let Some(prev_sugg) = edit_state.prev_suggestion() {
+            let padding = " ".repeat(selected_x_offset);
+            let prev_line = Line::from(vec![
+                Span::styled(padding, Style::default()),
+                Span::styled(prev_sugg, Style::default().fg(Color::DarkGray)),
+            ]);
+            Paragraph::new(prev_line).render(chunks[2], buffer);
+        }
+
+        // Current token strip with double brackets and superscript numbers
         let mut spans = Vec::new();
         spans.push(Span::styled("   ", Style::default()));
 
@@ -673,7 +810,17 @@ impl HistoryBrowserPanel {
         let token_line = Line::from(spans);
         Paragraph::new(token_line).render(chunks[3], buffer);
 
-        // Edit input line
+        // Next suggestion row (dim, aligned under selected token)
+        if let Some(next_sugg) = edit_state.next_suggestion() {
+            let padding = " ".repeat(selected_x_offset);
+            let next_line = Line::from(vec![
+                Span::styled(padding, Style::default()),
+                Span::styled(next_sugg, Style::default().fg(Color::DarkGray)),
+            ]);
+            Paragraph::new(next_line).render(chunks[4], buffer);
+        }
+
+        // Edit input line with type hint and cycling indicator
         let type_hint = match edit_state.tokens.get(edit_state.selected).map(|t| t.token_type) {
             Some(TokenType::Command) => "cmd",
             Some(TokenType::Subcommand) => "sub",
@@ -682,13 +829,21 @@ impl HistoryBrowserPanel {
             Some(TokenType::Url) => "url",
             Some(TokenType::Argument) | None => "arg",
         };
+        let cycling_indicator = if edit_state.suggestion_index.is_some() {
+            format!(" [{}/{}]",
+                edit_state.suggestion_index.unwrap_or(0) + 1,
+                edit_state.current_suggestions.len())
+        } else {
+            String::new()
+        };
         let edit_label = format!("   {} {} > ", superscript_digit(edit_state.selected + 1), type_hint);
         let edit_line = Line::from(vec![
             Span::styled(edit_label, Style::default().fg(Color::Magenta)),
             Span::styled(&edit_state.edit_buffer, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
             Span::styled("█", Style::default().fg(Color::Cyan)),
+            Span::styled(cycling_indicator, Style::default().fg(Color::DarkGray)),
         ]);
-        Paragraph::new(edit_line).render(chunks[4], buffer);
+        Paragraph::new(edit_line).render(chunks[5], buffer);
 
         // Build and show result preview
         let result_preview: String = edit_state.tokens.iter().enumerate().map(|(i, t)| {
@@ -706,7 +861,7 @@ impl HistoryBrowserPanel {
             Style::default().fg(Color::White)
         };
         let preview_line = Line::from(vec![
-            Span::styled("  Edited: ", Style::default().fg(Color::DarkGray)),
+            Span::styled("  Result: ", Style::default().fg(Color::DarkGray)),
             Span::styled(&result_preview, preview_style),
         ]);
         Paragraph::new(preview_line).render(chunks[6], buffer);
@@ -720,29 +875,29 @@ impl HistoryBrowserPanel {
             }
         }
 
-        // Keybind hints
+        // Keybind hints - updated to show Up/Down for cycling
         let key_style = Style::default().fg(Color::Yellow);
         let label_style = Style::default().fg(Color::DarkGray);
 
         let hints = Line::from(vec![
             Span::styled("←→", key_style),
             Span::styled(" Nav", label_style),
-            Span::raw("   "),
+            Span::raw("  "),
+            Span::styled("↑↓", key_style),
+            Span::styled(" Cycle", label_style),
+            Span::raw("  "),
             Span::styled("^D", key_style),
             Span::styled(" Del", label_style),
-            Span::raw("   "),
+            Span::raw("  "),
             Span::styled("^A/I", key_style),
             Span::styled(" Ins", label_style),
-            Span::raw("   "),
+            Span::raw("  "),
             Span::styled("^Q", key_style),
             Span::styled(" Quote", label_style),
-            Span::raw("   "),
-            Span::styled("^Z", key_style),
-            Span::styled(" Undo", label_style),
-            Span::raw("   "),
+            Span::raw("  "),
             Span::styled("Enter", key_style),
             Span::styled(" Run", label_style),
-            Span::raw("   "),
+            Span::raw("  "),
             Span::styled("Esc", key_style),
             Span::styled(" Back", label_style),
         ]);
@@ -899,27 +1054,65 @@ impl HistoryBrowserPanel {
             }
             KeyCode::Left => {
                 edit_state.prev();
+                // Update suggestions for new token position
+                let history_store = self.history_store.as_ref().and_then(|s| s.lock().ok());
+                if let Some(ref mut state) = self.edit_mode {
+                    state.update_suggestions(history_store.as_deref());
+                }
                 Some(PanelResult::Continue)
             }
             KeyCode::Right => {
                 edit_state.next();
+                // Update suggestions for new token position
+                let history_store = self.history_store.as_ref().and_then(|s| s.lock().ok());
+                if let Some(ref mut state) = self.edit_mode {
+                    state.update_suggestions(history_store.as_deref());
+                }
                 Some(PanelResult::Continue)
             }
             KeyCode::Home => {
                 edit_state.select(0);
+                // Update suggestions for new token position
+                let history_store = self.history_store.as_ref().and_then(|s| s.lock().ok());
+                if let Some(ref mut state) = self.edit_mode {
+                    state.update_suggestions(history_store.as_deref());
+                }
                 Some(PanelResult::Continue)
             }
             KeyCode::End => {
                 let last = edit_state.token_count().saturating_sub(1);
                 edit_state.select(last);
+                // Update suggestions for new token position
+                let history_store = self.history_store.as_ref().and_then(|s| s.lock().ok());
+                if let Some(ref mut state) = self.edit_mode {
+                    state.update_suggestions(history_store.as_deref());
+                }
+                Some(PanelResult::Continue)
+            }
+            KeyCode::Up => {
+                edit_state.cycle_suggestion(-1);
+                Some(PanelResult::Continue)
+            }
+            KeyCode::Down => {
+                edit_state.cycle_suggestion(1);
                 Some(PanelResult::Continue)
             }
             KeyCode::Tab => {
                 edit_state.next();
+                // Update suggestions for new token position
+                let history_store = self.history_store.as_ref().and_then(|s| s.lock().ok());
+                if let Some(ref mut state) = self.edit_mode {
+                    state.update_suggestions(history_store.as_deref());
+                }
                 Some(PanelResult::Continue)
             }
             KeyCode::BackTab => {
                 edit_state.prev();
+                // Update suggestions for new token position
+                let history_store = self.history_store.as_ref().and_then(|s| s.lock().ok());
+                if let Some(ref mut state) = self.edit_mode {
+                    state.update_suggestions(history_store.as_deref());
+                }
                 Some(PanelResult::Continue)
             }
             KeyCode::Char(c) => {
@@ -1228,7 +1421,12 @@ impl Default for HistoryBrowserPanel {
 
 impl Panel for HistoryBrowserPanel {
     fn preferred_height(&self) -> u16 {
-        15
+        // Enhanced edit mode needs 12 rows, list mode needs 15
+        if self.edit_mode.is_some() {
+            12
+        } else {
+            15
+        }
     }
 
     fn title(&self) -> &str {
