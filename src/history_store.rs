@@ -206,16 +206,20 @@ impl HistoryStore {
     }
 
     /// Gets a setting value by key.
+    ///
+    /// Returns `Ok(Some(value))` if the key exists, `Ok(None)` if the key
+    /// does not exist, and propagates database errors.
     pub fn get_setting(&self, key: &str) -> Result<Option<String>, HistoryStoreError> {
         let conn = self.open_connection()?;
-        let result: Option<String> = conn
-            .query_row(
-                "SELECT value FROM settings WHERE key = ?1",
-                [key],
-                |row| row.get(0),
-            )
-            .ok();
-        Ok(result)
+        match conn.query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            [key],
+            |row| row.get(0),
+        ) {
+            Ok(value) => Ok(Some(value)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(HistoryStoreError::from(e)),
+        }
     }
 
     /// Sets a setting value.

@@ -952,7 +952,7 @@ impl App {
     /// Returns an error if terminal operations fail.
     fn run_panel_mode<P: Panel>(&mut self, panel: &mut P) -> Result<PanelResult> {
         // Ensure raw mode is active - reedline may have toggled terminal modes
-        TerminalGuard::ensure_raw_mode().context("Failed to ensure raw mode for panel")?;
+        self.terminal_guard.ensure_raw_mode().context("Failed to ensure raw mode for panel")?;
 
         let (cols, rows) =
             TerminalGuard::get_size().context("Failed to get terminal size for panel")?;
@@ -1548,7 +1548,7 @@ impl App {
 
         // Ensure raw mode is active - reedline may have toggled terminal modes.
         // This is critical for control character passthrough (Ctrl+C -> 0x03, not SIGINT).
-        TerminalGuard::ensure_raw_mode().context("Failed to ensure raw mode for Passthrough")?;
+        self.terminal_guard.ensure_raw_mode().context("Failed to ensure raw mode for Passthrough")?;
 
         // Get terminal size
         let (cols, rows) =
@@ -1610,7 +1610,7 @@ impl App {
 
         // Ensure raw mode is active - reedline may have toggled terminal modes.
         // This is critical for control character passthrough during command injection.
-        TerminalGuard::ensure_raw_mode().context("Failed to ensure raw mode for Injecting")?;
+        self.terminal_guard.ensure_raw_mode().context("Failed to ensure raw mode for Injecting")?;
 
         // Sync PTY size - terminal may have been resized during Edit mode
         let (cols, rows) =

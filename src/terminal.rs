@@ -204,6 +204,10 @@ impl TerminalGuard {
     /// have toggled terminal modes). It's idempotent - calling when raw mode
     /// is already active has no negative effects.
     ///
+    /// This is an instance method tied to an existing TerminalGuard, ensuring
+    /// that raw mode re-enablement cannot occur without an owning RAII guard
+    /// that will restore terminal state on drop.
+    ///
     /// In raw mode:
     /// - Line buffering is disabled (characters available immediately)
     /// - Echo is disabled (typed characters not shown automatically)
@@ -219,11 +223,12 @@ impl TerminalGuard {
     /// ```no_run
     /// use wrashpty::terminal::TerminalGuard;
     ///
-    /// // After reedline returns, ensure raw mode is still active
-    /// TerminalGuard::ensure_raw_mode()?;
+    /// let guard = TerminalGuard::new()?;
+    /// // ... after reedline returns, ensure raw mode is still active
+    /// guard.ensure_raw_mode()?;
     /// # Ok::<(), wrashpty::terminal::TerminalError>(())
     /// ```
-    pub fn ensure_raw_mode() -> Result<()> {
+    pub fn ensure_raw_mode(&self) -> Result<()> {
         enable_raw_mode()?;
         tracing::debug!("Raw mode ensured");
         Ok(())
@@ -377,10 +382,10 @@ mod tests {
         // ensure_raw_mode should be idempotent - calling it multiple times
         // when already in raw mode should succeed without issues.
         match TerminalGuard::new() {
-            Ok(_guard) => {
+            Ok(guard) => {
                 // Guard is active, terminal is in raw mode
                 // ensure_raw_mode should succeed
-                match TerminalGuard::ensure_raw_mode() {
+                match guard.ensure_raw_mode() {
                     Ok(()) => {
                         // Success - raw mode was maintained
                     }
@@ -407,7 +412,7 @@ mod tests {
                 // Simulate what might happen if something disabled raw mode
                 // (Note: We can't easily disable without the guard's Drop,
                 // but we can verify ensure_raw_mode is callable)
-                match TerminalGuard::ensure_raw_mode() {
+                match guard.ensure_raw_mode() {
                     Ok(()) => {
                         // Success
                     }

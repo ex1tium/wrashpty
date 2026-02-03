@@ -194,7 +194,8 @@ impl FileEditModeState {
         self.commit_edit();
         let mut parts = Vec::new();
         parts.extend(self.prefix_tokens.iter().cloned());
-        parts.push(self.filepath.to_string_lossy().to_string());
+        // Shell-quote the filepath to handle spaces and special characters
+        parts.push(shell_quote(&self.filepath.to_string_lossy()));
         parts.extend(self.suffix_tokens.iter().cloned());
         parts.join(" ")
     }
@@ -459,6 +460,26 @@ impl Default for FileBrowserPanel {
     }
 }
 
+/// Shell-quotes a string to safely handle spaces and special characters.
+///
+/// Uses single quotes with proper escaping for embedded single quotes.
+/// Example: "file name.txt" -> "'file name.txt'"
+/// Example: "it's here" -> "'it'\\''s here'"
+fn shell_quote(s: &str) -> String {
+    // If the string contains no special characters, return as-is
+    let needs_quoting = s.chars().any(|c| {
+        matches!(c, ' ' | '\t' | '\n' | '"' | '\'' | '\\' | '$' | '`' | '!' | '*' | '?' | '[' | ']' | '{' | '}' | '(' | ')' | '<' | '>' | '|' | '&' | ';' | '#' | '~')
+    });
+
+    if !needs_quoting && !s.is_empty() {
+        return s.to_string();
+    }
+
+    // Single-quote the string, escaping embedded single quotes
+    let escaped = s.replace('\'', "'\\''");
+    format!("'{}'", escaped)
+}
+
 /// Formats a file size in human-readable form.
 fn format_size(bytes: u64) -> String {
     const KB: u64 = 1024;
@@ -661,7 +682,8 @@ impl FileBrowserPanel {
         } else if !state.edit_buffer.is_empty() && state.selected_section == FileEditSection::Prefix {
             parts.push(state.edit_buffer.clone());
         }
-        parts.push(state.filepath.to_string_lossy().to_string());
+        // Use shell_quote for consistency with build_command
+        parts.push(shell_quote(&state.filepath.to_string_lossy()));
         if !state.suffix_tokens.is_empty() {
             parts.extend(state.suffix_tokens.iter().cloned());
         } else if !state.edit_buffer.is_empty() && state.selected_section == FileEditSection::Suffix {
@@ -887,12 +909,19 @@ impl Panel for FileBrowserPanel {
                 // Format: icon(2) + name + perms(4) + date(6) + size(6) + spacing(6)
                 let metadata_width = 22_usize;
                 let available_for_name = (area.width as usize).saturating_sub(metadata_width);
-                let display_name = if entry.name.len() > available_for_name {
-                    format!("{}…", &entry.name[..available_for_name.saturating_sub(1)])
+                // Use char-aware truncation to avoid panic on UTF-8 multibyte boundaries
+                let name_chars: usize = entry.name.chars().count();
+                let display_name = if name_chars > available_for_name && available_for_name > 0 {
+                    let truncated: String = entry.name
+                        .chars()
+                        .take(available_for_name.saturating_sub(1))
+                        .collect();
+                    format!("{}…", truncated)
                 } else {
                     entry.name.clone()
                 };
-                let name_padding = available_for_name.saturating_sub(display_name.len());
+                let display_name_chars = display_name.chars().count();
+                let name_padding = available_for_name.saturating_sub(display_name_chars);
 
                 let line = Line::from(vec![
                     Span::styled(format!("{} ", icon), Style::default().fg(icon_color)),
@@ -1042,5 +1071,34 @@ mod tests {
         assert!(panel.show_hidden);
         panel.toggle_hidden();
         assert!(!panel.show_hidden);
+    }
+
+    #[test]
+    fn test_shell_quote_no_special_chars() {
+        assert_eq!(shell_quote("filename.txt"), "filename.txt");
+        assert_eq!(shell_quote("path/to/file"), "path/to/file");
+    }
+
+    #[test]
+    fn test_shell_quote_with_spaces() {
+        assert_eq!(shell_quote("file name.txt"), "'file name.txt'");
+        assert_eq!(shell_quote("path with spaces/file"), "'path with spaces/file'");
+    }
+
+    #[test]
+    fn test_shell_quote_with_single_quote() {
+        assert_eq!(shell_quote("it's here"), "'it'\\''s here'");
+    }
+
+    #[test]
+    fn test_shell_quote_with_special_chars() {
+        assert_eq!(shell_quote("file$var"), "'file$var'");
+        assert_eq!(shell_quote("file*"), "'file*'");
+        assert_eq!(shell_quote("file?"), "'file?'");
+    }
+
+    #[test]
+    fn test_shell_quote_empty_string() {
+        assert_eq!(shell_quote(""), "''");
     }
 }

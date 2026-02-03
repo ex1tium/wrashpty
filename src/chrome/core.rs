@@ -781,19 +781,22 @@ impl Chrome {
 
         self.panel_state = PanelState::Collapsed;
 
-        let mut stdout = io::stdout();
+        // Lock stdout for atomic writes - prevents interleaving with other threads.
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
 
         // Reset scroll region to full screen first (required to clear rows outside
         // the panel's scroll region which was height+1 to total_rows)
-        write!(stdout, "\x1b[0m")?;   // Reset attributes
-        write!(stdout, "\x1b[r")?;    // Reset scroll region to full screen
-        stdout.flush()?;
+        write!(out, "\x1b[0m")?;   // Reset attributes
+        write!(out, "\x1b[r")?;    // Reset scroll region to full screen
 
         // Clear each panel row
         for row in 1..=old_height {
-            write!(stdout, "\x1b[{};1H\x1b[2K", row)?;
+            write!(out, "\x1b[{};1H\x1b[2K", row)?;
         }
-        stdout.flush()?;
+
+        out.flush()?;
+        drop(out); // Release lock before calling methods that also lock
 
         // Restore scroll region for chrome mode
         self.setup_scroll_region(total_rows)?;
