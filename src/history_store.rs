@@ -229,6 +229,18 @@ impl HistoryStore {
         self.last_command_id = Some(id);
     }
 
+    /// Opens a connection to the history database with a busy timeout.
+    ///
+    /// This helper ensures all database operations use a consistent busy timeout
+    /// to avoid SQLITE_BUSY errors under concurrent access (e.g., reedline writing
+    /// while the panel queries).
+    fn open_connection(&self) -> Result<Connection, HistoryStoreError> {
+        let conn = Connection::open(&self.db_path)?;
+        // Set 250ms busy timeout to handle concurrent access from reedline
+        conn.busy_timeout(std::time::Duration::from_millis(250))?;
+        Ok(conn)
+    }
+
     /// Updates metadata for the last executed command.
     ///
     /// Uses `self.last_command_id` if set (preferred), otherwise falls back to
@@ -250,8 +262,8 @@ impl HistoryStore {
         duration: Option<Duration>,
         cwd: Option<PathBuf>,
     ) -> Result<(), HistoryStoreError> {
-        // Open a direct connection to update metadata
-        let conn = Connection::open(&self.db_path)?;
+        // Open a connection with busy timeout for concurrent access
+        let conn = self.open_connection()?;
 
         // Prefer stored ID to avoid race with concurrent writers
         let id: i64 = if let Some(stored_id) = self.last_command_id.take() {
@@ -314,7 +326,7 @@ impl HistoryStore {
         current_cwd: Option<&PathBuf>,
         limit: usize,
     ) -> Result<Vec<HistoryRecord>, HistoryStoreError> {
-        let conn = Connection::open(&self.db_path)?;
+        let conn = self.open_connection()?;
 
         // For dedupe with recency sort, we want to show unique commands ordered by their
         // most recent execution. We use a subquery to first get the most recent execution
@@ -466,8 +478,8 @@ impl HistoryStore {
             ));
         }
 
-        // Open a connection and clear the table
-        let conn = Connection::open(&self.db_path)?;
+        // Open a connection with busy timeout and clear the table
+        let conn = self.open_connection()?;
 
         // Delete all entries
         conn.execute("DELETE FROM history", [])?;
@@ -490,21 +502,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_sort_mode_next() {
+    fn test_sort_mode_next_cycles_through_all_modes() {
         assert_eq!(SortMode::Recency.next(), SortMode::Frequency);
         assert_eq!(SortMode::Frequency.next(), SortMode::Frecency);
         assert_eq!(SortMode::Frecency.next(), SortMode::Recency);
     }
 
     #[test]
-    fn test_sort_mode_name() {
+    fn test_sort_mode_name_returns_display_strings() {
         assert_eq!(SortMode::Recency.name(), "Recent");
         assert_eq!(SortMode::Frequency.name(), "Frequent");
         assert_eq!(SortMode::Frecency.name(), "Frecent");
     }
 
     #[test]
-    fn test_filter_mode_default() {
+    fn test_filter_mode_default_all_flags_false() {
         let filter = FilterMode::default();
         assert!(!filter.dedupe);
         assert!(!filter.current_dir_only);
