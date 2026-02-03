@@ -5,6 +5,7 @@
 //! The SQLite database is shared between reedline (for line editing) and the panel
 //! (for metadata-rich browsing).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -171,6 +172,11 @@ impl HistoryStore {
             reedline_history: Some(reedline_history),
         };
 
+        // Create settings table if it doesn't exist
+        if let Err(e) = store.create_settings_table() {
+            warn!("Failed to create settings table: {}", e);
+        }
+
         // Migrate from bash_history on first run
         if is_first_run {
             if let Err(e) = store.migrate_from_bash_history() {
@@ -184,6 +190,42 @@ impl HistoryStore {
         );
 
         Ok(store)
+    }
+
+    /// Creates the settings table if it doesn't exist.
+    fn create_settings_table(&self) -> Result<(), HistoryStoreError> {
+        let conn = self.open_connection()?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// Gets a setting value by key.
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>, HistoryStoreError> {
+        let conn = self.open_connection()?;
+        let result: Option<String> = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                [key],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(result)
+    }
+
+    /// Sets a setting value.
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<(), HistoryStoreError> {
+        let conn = self.open_connection()?;
+        conn.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+            [key, value],
+        )?;
+        Ok(())
     }
 
     /// Migrates history entries from ~/.bash_history to the SQLite database.
@@ -519,6 +561,78 @@ impl HistoryStore {
     /// Returns the path to the database file.
     pub fn db_path(&self) -> &PathBuf {
         &self.db_path
+    }
+
+    /// Queries historical tokens at a specific position in commands.
+    ///
+    /// Returns tokens that appear after the specified prefix tokens,
+    /// sorted by frequency (most common first).
+    ///
+    /// # Arguments
+    ///
+    /// * `preceding` - The tokens that precede the position being queried
+    /// * `limit` - Maximum number of results to return
+    ///
+    /// # Returns
+    ///
+    /// A vector of token strings sorted by frequency.
+    pub fn tokens_at_position(
+        &self,
+        preceding: &[&str],
+        limit: usize,
+    ) -> Result<Vec<String>, HistoryStoreError> {
+        let conn = self.open_connection()?;
+
+        // Build the prefix pattern for LIKE matching
+        let prefix = if preceding.is_empty() {
+            String::new()
+        } else {
+            format!("{} ", preceding.join(" "))
+        };
+
+        let pattern = format!("{}%", prefix);
+
+        // Query commands that match the prefix
+        let mut stmt = conn.prepare(
+            "SELECT command_line FROM history WHERE command_line LIKE ?1 LIMIT 1000"
+        )?;
+
+        let rows = stmt.query_map([&pattern], |row| {
+            let cmd: String = row.get(0)?;
+            Ok(cmd)
+        })?;
+
+        // Extract next token after prefix and count frequencies
+        let mut token_counts: HashMap<String, u32> = HashMap::new();
+        let prefix_len = prefix.len();
+
+        for row in rows.flatten() {
+            if row.len() <= prefix_len {
+                continue;
+            }
+
+            // Get the remainder after the prefix
+            let remainder = &row[prefix_len..];
+
+            // Extract the first token (up to next space or end)
+            let next_token = remainder
+                .split_whitespace()
+                .next()
+                .map(|s| s.to_string());
+
+            if let Some(token) = next_token {
+                if !token.is_empty() {
+                    *token_counts.entry(token).or_insert(0) += 1;
+                }
+            }
+        }
+
+        // Sort by frequency (descending)
+        let mut tokens: Vec<(String, u32)> = token_counts.into_iter().collect();
+        tokens.sort_by(|a, b| b.1.cmp(&a.1));
+
+        // Return just the tokens, limited
+        Ok(tokens.into_iter().take(limit).map(|(t, _)| t).collect())
     }
 }
 

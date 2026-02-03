@@ -4,6 +4,7 @@
 //! scroll regions to reserve screen real estate outside the shell area.
 
 pub mod buffer_convert;
+pub mod command_knowledge;
 pub mod command_palette;
 pub mod core;
 pub mod file_browser;
