@@ -1004,14 +1004,10 @@ impl App {
             return Err(e).context("Failed to resize PTY for panel");
         }
 
-        // Recreate guard for panel_input_loop - ensures cleanup on panic/error
-        let guard = PanelGuard::new(&mut self.chrome, rows);
-
-        // Run the panel input loop - guard will call collapse_panel in Drop if we panic
-        // We need to drop the guard to call panel_input_loop (requires &mut self)
-        drop(guard);
-
         // Use catch_unwind for panic safety during panel_input_loop
+        // Note: We don't use PanelGuard here because we need &mut self for panel_input_loop,
+        // and the guard would hold a mutable borrow of self.chrome. The catch_unwind
+        // provides panic safety, and we explicitly call collapse_panel after.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.panel_input_loop(panel, cols, panel_height, rows)
         }));
@@ -1195,6 +1191,9 @@ impl App {
         match self.run_panel_mode(&mut panel)? {
             PanelResult::Execute(cmd) => {
                 debug!(command = %cmd, "Panel executing command");
+                // Use the same restore flow as Dismiss - this properly clears the panel
+                // and restores terminal state. Then inject the command.
+                self.restore_after_panel()?;
                 self.pending_command = Some(cmd);
                 self.inject_pending_command()?;
             }
