@@ -8,11 +8,42 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use reedline::{History, HistoryItem, HistoryItemId, SqliteBackedHistory};
 use rusqlite::Connection;
+use thiserror::Error;
 use tracing::{debug, info, warn};
+
+/// Errors that can occur when interacting with the history store.
+#[derive(Debug, Error)]
+pub enum HistoryStoreError {
+    /// I/O error (e.g., creating directories, file operations).
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// SQLite database error.
+    #[error("SQLite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+
+    /// Error from reedline's history implementation.
+    #[error("Reedline history error: {0}")]
+    Reedline(#[from] reedline::ReedlineError),
+
+    /// Confirmation required but not provided correctly.
+    #[error("Confirmation required: {0}")]
+    ConfirmationRequired(&'static str),
+
+    /// Internal error for unexpected conditions.
+    #[error("{0}")]
+    Internal(String),
+}
+
+impl HistoryStoreError {
+    /// Creates an internal error with a message.
+    fn internal(msg: impl Into<String>) -> Self {
+        Self::Internal(msg.into())
+    }
+}
 
 /// Sort mode for history queries.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -92,14 +123,18 @@ impl HistoryStore {
     /// Creates the data directory at `~/.local/share/wrashpty/` if needed,
     /// initializes the SQLite database, and performs first-run migration
     /// from `~/.bash_history`.
-    pub fn new(_session_token: [u8; 16]) -> Result<Self> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HistoryStoreError::Io`] if the data directory cannot be created,
+    /// or [`HistoryStoreError::Reedline`] if the SQLite history cannot be initialized.
+    pub fn new(_session_token: [u8; 16]) -> Result<Self, HistoryStoreError> {
         // Create data directory
         let data_dir = dirs::data_local_dir()
             .unwrap_or_else(|| PathBuf::from("/tmp"))
             .join("wrashpty");
 
-        std::fs::create_dir_all(&data_dir)
-            .context("Failed to create wrashpty data directory")?;
+        std::fs::create_dir_all(&data_dir)?;
 
         let db_path = data_dir.join("history.db");
 
@@ -112,8 +147,7 @@ impl HistoryStore {
             db_path.clone(),
             None,  // No session filtering
             None,  // No timestamp retention filtering
-        )
-        .context("Failed to create SQLite history")?;
+        )?;
 
         let mut store = Self {
             db_path,
@@ -137,7 +171,7 @@ impl HistoryStore {
     }
 
     /// Migrates history entries from ~/.bash_history to the SQLite database.
-    fn migrate_from_bash_history(&mut self) -> Result<()> {
+    fn migrate_from_bash_history(&mut self) -> Result<(), HistoryStoreError> {
         let entries = crate::history::load_history().unwrap_or_else(|e| {
             warn!("Failed to load bash history for migration: {}", e);
             Vec::new()
@@ -172,8 +206,8 @@ impl HistoryStore {
     ///
     /// # Errors
     ///
-    /// Returns an error if creating a new SQLite history connection fails.
-    pub fn create_reedline_history(&mut self) -> Result<Box<dyn History>> {
+    /// Returns [`HistoryStoreError::Reedline`] if creating a new SQLite history connection fails.
+    pub fn create_reedline_history(&mut self) -> Result<Box<dyn History>, HistoryStoreError> {
         if let Some(history) = self.reedline_history.take() {
             Ok(Box::new(history))
         } else {
@@ -182,8 +216,7 @@ impl HistoryStore {
                 self.db_path.clone(),
                 None,
                 None,
-            )
-            .context("Failed to create SQLite history")?;
+            )?;
             Ok(Box::new(history))
         }
     }
@@ -207,15 +240,18 @@ impl HistoryStore {
     /// * `exit_status` - Exit code of the command
     /// * `duration` - How long the command took to execute
     /// * `cwd` - Working directory where the command was run
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HistoryStoreError::Sqlite`] if the database operation fails.
     pub fn update_last_command(
         &mut self,
         exit_status: Option<i32>,
         duration: Option<Duration>,
         cwd: Option<PathBuf>,
-    ) -> Result<()> {
+    ) -> Result<(), HistoryStoreError> {
         // Open a direct connection to update metadata
-        let conn = Connection::open(&self.db_path)
-            .context("Failed to open history database")?;
+        let conn = Connection::open(&self.db_path)?;
 
         // Prefer stored ID to avoid race with concurrent writers
         let id: i64 = if let Some(stored_id) = self.last_command_id.take() {
@@ -244,8 +280,7 @@ impl HistoryStore {
         conn.execute(
             "UPDATE history SET exit_status = ?1, duration_ms = ?2, cwd = ?3 WHERE id = ?4",
             rusqlite::params![exit_status, duration_ms, cwd_str, id],
-        )
-        .context("Failed to update history metadata")?;
+        )?;
 
         debug!(
             id,
@@ -267,6 +302,10 @@ impl HistoryStore {
     /// * `sort` - Sort mode
     /// * `current_cwd` - Current working directory for "here" filter
     /// * `limit` - Maximum number of results to return
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HistoryStoreError::Sqlite`] if the database query fails.
     pub fn query(
         &self,
         search: &str,
@@ -274,9 +313,8 @@ impl HistoryStore {
         sort: &SortMode,
         current_cwd: Option<&PathBuf>,
         limit: usize,
-    ) -> Result<Vec<HistoryRecord>> {
-        let conn = Connection::open(&self.db_path)
-            .context("Failed to open history database")?;
+    ) -> Result<Vec<HistoryRecord>, HistoryStoreError> {
+        let conn = Connection::open(&self.db_path)?;
 
         // For dedupe with recency sort, we want to show unique commands ordered by their
         // most recent execution. We use a subquery to first get the most recent execution
@@ -419,23 +457,23 @@ impl HistoryStore {
     ///
     /// # Errors
     ///
-    /// Returns an error if confirmation doesn't match or clearing fails.
-    pub fn wipe(&self, confirmation: &str) -> Result<()> {
+    /// Returns [`HistoryStoreError::ConfirmationRequired`] if confirmation doesn't match,
+    /// or [`HistoryStoreError::Sqlite`] if the database operation fails.
+    pub fn wipe(&self, confirmation: &str) -> Result<(), HistoryStoreError> {
         if confirmation != "wipe" {
-            anyhow::bail!("Confirmation must be 'wipe' to delete history");
+            return Err(HistoryStoreError::ConfirmationRequired(
+                "Confirmation must be 'wipe' to delete history",
+            ));
         }
 
         // Open a connection and clear the table
-        let conn = Connection::open(&self.db_path)
-            .context("Failed to open history database")?;
+        let conn = Connection::open(&self.db_path)?;
 
         // Delete all entries
-        conn.execute("DELETE FROM history", [])
-            .context("Failed to clear history table")?;
+        conn.execute("DELETE FROM history", [])?;
 
         // VACUUM to ensure data is completely erased and disk space is reclaimed
-        conn.execute("VACUUM", [])
-            .context("Failed to vacuum database")?;
+        conn.execute("VACUUM", [])?;
 
         info!(path = %self.db_path.display(), "History cleared");
         Ok(())
