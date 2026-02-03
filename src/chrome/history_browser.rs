@@ -1,4 +1,6 @@
 //! History browser panel for browsing command history with table view.
+//!
+//! Includes an edit mode for modifying commands before execution.
 
 use std::any::Any;
 use std::path::PathBuf;
@@ -16,6 +18,144 @@ use tracing::{debug, warn};
 
 use super::panel::{Panel, PanelResult};
 use crate::history_store::{FilterMode, HistoryRecord, HistoryStore, SortMode};
+
+/// A token from a shell command (word, flag, or quoted string).
+#[derive(Debug, Clone)]
+struct CommandToken {
+    /// The text content of this token.
+    text: String,
+    /// Whether this token is likely editable (not a flag or command).
+    editable: bool,
+}
+
+/// State for edit mode.
+#[derive(Debug, Clone)]
+struct EditModeState {
+    /// The original command being edited.
+    original: String,
+    /// Tokenized parts of the command.
+    tokens: Vec<CommandToken>,
+    /// Index of the currently selected token (0-based).
+    selected: usize,
+    /// Current edit buffer for the selected token.
+    edit_buffer: String,
+    /// Whether we're actively editing the current token.
+    editing: bool,
+}
+
+impl EditModeState {
+    /// Creates a new edit mode state from a command string.
+    fn new(command: &str) -> Self {
+        let tokens = tokenize_command(command);
+        let edit_buffer = tokens.first().map(|t| t.text.clone()).unwrap_or_default();
+        Self {
+            original: command.to_string(),
+            tokens,
+            selected: 0,
+            edit_buffer,
+            editing: false,
+        }
+    }
+
+    /// Returns the number of tokens.
+    fn token_count(&self) -> usize {
+        self.tokens.len()
+    }
+
+    /// Selects a token by index.
+    fn select(&mut self, index: usize) {
+        if index < self.tokens.len() {
+            // Save current edit
+            if let Some(token) = self.tokens.get_mut(self.selected) {
+                token.text = self.edit_buffer.clone();
+            }
+            self.selected = index;
+            self.edit_buffer = self.tokens[index].text.clone();
+            self.editing = true;
+        }
+    }
+
+    /// Moves to the next token.
+    fn next(&mut self) {
+        if self.selected + 1 < self.tokens.len() {
+            self.select(self.selected + 1);
+        }
+    }
+
+    /// Moves to the previous token.
+    fn prev(&mut self) {
+        if self.selected > 0 {
+            self.select(self.selected - 1);
+        }
+    }
+
+    /// Builds the final command from the edited tokens.
+    fn build_command(&mut self) -> String {
+        // Save current edit buffer
+        if let Some(token) = self.tokens.get_mut(self.selected) {
+            token.text = self.edit_buffer.clone();
+        }
+        self.tokens.iter().map(|t| t.text.as_str()).collect::<Vec<_>>().join(" ")
+    }
+}
+
+/// Tokenizes a shell command into words, respecting quotes.
+fn tokenize_command(command: &str) -> Vec<CommandToken> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut escape_next = false;
+    let mut is_first = true;
+
+    for ch in command.chars() {
+        if escape_next {
+            current.push(ch);
+            escape_next = false;
+            continue;
+        }
+
+        match ch {
+            '\\' if !in_single_quote => {
+                current.push(ch);
+                escape_next = true;
+            }
+            '\'' if !in_double_quote => {
+                current.push(ch);
+                in_single_quote = !in_single_quote;
+            }
+            '"' if !in_single_quote => {
+                current.push(ch);
+                in_double_quote = !in_double_quote;
+            }
+            ' ' | '\t' if !in_single_quote && !in_double_quote => {
+                if !current.is_empty() {
+                    let editable = !is_first && !current.starts_with('-');
+                    tokens.push(CommandToken {
+                        text: current.clone(),
+                        editable,
+                    });
+                    current.clear();
+                    is_first = false;
+                }
+            }
+            _ => {
+                current.push(ch);
+            }
+        }
+    }
+
+    // Don't forget the last token
+    if !current.is_empty() {
+        let editable = !is_first && !current.starts_with('-');
+        tokens.push(CommandToken {
+            text: current,
+            editable,
+        });
+    }
+
+    tokens
+}
 
 /// Column widths for the table view
 struct ColumnWidths {
@@ -58,6 +198,8 @@ pub struct HistoryBrowserPanel {
     current_cwd: Option<PathBuf>,
     /// Reference to the history store.
     history_store: Option<Arc<Mutex<HistoryStore>>>,
+    /// Edit mode state (None when not in edit mode).
+    edit_mode: Option<EditModeState>,
 }
 
 impl HistoryBrowserPanel {
@@ -72,6 +214,7 @@ impl HistoryBrowserPanel {
             sort_mode: SortMode::default(),
             current_cwd: None,
             history_store: None,
+            edit_mode: None,
         }
     }
 
@@ -154,6 +297,188 @@ impl HistoryBrowserPanel {
     fn cycle_sort(&mut self) {
         self.sort_mode = self.sort_mode.next();
         self.load_history();
+    }
+
+    /// Enters edit mode for the selected command.
+    fn enter_edit_mode(&mut self) {
+        if let Some(cmd) = self.selected_command() {
+            debug!(command = %cmd, "Entering edit mode");
+            self.edit_mode = Some(EditModeState::new(cmd));
+        }
+    }
+
+    /// Exits edit mode without saving.
+    fn exit_edit_mode(&mut self) {
+        self.edit_mode = None;
+    }
+
+    /// Returns true if currently in edit mode.
+    fn in_edit_mode(&self) -> bool {
+        self.edit_mode.is_some()
+    }
+
+    /// Renders the edit mode UI.
+    fn render_edit_mode(&self, buffer: &mut Buffer, area: Rect) {
+        let Some(edit_state) = &self.edit_mode else { return };
+
+        // Layout: title (1) + command display (2) + separator (1) + edit area (2) + border (1) + keybinds (1)
+        let chunks = Layout::vertical([
+            Constraint::Length(1), // Title
+            Constraint::Length(2), // Command with tokens
+            Constraint::Length(1), // Separator
+            Constraint::Length(2), // Edit input area
+            Constraint::Min(1),    // Spacer
+            Constraint::Length(1), // Border
+            Constraint::Length(1), // Keybind hints
+        ])
+        .split(area);
+
+        // Title
+        let title = Line::from(vec![
+            Span::styled(" Edit Command ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled("- modify tokens and press Enter to run", Style::default().fg(Color::DarkGray)),
+        ]);
+        Paragraph::new(title).render(chunks[0], buffer);
+
+        // Render tokenized command with slot numbers
+        let mut spans = Vec::new();
+        spans.push(Span::raw(" "));
+
+        for (i, token) in edit_state.tokens.iter().enumerate() {
+            let is_selected = i == edit_state.selected;
+            let slot_num = i + 1; // 1-indexed for display
+
+            // Slot number indicator (visual reference for position)
+            let num_style = if is_selected {
+                Style::default().fg(Color::Black).bg(Color::Yellow)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            spans.push(Span::styled(format!("{}", slot_num), num_style));
+
+            // Token text
+            let token_style = if is_selected {
+                Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
+            } else if token.editable {
+                Style::default().fg(Color::White)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+
+            // Show edit buffer for selected token, original text for others
+            let display_text = if is_selected {
+                &edit_state.edit_buffer
+            } else {
+                &token.text
+            };
+            spans.push(Span::styled(display_text.clone(), token_style));
+            spans.push(Span::raw(" "));
+        }
+
+        let cmd_line = Line::from(spans);
+        Paragraph::new(cmd_line).render(chunks[1], buffer);
+
+        // Separator
+        let sep_style = Style::default().fg(Color::DarkGray);
+        for x in chunks[2].x..chunks[2].x + chunks[2].width {
+            if let Some(cell) = buffer.cell_mut((x, chunks[2].y)) {
+                cell.set_char('─');
+                cell.set_style(sep_style);
+            }
+        }
+
+        // Edit area - show current token being edited
+        let edit_label = format!(" Editing slot {}: ", edit_state.selected + 1);
+        let edit_line = Line::from(vec![
+            Span::styled(edit_label, Style::default().fg(Color::Magenta)),
+            Span::styled(&edit_state.edit_buffer, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled("█", Style::default().fg(Color::White)), // Cursor
+        ]);
+        Paragraph::new(edit_line).render(chunks[3], buffer);
+
+        // Border
+        let border_style = Style::default().fg(Color::DarkGray);
+        for x in chunks[5].x..chunks[5].x + chunks[5].width {
+            if let Some(cell) = buffer.cell_mut((x, chunks[5].y)) {
+                cell.set_char('─');
+                cell.set_style(border_style);
+            }
+        }
+
+        // Keybind hints for edit mode
+        let key_style = Style::default().fg(Color::Yellow);
+        let label_style = Style::default().fg(Color::DarkGray);
+
+        let hints = Line::from(vec![
+            Span::styled("←→/Tab", key_style),
+            Span::styled(" Navigate", label_style),
+            Span::raw("  "),
+            Span::styled("Home/End", key_style),
+            Span::styled(" First/Last", label_style),
+            Span::raw("  "),
+            Span::styled("Enter", key_style),
+            Span::styled(" Run", label_style),
+            Span::raw("  "),
+            Span::styled("Esc", key_style),
+            Span::styled(" Back", label_style),
+        ]);
+        Paragraph::new(hints).render(chunks[6], buffer);
+    }
+
+    /// Handles input in edit mode. Returns Some(PanelResult) if handled.
+    fn handle_edit_input(&mut self, key: KeyEvent) -> Option<PanelResult> {
+        let edit_state = self.edit_mode.as_mut()?;
+
+        match key.code {
+            KeyCode::Esc => {
+                self.exit_edit_mode();
+                Some(PanelResult::Continue)
+            }
+            KeyCode::Enter => {
+                // Build and execute the edited command
+                let command = edit_state.build_command();
+                self.exit_edit_mode();
+                // Execute directly since reedline doesn't support buffer injection
+                Some(PanelResult::Execute(command))
+            }
+            KeyCode::Left => {
+                edit_state.prev();
+                Some(PanelResult::Continue)
+            }
+            KeyCode::Right => {
+                edit_state.next();
+                Some(PanelResult::Continue)
+            }
+            KeyCode::Home => {
+                edit_state.select(0);
+                Some(PanelResult::Continue)
+            }
+            KeyCode::End => {
+                let last = edit_state.token_count().saturating_sub(1);
+                edit_state.select(last);
+                Some(PanelResult::Continue)
+            }
+            KeyCode::Tab => {
+                // Tab moves to next token (more intuitive than right arrow for some)
+                edit_state.next();
+                Some(PanelResult::Continue)
+            }
+            KeyCode::BackTab => {
+                // Shift+Tab moves to previous token
+                edit_state.prev();
+                Some(PanelResult::Continue)
+            }
+            KeyCode::Char(c) => {
+                edit_state.edit_buffer.push(c);
+                edit_state.editing = true;
+                Some(PanelResult::Continue)
+            }
+            KeyCode::Backspace => {
+                edit_state.edit_buffer.pop();
+                Some(PanelResult::Continue)
+            }
+            _ => Some(PanelResult::Continue),
+        }
     }
 
     /// Formats a relative time string (e.g., "5m", "2h", "3d").
@@ -452,6 +777,12 @@ impl Panel for HistoryBrowserPanel {
             return;
         }
 
+        // If in edit mode, render the edit UI instead
+        if self.in_edit_mode() {
+            self.render_edit_mode(buffer, area);
+            return;
+        }
+
         // Layout: filter (1) + header (1) + separator (1) + list (n) + border (1) + keybinds (1)
         let chunks = Layout::vertical([
             Constraint::Length(1), // Filter input
@@ -532,11 +863,14 @@ impl Panel for HistoryBrowserPanel {
         let sort_style = Style::default().fg(Color::Cyan);
 
         let hints = Line::from(vec![
+            Span::styled("^E", key_style),
+            Span::styled(" Edit", label_style),
+            Span::raw("  "),
             Span::styled("^D", key_style),
             Span::styled(" Dedupe", if self.filter_mode.dedupe { active_label } else { label_style }),
             Span::raw("  "),
             Span::styled("^G", key_style),
-            Span::styled(" Current Dir", if self.filter_mode.current_dir_only { active_label } else { label_style }),
+            Span::styled(" CurDir", if self.filter_mode.current_dir_only { active_label } else { label_style }),
             Span::raw("  "),
             Span::styled("^X", key_style),
             Span::styled(" Failed", if self.filter_mode.failed_only { active_label } else { label_style }),
@@ -554,9 +888,20 @@ impl Panel for HistoryBrowserPanel {
     }
 
     fn handle_input(&mut self, key: KeyEvent) -> PanelResult {
+        // If in edit mode, delegate to edit handler
+        if self.in_edit_mode() {
+            if let Some(result) = self.handle_edit_input(key) {
+                return result;
+            }
+        }
+
         // Check for Ctrl+key toggles first
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
+                KeyCode::Char('e') => {
+                    self.enter_edit_mode();
+                    return PanelResult::Continue;
+                }
                 KeyCode::Char('d') => {
                     self.toggle_dedupe();
                     return PanelResult::Continue;
@@ -673,5 +1018,97 @@ mod tests {
         assert_eq!(cols.duration, 8);
         // command should get remaining space
         assert!(cols.command > 0);
+    }
+
+    // =========================================================================
+    // Tokenizer Tests
+    // =========================================================================
+
+    #[test]
+    fn test_tokenize_simple_command() {
+        let tokens = tokenize_command("ls -la /tmp");
+        assert_eq!(tokens.len(), 3);
+        assert_eq!(tokens[0].text, "ls");
+        assert!(!tokens[0].editable); // First token (command)
+        assert_eq!(tokens[1].text, "-la");
+        assert!(!tokens[1].editable); // Flag
+        assert_eq!(tokens[2].text, "/tmp");
+        assert!(tokens[2].editable); // Path argument
+    }
+
+    #[test]
+    fn test_tokenize_quoted_string() {
+        let tokens = tokenize_command("echo \"hello world\"");
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[0].text, "echo");
+        assert_eq!(tokens[1].text, "\"hello world\"");
+        assert!(tokens[1].editable);
+    }
+
+    #[test]
+    fn test_tokenize_single_quoted() {
+        let tokens = tokenize_command("grep 'pattern with spaces' file.txt");
+        assert_eq!(tokens.len(), 3);
+        assert_eq!(tokens[1].text, "'pattern with spaces'");
+        assert!(tokens[1].editable);
+    }
+
+    #[test]
+    fn test_tokenize_git_command() {
+        let tokens = tokenize_command("git checkout -b feature/new-branch origin/main");
+        assert_eq!(tokens.len(), 5);
+        assert_eq!(tokens[0].text, "git");
+        assert!(!tokens[0].editable);
+        assert_eq!(tokens[1].text, "checkout");
+        assert!(tokens[1].editable);
+        assert_eq!(tokens[2].text, "-b");
+        assert!(!tokens[2].editable);
+        assert_eq!(tokens[3].text, "feature/new-branch");
+        assert!(tokens[3].editable);
+        assert_eq!(tokens[4].text, "origin/main");
+        assert!(tokens[4].editable);
+    }
+
+    #[test]
+    fn test_tokenize_empty() {
+        let tokens = tokenize_command("");
+        assert!(tokens.is_empty());
+    }
+
+    // =========================================================================
+    // Edit Mode Tests
+    // =========================================================================
+
+    #[test]
+    fn test_edit_mode_state_new() {
+        let state = EditModeState::new("echo hello");
+        assert_eq!(state.original, "echo hello");
+        assert_eq!(state.token_count(), 2);
+        assert_eq!(state.selected, 0);
+    }
+
+    #[test]
+    fn test_edit_mode_navigation() {
+        let mut state = EditModeState::new("git push origin main");
+        assert_eq!(state.selected, 0);
+
+        state.next();
+        assert_eq!(state.selected, 1);
+
+        state.next();
+        assert_eq!(state.selected, 2);
+
+        state.prev();
+        assert_eq!(state.selected, 1);
+    }
+
+    #[test]
+    fn test_edit_mode_build_command() {
+        let mut state = EditModeState::new("echo hello");
+        state.select(1);
+        state.edit_buffer = "world".to_string();
+
+        let result = state.build_command();
+        assert_eq!(result, "echo world");
     }
 }

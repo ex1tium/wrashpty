@@ -164,13 +164,25 @@ impl Panel for TabbedPanel {
 
         tabs_widget.render(chunks[0], buffer);
 
-        // Render a separator line
+        // Render a separator line with tab switch hint
         if chunks[0].height > 1 {
             let sep_area = Rect::new(chunks[0].x, chunks[0].y + 1, chunks[0].width, 1);
             for x in sep_area.x..sep_area.x + sep_area.width {
                 if let Some(cell) = buffer.cell_mut((x, sep_area.y)) {
                     cell.set_char('─');
                     cell.set_style(Style::default().fg(Color::DarkGray));
+                }
+            }
+            // Add hint for tab switching at the right side
+            let hint = "Ctrl+←→ switch tabs";
+            let hint_start = sep_area.x + sep_area.width.saturating_sub(hint.len() as u16 + 2);
+            for (i, ch) in hint.chars().enumerate() {
+                let x = hint_start + i as u16;
+                if x < sep_area.x + sep_area.width {
+                    if let Some(cell) = buffer.cell_mut((x, sep_area.y)) {
+                        cell.set_char(ch);
+                        cell.set_style(Style::default().fg(Color::DarkGray));
+                    }
                 }
             }
         }
@@ -182,30 +194,26 @@ impl Panel for TabbedPanel {
     }
 
     fn handle_input(&mut self, key: KeyEvent) -> PanelResult {
-        match key.code {
-            // Tab switching
-            KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                self.prev_tab();
-                PanelResult::Continue
-            }
-            KeyCode::Tab => {
-                self.next_tab();
-                PanelResult::Continue
-            }
-            KeyCode::BackTab => {
-                self.prev_tab();
-                PanelResult::Continue
-            }
-            // Global dismiss
-            KeyCode::Esc => PanelResult::Dismiss,
-            // Delegate to active panel
-            _ => {
-                if let Some(panel) = self.tabs.get_mut(self.active_tab) {
-                    panel.handle_input(key)
-                } else {
-                    PanelResult::Dismiss
+        // Panel tab switching with Ctrl+Left/Right (frees Tab for inner panel use)
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Left => {
+                    self.prev_tab();
+                    return PanelResult::Continue;
                 }
+                KeyCode::Right => {
+                    self.next_tab();
+                    return PanelResult::Continue;
+                }
+                _ => {}
             }
+        }
+
+        // Delegate all other keys to active panel
+        if let Some(panel) = self.tabs.get_mut(self.active_tab) {
+            panel.handle_input(key)
+        } else {
+            PanelResult::Dismiss
         }
     }
 
