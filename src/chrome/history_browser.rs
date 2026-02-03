@@ -1465,15 +1465,25 @@ impl Panel for HistoryBrowserPanel {
         } else {
             Span::styled(&self.filter, Style::default().fg(Color::White))
         };
-        let filter_line = Line::from(vec![
+        let mut filter_spans = vec![
             Span::styled(" > ", Style::default().fg(Color::Magenta)),
             filter_text,
             Span::styled(
                 format!("  [{} entries]", self.records.len()),
                 Style::default().fg(Color::DarkGray),
             ),
-        ]);
-        Paragraph::new(filter_line).render(chunks[0], buffer);
+        ];
+        // Show current directory when filtering by it
+        if self.filter_mode.current_dir_only {
+            if let Some(ref cwd) = self.current_cwd {
+                let path_str = cwd.to_string_lossy();
+                filter_spans.push(Span::styled(
+                    format!("  in {}", path_str),
+                    Style::default().fg(Color::Cyan),
+                ));
+            }
+        }
+        Paragraph::new(Line::from(filter_spans)).render(chunks[0], buffer);
 
         // Render table header
         self.render_header(buffer, chunks[1], &cols);
