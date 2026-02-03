@@ -36,6 +36,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -52,6 +53,7 @@ use crate::chrome::panel::{Panel, PanelResult};
 use crate::chrome::tabbed_panel::TabbedPanel;
 use crate::chrome::{Chrome, ChromeContext, SizeCheckResult};
 use crate::editor::{Editor, EditorResult};
+use crate::history_store::HistoryStore;
 use crate::prompt::WrashPrompt;
 use crate::pty::Pty;
 use crate::pump::{Pump, PumpResult};
@@ -313,8 +315,14 @@ pub struct App {
     /// Reedline-based line editor.
     editor: Editor,
 
+    /// Centralized history store with SQLite backend.
+    history_store: Arc<Mutex<HistoryStore>>,
+
     /// Command pending injection after transitioning to Injecting mode.
     pending_command: Option<String>,
+
+    /// Whether we're waiting for wipe confirmation (after `:wipe` was entered).
+    pending_wipe_confirmation: bool,
 
     /// Timestamp when injection started (for timeout).
     injection_start: Option<Instant>,
@@ -381,8 +389,19 @@ impl App {
             Some(signal_handler.as_raw_fd()),
         );
 
-        // Create the reedline editor
-        let editor = Editor::new().context("Failed to create editor")?;
+        // Create the history store with SQLite backend
+        let history_store = Arc::new(Mutex::new(
+            HistoryStore::new(session_token).context("Failed to create history store")?
+        ));
+
+        // Create reedline history from the store
+        let reedline_history = history_store
+            .lock()
+            .map_err(|_| anyhow::anyhow!("History store lock poisoned"))?
+            .create_reedline_history()?;
+
+        // Create the reedline editor with the history
+        let editor = Editor::new(reedline_history).context("Failed to create editor")?;
 
         // Get initial working directory
         let current_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
@@ -401,7 +420,9 @@ impl App {
             session_token,
             bashrc_path: bashrc_path.to_string(),
             editor,
+            history_store,
             pending_command: None,
+            pending_wipe_confirmation: false,
             injection_start: None,
             current_cwd,
             git_branch: None,
@@ -713,6 +734,44 @@ impl App {
                     debug!("User requested panel via command");
                     self.open_panel()?;
                     return Ok(());
+                }
+
+                // History wipe command - sets pending confirmation flag
+                if trimmed == ":wipe" {
+                    self.pending_wipe_confirmation = true;
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "\x1b[33mThis will delete all command history. Type 'wipe' to confirm:\x1b[0m"
+                    );
+                    return Ok(());
+                }
+
+                // Handle wipe confirmation (only if :wipe was entered first)
+                if trimmed == "wipe" && self.pending_wipe_confirmation {
+                    self.pending_wipe_confirmation = false;
+                    if let Ok(store) = self.history_store.lock() {
+                        match store.wipe("wipe") {
+                            Ok(()) => {
+                                let _ = writeln!(
+                                    std::io::stderr(),
+                                    "\x1b[32mHistory database deleted successfully.\x1b[0m"
+                                );
+                            }
+                            Err(e) => {
+                                let _ = writeln!(
+                                    std::io::stderr(),
+                                    "\x1b[31mFailed to delete history: {}\x1b[0m",
+                                    e
+                                );
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+
+                // Clear pending wipe confirmation if user enters anything else
+                if self.pending_wipe_confirmation && trimmed != "wipe" {
+                    self.pending_wipe_confirmation = false;
                 }
 
                 // Skip empty commands
@@ -1027,6 +1086,7 @@ impl App {
     /// Returns an error if terminal operations fail.
     pub fn open_panel(&mut self) -> Result<()> {
         let mut panel = TabbedPanel::new();
+        panel.set_history_store(Arc::clone(&self.history_store));
         panel.load_context(&self.current_cwd);
 
         match self.run_panel_mode(&mut panel)? {
@@ -1036,10 +1096,16 @@ impl App {
                 self.inject_pending_command()?;
             }
             PanelResult::InsertText(text) => {
-                // For now, execute as command since we can't inject into reedline buffer
-                debug!(text = %text, "Panel inserting text (executing as command)");
-                self.pending_command = Some(text);
-                self.inject_pending_command()?;
+                // Cannot inject text directly into reedline buffer from outside,
+                // so we print the command for the user to copy/paste manually
+                debug!(text = %text, "Panel requested text insertion, printing for copy/paste");
+                self.restore_after_panel()?;
+                // Print the command so user can copy it
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "\x1b[33mSelected command (copy to run): {}\x1b[0m",
+                    text
+                );
             }
             PanelResult::Dismiss | PanelResult::Continue => {
                 debug!("Panel dismissed, restoring chrome");
@@ -1235,6 +1301,15 @@ impl App {
         // Calculate command duration if coming from command execution
         if let Some(start) = self.command_start_time.take() {
             self.last_command_duration = Some(start.elapsed());
+
+            // Update history metadata with exit status, duration, and cwd
+            if let Ok(mut store) = self.history_store.lock() {
+                let exit_status = Some(self.last_exit_code);
+                let cwd = Some(self.current_cwd.clone());
+                if let Err(e) = store.update_last_command(exit_status, self.last_command_duration, cwd) {
+                    warn!("Failed to update history metadata: {}", e);
+                }
+            }
         }
 
         // Update context information using shell's cwd (not parent process)
