@@ -196,6 +196,8 @@ impl EditModeState {
             if let Some(token) = self.tokens.get_mut(self.selected) {
                 token.text = self.edit_buffer.clone();
             }
+            // Reclassify after saving (text change may affect token types)
+            self.reclassify_tokens();
             self.selected = index;
             self.edit_buffer = self.tokens[index].text.clone();
             self.editing = true;
@@ -242,6 +244,7 @@ impl EditModeState {
             self.edit_buffer = self.tokens.get(self.selected)
                 .map(|t| t.text.clone())
                 .unwrap_or_default();
+            self.reclassify_tokens();
         }
     }
 
@@ -256,6 +259,7 @@ impl EditModeState {
             self.selected = self.tokens.len() - 1;
         }
         self.edit_buffer = self.tokens[self.selected].text.clone();
+        self.reclassify_tokens();
     }
 
     /// Inserts a new token after the current one.
@@ -273,6 +277,7 @@ impl EditModeState {
         self.selected += 1;
         self.edit_buffer.clear();
         self.editing = true;
+        self.reclassify_tokens();
     }
 
     /// Inserts a new token before the current one.
@@ -289,6 +294,7 @@ impl EditModeState {
         self.tokens.insert(self.selected, new_token);
         self.edit_buffer.clear();
         self.editing = true;
+        self.reclassify_tokens();
     }
 
     /// Cycles through quote styles for current token.
@@ -308,6 +314,22 @@ impl EditModeState {
     fn clear_confirm(&mut self) {
         self.pending_confirm = None;
         self.danger_warning = None;
+    }
+
+    /// Reclassifies all tokens based on their current text and positions.
+    ///
+    /// This should be called after any mutation that changes token positions
+    /// (delete, insert) or token text (editing), to ensure token_type stays
+    /// accurate for UI hints and styling.
+    fn reclassify_tokens(&mut self) {
+        for i in 0..self.tokens.len() {
+            let prev_text = if i > 0 {
+                Some(self.tokens[i - 1].text.as_str())
+            } else {
+                None
+            };
+            self.tokens[i].token_type = classify_token(&self.tokens[i].text, i, prev_text);
+        }
     }
 
     /// Returns true if waiting for confirmation.
@@ -1767,5 +1789,78 @@ mod tests {
         assert_eq!(superscript_digit(20), "²⁰");
         assert_eq!(superscript_digit(21), "·"); // Fallback
         assert_eq!(superscript_digit(0), "·"); // Fallback
+    }
+
+    #[test]
+    fn test_edit_mode_reclassify_after_delete() {
+        // When deleting first token, second token should become Command
+        let mut state = EditModeState::new("sudo git push");
+        assert_eq!(state.tokens[0].token_type, TokenType::Command);
+        assert_eq!(state.tokens[1].token_type, TokenType::Argument); // "git" at position 1 is argument
+
+        state.select(0); // Select "sudo"
+        state.delete_token();
+
+        // After deleting "sudo", "git" is now position 0 and should be Command
+        assert_eq!(state.tokens[0].text, "git");
+        assert_eq!(state.tokens[0].token_type, TokenType::Command);
+        // "push" is now position 1 after "git", so it's a Subcommand
+        assert_eq!(state.tokens[1].text, "push");
+        assert_eq!(state.tokens[1].token_type, TokenType::Subcommand);
+    }
+
+    #[test]
+    fn test_edit_mode_reclassify_after_insert() {
+        let mut state = EditModeState::new("push origin");
+        // Initially "push" is Command (position 0)
+        assert_eq!(state.tokens[0].token_type, TokenType::Command);
+
+        // Insert "git" before "push"
+        state.select(0);
+        state.insert_token_before();
+        state.edit_buffer = "git".to_string();
+        // Commit by selecting another token
+        state.select(1);
+
+        // Now "git" is Command, "push" is Subcommand
+        assert_eq!(state.tokens[0].text, "git");
+        assert_eq!(state.tokens[0].token_type, TokenType::Command);
+        assert_eq!(state.tokens[1].text, "push");
+        assert_eq!(state.tokens[1].token_type, TokenType::Subcommand);
+    }
+
+    #[test]
+    fn test_edit_mode_reclassify_after_text_change() {
+        let mut state = EditModeState::new("ls origin");
+        // "ls" is Command, "origin" is Argument
+        assert_eq!(state.tokens[0].token_type, TokenType::Command);
+        assert_eq!(state.tokens[1].token_type, TokenType::Argument);
+
+        // Change "ls" to "git"
+        state.select(0);
+        state.edit_buffer = "git".to_string();
+        state.select(1); // Commit the change
+
+        // Now "origin" after "git" should be reclassified as Subcommand
+        assert_eq!(state.tokens[0].text, "git");
+        assert_eq!(state.tokens[0].token_type, TokenType::Command);
+        assert_eq!(state.tokens[1].text, "origin");
+        // Note: "origin" isn't a recognized git subcommand, so it stays Argument
+        // Let's change to a better test...
+    }
+
+    #[test]
+    fn test_edit_mode_reclassify_git_subcommand() {
+        let mut state = EditModeState::new("ls push");
+        assert_eq!(state.tokens[1].token_type, TokenType::Argument);
+
+        // Change "ls" to "git"
+        state.select(0);
+        state.edit_buffer = "git".to_string();
+        state.select(1);
+
+        // "push" after "git" should become Subcommand
+        assert_eq!(state.tokens[1].text, "push");
+        assert_eq!(state.tokens[1].token_type, TokenType::Subcommand);
     }
 }
