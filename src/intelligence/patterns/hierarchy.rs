@@ -128,16 +128,31 @@ pub fn query_hierarchy(
         }
     }
 
-    // Fallback: query with just parent
-    if let Some(parent_id) = parent_id {
-        let results = query_with_parent(conn, position, parent_id, limit)?;
+    // Fallback: query with just parent, but ONLY for the same base command
+    // This prevents showing unrelated commands (e.g., kubectl suggestions for git)
+    if let (Some(parent_id), Some(base_id)) = (parent_id, base_id) {
+        let results = query_with_parent_and_base(conn, position, parent_id, base_id, limit)?;
         if !results.is_empty() {
             return Ok(results);
         }
     }
 
-    // Last resort: query by position only (very generic)
-    query_by_position(conn, position, limit)
+    // Fallback: query by base command only (any parent within this command)
+    if let Some(base_id) = base_id {
+        let results = query_by_base_command(conn, position, base_id, limit)?;
+        if !results.is_empty() {
+            return Ok(results);
+        }
+    }
+
+    // Last resort: query by position only - but ONLY when we have no base command context
+    // This is intentionally limited to avoid polluting git suggestions with docker/kubectl tokens
+    if base_command.is_none() {
+        return query_by_position(conn, position, limit);
+    }
+
+    // If we have a base command but found nothing, return empty rather than wrong suggestions
+    Ok(Vec::new())
 }
 
 /// Queries base commands (position 0, no parent).
@@ -210,11 +225,13 @@ fn query_with_context(
     Ok(results)
 }
 
-/// Queries with just parent token.
-fn query_with_parent(
+/// Queries with parent token, filtered to only the given base command.
+/// This prevents cross-command pollution (e.g., kubectl tokens appearing for git).
+fn query_with_parent_and_base(
     conn: &Connection,
     position: usize,
     parent_id: i64,
+    base_id: i64,
     limit: usize,
 ) -> Result<Vec<HierarchyResult>, CIError> {
     let mut stmt = conn.prepare(
@@ -224,12 +241,51 @@ fn query_with_parent(
          JOIN ci_tokens t ON t.id = h.token_id
          WHERE h.position = ?1
            AND h.parent_token_id = ?2
+           AND h.base_command_id = ?3
+         GROUP BY h.token_id
+         ORDER BY freq DESC
+         LIMIT ?4",
+    )?;
+
+    let rows = stmt.query_map(rusqlite::params![position, parent_id, base_id, limit], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, u32>(1)?,
+            row.get::<_, u32>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, Option<String>>(4)?,
+        ))
+    })?;
+
+    let mut results = Vec::new();
+    for row in rows.flatten() {
+        results.push(row);
+    }
+
+    Ok(results)
+}
+
+/// Queries by base command only (any position within that command's hierarchy).
+/// Used when we know the base command but the specific parent/position combo isn't found.
+fn query_by_base_command(
+    conn: &Connection,
+    position: usize,
+    base_id: i64,
+    limit: usize,
+) -> Result<Vec<HierarchyResult>, CIError> {
+    let mut stmt = conn.prepare(
+        "SELECT t.text, SUM(h.frequency) as freq, SUM(h.success_count) as success,
+                MAX(h.last_seen) as last_seen, h.role
+         FROM ci_command_hierarchy h
+         JOIN ci_tokens t ON t.id = h.token_id
+         WHERE h.position = ?1
+           AND h.base_command_id = ?2
          GROUP BY h.token_id
          ORDER BY freq DESC
          LIMIT ?3",
     )?;
 
-    let rows = stmt.query_map(rusqlite::params![position, parent_id, limit], |row| {
+    let rows = stmt.query_map(rusqlite::params![position, base_id, limit], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, u32>(1)?,

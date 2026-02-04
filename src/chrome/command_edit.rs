@@ -814,7 +814,17 @@ impl CommandEditState {
             if let Ok(store) = store.lock() {
                 if store.has_intelligence() {
                     let tokens = &self.tokens[..self.selected];
-                    let partial = &self.edit_buffer;
+
+                    // Only apply prefix filter when user has modified the text
+                    // If edit_buffer matches the original token, show all suggestions
+                    let current_token_text = self.tokens.get(self.selected)
+                        .map(|t| t.text.as_str())
+                        .unwrap_or("");
+                    let partial = if self.edit_buffer == current_token_text {
+                        "" // Show all suggestions - user hasn't started typing
+                    } else {
+                        &self.edit_buffer // Filter by what user is typing
+                    };
 
                     let intelligent_suggestions = store.intelligent_suggest(
                         tokens,
