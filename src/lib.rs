@@ -7,6 +7,7 @@
 // These modules are foundational; full usage comes in future implementation phases.
 #![allow(dead_code)]
 
+pub mod config;
 pub mod marker;
 pub mod pty;
 pub mod pump;
@@ -27,5 +28,6 @@ pub mod prompt;
 pub mod signals;
 mod suggest;
 
-// Re-export ChromeContext for use in app.rs
+// Re-export key types for convenience
 pub use chrome::ChromeContext;
+pub use config::Config;

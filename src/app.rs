@@ -52,6 +52,7 @@ use tracing::{debug, info, warn};
 use crate::chrome::panel::{Panel, PanelResult};
 use crate::chrome::tabbed_panel::TabbedPanel;
 use crate::chrome::{Chrome, ChromeContext, NotificationStyle, SizeCheckResult};
+use crate::config::Config;
 use crate::editor::{Editor, EditorResult};
 use crate::history_store::HistoryStore;
 use crate::prompt::WrashPrompt;
@@ -355,6 +356,7 @@ impl App {
     /// * `bashrc_path` - Path to the generated bashrc file
     /// * `session_token` - 16-byte session token for marker validation
     /// * `chrome_mode` - Chrome display mode (Headless or Full)
+    /// * `config` - Application configuration (theme, symbols)
     ///
     /// # Errors
     ///
@@ -368,6 +370,7 @@ impl App {
         bashrc_path: &str,
         session_token: [u8; 16],
         chrome_mode: ChromeMode,
+        config: &Config,
     ) -> Result<Self> {
         // Create terminal guard first (enables raw mode)
         let terminal_guard =
@@ -376,8 +379,8 @@ impl App {
         // Get terminal size for PTY
         let (cols, rows) = TerminalGuard::get_size().context("Failed to get terminal size")?;
 
-        // Create chrome layer
-        let chrome = Chrome::new(chrome_mode);
+        // Create chrome layer with theme and symbols from config
+        let chrome = Chrome::new(chrome_mode, config);
 
         // Spawn PTY with bash
         let pty = Pty::spawn(bashrc_path, cols, rows).context("Failed to spawn PTY")?;
@@ -1079,46 +1082,57 @@ impl App {
         cols: u16,
         panel_height: u16,
     ) -> Result<PanelResult> {
-        use ratatui_core::style::{Color, Style};
+        use ratatui_core::style::Style;
         use ratatui_core::widgets::Widget;
         use ratatui_widgets::block::Block;
         use ratatui_widgets::borders::Borders;
 
+        // Get theme for panel styling
+        let theme = self.chrome.theme();
+
+        // Track if we need to redraw - start with true for initial render
+        let mut needs_redraw = true;
+
         loop {
-            // Create buffer for panel area (starting at row 1, which is terminal row 1)
-            // We use row 0 in buffer coordinates, which maps to terminal row 1
-            let area = Rect::new(0, 0, cols, panel_height);
-            let mut buffer = Buffer::empty(area);
+            // Only render when needed (after input or on first draw)
+            if needs_redraw {
+                // Create buffer for panel area (starting at row 1, which is terminal row 1)
+                // We use row 0 in buffer coordinates, which maps to terminal row 1
+                let area = Rect::new(0, 0, cols, panel_height);
+                let mut buffer = Buffer::empty(area);
 
-            // Create a bordered block for the panel
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
-                .title(" Wrashpty Panel (Esc to close) ")
-                .title_style(Style::default().fg(Color::Yellow));
+                // Create a bordered block for the panel with theme colors
+                let block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme.panel_border))
+                    .title(" Wrashpty Panel (Esc to close) ")
+                    .title_style(Style::default().fg(theme.header_fg));
 
-            // Get the inner area for panel content
-            let inner_area = block.inner(area);
+                // Get the inner area for panel content
+                let inner_area = block.inner(area);
 
-            // Render the border
-            block.render(area, &mut buffer);
+                // Render the border
+                block.render(area, &mut buffer);
 
-            // Render panel content inside the border
-            panel.render(&mut buffer, inner_area);
+                // Render panel content inside the border
+                panel.render(&mut buffer, inner_area);
 
-            // Write buffer to terminal (row 0 in buffer = terminal row 1)
-            self.chrome
-                .render_panel_buffer(&buffer, area)
-                .context("Failed to render panel buffer")?;
+                // Write buffer to terminal (row 0 in buffer = terminal row 1)
+                self.chrome
+                    .render_panel_buffer(&buffer, area)
+                    .context("Failed to render panel buffer")?;
 
-            // Flush stdout to ensure panel is visible
-            {
-                use std::io::Write;
-                std::io::stdout().flush()?;
+                // Flush stdout to ensure panel is visible
+                {
+                    use std::io::Write;
+                    std::io::stdout().flush()?;
+                }
+
+                needs_redraw = false;
             }
 
-            // Poll for input with timeout - use a shorter timeout for responsiveness
-            match event::poll(std::time::Duration::from_millis(50)) {
+            // Poll for input with timeout - use a longer timeout since we don't redraw constantly
+            match event::poll(std::time::Duration::from_millis(100)) {
                 Ok(true) => {
                     match event::read() {
                         Ok(Event::Key(key)) => {
@@ -1131,7 +1145,8 @@ impl App {
 
                             match panel.handle_input(key) {
                                 PanelResult::Continue => {
-                                    // Keep looping
+                                    // Input processed, need to redraw
+                                    needs_redraw = true;
                                 }
                                 result => {
                                     debug!(result = ?result, "Panel returning result");
@@ -1145,7 +1160,7 @@ impl App {
                             return Ok(PanelResult::Dismiss);
                         }
                         Ok(_) => {
-                            // Mouse or other events - ignore
+                            // Mouse or other events - ignore but don't redraw
                         }
                         Err(e) => {
                             warn!("Error reading event: {}", e);
@@ -1154,7 +1169,7 @@ impl App {
                     }
                 }
                 Ok(false) => {
-                    // No event available, continue loop
+                    // No event available - don't redraw, just continue polling
                 }
                 Err(e) => {
                     warn!("Error polling for events: {}", e);
@@ -1184,7 +1199,7 @@ impl App {
     ///
     /// Returns an error if terminal operations fail.
     pub fn open_panel(&mut self) -> Result<()> {
-        let mut panel = TabbedPanel::new();
+        let mut panel = TabbedPanel::new(self.chrome.theme());
         panel.set_history_store(Arc::clone(&self.history_store));
         panel.load_context(&self.current_cwd);
 
@@ -1198,21 +1213,11 @@ impl App {
                 self.inject_pending_command()?;
             }
             PanelResult::InsertText(text) => {
-                // Cannot inject text directly into reedline buffer from outside,
-                // so we show a notification with the command for the user to copy
-                debug!(text = %text, "Panel requested text insertion, showing notification");
+                // Pre-fill the reedline buffer with the selected text
+                debug!(text = %text, "Panel requested text insertion, pre-filling buffer");
                 self.restore_after_panel()?;
-                // Truncate long commands for notification display (char-safe)
-                let display_text = if text.chars().count() > 60 {
-                    format!("{}...", text.chars().take(57).collect::<String>())
-                } else {
-                    text
-                };
-                self.chrome.notify(
-                    format!("Copy: {}", display_text),
-                    NotificationStyle::Info,
-                    Duration::from_secs(8),
-                );
+                // Insert the text into reedline's buffer before the next read_line call
+                self.editor.prefill_buffer(&text);
             }
             PanelResult::Dismiss | PanelResult::Continue => {
                 debug!("Panel dismissed, restoring chrome");
