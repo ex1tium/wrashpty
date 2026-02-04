@@ -6,7 +6,7 @@ use tracing::{debug, info};
 use super::error::CIError;
 
 /// Current schema version.
-pub const SCHEMA_VERSION: i32 = 1;
+pub const SCHEMA_VERSION: i32 = 2;
 
 /// Creates the Command Intelligence schema in the given database connection.
 ///
@@ -103,6 +103,9 @@ fn create_tables(conn: &Connection) -> Result<(), CIError> {
     create_sequence_tables(conn)?;
     create_pipe_tables(conn)?;
     create_flag_tables(conn)?;
+
+    // Command hierarchy table (unified learning)
+    create_hierarchy_table(conn)?;
 
     // Session tracking tables
     create_session_tables(conn)?;
@@ -309,6 +312,61 @@ fn create_flag_tables(conn: &Connection) -> Result<(), CIError> {
     )?;
 
     debug!("Created flag value tables");
+    Ok(())
+}
+
+/// Creates the command hierarchy table for unified position-aware learning.
+fn create_hierarchy_table(conn: &Connection) -> Result<(), CIError> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS ci_command_hierarchy (
+            id INTEGER PRIMARY KEY,
+
+            -- The token that appears at this position
+            token_id INTEGER NOT NULL,
+
+            -- Position in command (0 = base, 1 = subcommand, etc.)
+            position INTEGER NOT NULL,
+
+            -- Parent token ID (NULL for position 0)
+            parent_token_id INTEGER,
+
+            -- Base command ID (for fast filtering)
+            base_command_id INTEGER,
+
+            -- Statistics
+            frequency INTEGER DEFAULT 1,
+            success_count INTEGER DEFAULT 0,
+            last_seen INTEGER NOT NULL,
+
+            -- Semantic classification learned over time
+            role TEXT,
+
+            UNIQUE(token_id, position, parent_token_id, base_command_id),
+            FOREIGN KEY (token_id) REFERENCES ci_tokens(id),
+            FOREIGN KEY (parent_token_id) REFERENCES ci_tokens(id),
+            FOREIGN KEY (base_command_id) REFERENCES ci_tokens(id)
+        )",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_hierarchy_parent ON ci_command_hierarchy(parent_token_id, position)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_hierarchy_base ON ci_command_hierarchy(base_command_id, position)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_hierarchy_lookup ON ci_command_hierarchy(position, parent_token_id, base_command_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_hierarchy_freq ON ci_command_hierarchy(frequency DESC)",
+        [],
+    )?;
+
+    debug!("Created command hierarchy table");
     Ok(())
 }
 

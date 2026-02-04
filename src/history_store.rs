@@ -16,7 +16,7 @@ use thiserror::Error;
 use tracing::{debug, info, warn};
 
 use crate::intelligence::{
-    CommandIntelligence, Suggestion, build_context_with_mode,
+    CommandIntelligence, Suggestion, build_context,
     FileContext,
 };
 use crate::chrome::command_edit::CommandToken;
@@ -737,9 +737,10 @@ impl HistoryStore {
     }
 
     /// Gets intelligent suggestions for the given context.
+    /// Gets intelligent suggestions for the current editing context.
     ///
-    /// Returns suggestions from the intelligence engine, falling back to
-    /// empty results on error.
+    /// Uses the unified command hierarchy as the primary source, providing
+    /// position-aware token suggestions that naturally adapt to any command.
     ///
     /// # Arguments
     ///
@@ -756,38 +757,13 @@ impl HistoryStore {
         file_context: Option<FileContext>,
         last_command: Option<String>,
     ) -> Vec<Suggestion> {
-        self.intelligent_suggest_with_mode(tokens, partial, cwd, file_context, last_command, false)
-    }
-
-    /// Gets intelligent suggestions with token mode support.
-    ///
-    /// # Arguments
-    ///
-    /// * `tokens` - The tokens preceding the current edit position
-    /// * `partial` - The partial text being typed
-    /// * `cwd` - Current working directory
-    /// * `file_context` - File context if in file browser
-    /// * `last_command` - Last executed command for transition suggestions
-    /// * `token_mode` - When true, only return individual token suggestions
-    ///   (from learned sequences, flag values, etc.). When false, may return
-    ///   full command completions (from templates, fuzzy search).
-    pub fn intelligent_suggest_with_mode(
-        &self,
-        tokens: &[CommandToken],
-        partial: &str,
-        cwd: Option<PathBuf>,
-        file_context: Option<FileContext>,
-        last_command: Option<String>,
-        token_mode: bool,
-    ) -> Vec<Suggestion> {
         let Some(ref ci) = self.intelligence else {
             return Vec::new();
         };
 
-        // Build the suggestion context with token mode
         let session = ci.current_session().cloned();
-        let context = build_context_with_mode(
-            tokens, partial, cwd, file_context, session, last_command, token_mode
+        let context = build_context(
+            tokens, partial, cwd, file_context, session, last_command
         );
 
         ci.suggest(&context, 20)
