@@ -531,7 +531,7 @@ mod tests {
         ).unwrap();
 
         // Create intelligence schema
-        super::super::schema::create_schema(&conn).unwrap();
+        super::super::db_schema::create_schema(&conn).unwrap();
 
         conn
     }

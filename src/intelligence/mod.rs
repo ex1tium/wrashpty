@@ -31,6 +31,7 @@
 //! ```
 
 pub mod bootstrap;
+pub mod db_schema;
 pub mod error;
 pub mod schema;
 pub mod sync;
@@ -85,7 +86,7 @@ impl CommandIntelligence {
     /// This initializes the schema if needed and loads the last sync state.
     pub fn new(conn: Connection) -> Result<Self, CIError> {
         // Create schema if needed
-        schema::create_schema(&conn)?;
+        db_schema::create_schema(&conn)?;
 
         // Bootstrap command hierarchy if empty (first run)
         bootstrap::bootstrap_if_empty(&conn)?;
