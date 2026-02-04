@@ -9,25 +9,36 @@ use tracing::{debug, info};
 
 use super::error::CIError;
 
-/// Seeds the command hierarchy if the database is empty.
+/// Seeds the command hierarchy, merging with existing data.
 ///
 /// This should be called during CommandIntelligence initialization.
-/// It only runs if ci_command_hierarchy is empty.
+/// Uses INSERT OR IGNORE to merge bootstrap data with existing learned data
+/// without overwriting user's actual usage patterns.
 pub fn bootstrap_if_empty(conn: &Connection) -> Result<(), CIError> {
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM ci_command_hierarchy",
-        [],
-        |row| row.get(0),
-    )?;
+    // Check if bootstrap has already been run by looking for a marker in sync_state
+    let bootstrapped: bool = conn
+        .query_row(
+            "SELECT value = 'true' FROM ci_sync_state WHERE key = 'bootstrap.completed'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
 
-    if count == 0 {
-        info!("Bootstrapping command hierarchy with initial knowledge");
-        seed_command_knowledge(conn)?;
-        info!("Bootstrap completed");
-    } else {
-        debug!("Command hierarchy already populated, skipping bootstrap");
+    if bootstrapped {
+        debug!("Bootstrap already completed, skipping");
+        return Ok(());
     }
 
+    info!("Bootstrapping command hierarchy with initial knowledge");
+    seed_command_knowledge(conn)?;
+
+    // Mark bootstrap as completed
+    conn.execute(
+        "INSERT OR REPLACE INTO ci_sync_state (key, value) VALUES ('bootstrap.completed', 'true')",
+        [],
+    )?;
+
+    info!("Bootstrap completed");
     Ok(())
 }
 
@@ -311,31 +322,65 @@ mod tests {
     }
 
     #[test]
-    fn test_bootstrap_skips_if_populated() {
+    fn test_bootstrap_skips_if_already_completed() {
+        let conn = setup_test_db();
+
+        // Run bootstrap first time
+        bootstrap_if_empty(&conn).unwrap();
+
+        let count_after_first: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM ci_command_hierarchy",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert!(count_after_first > 0);
+
+        // Run bootstrap again - should skip
+        bootstrap_if_empty(&conn).unwrap();
+
+        // Count should be the same (no duplicate entries)
+        let count_after_second: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM ci_command_hierarchy",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count_after_first, count_after_second);
+    }
+
+    #[test]
+    fn test_bootstrap_merges_with_existing_data() {
         let conn = setup_test_db();
         let now = chrono::Utc::now().timestamp();
 
-        // Manually add one entry
+        // Manually add one learned entry
         conn.execute(
-            "INSERT INTO ci_tokens (id, text, token_type, first_seen, last_seen) VALUES (1, 'test', 'Command', ?1, ?1)",
+            "INSERT INTO ci_tokens (id, text, token_type, first_seen, last_seen) VALUES (1, 'mycommand', 'Command', ?1, ?1)",
             [now],
         ).unwrap();
         conn.execute(
             "INSERT INTO ci_command_hierarchy (token_id, position, base_command_id, frequency, success_count, last_seen, role)
-             VALUES (1, 0, 1, 1, 1, ?1, 'command')",
+             VALUES (1, 0, 1, 100, 95, ?1, 'command')",
             [now],
         ).unwrap();
 
-        // Bootstrap should skip
+        // Bootstrap should merge, not replace
         bootstrap_if_empty(&conn).unwrap();
 
-        // Should still have only 1 entry
+        // Should have original entry plus bootstrapped entries
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM ci_command_hierarchy",
             [],
             |row| row.get(0),
         ).unwrap();
-        assert_eq!(count, 1);
+        assert!(count > 1, "Should have bootstrap data plus original entry");
+
+        // Original entry should still exist with its frequency
+        let original_freq: i64 = conn.query_row(
+            "SELECT frequency FROM ci_command_hierarchy WHERE token_id = 1",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(original_freq, 100, "Original frequency should be preserved");
     }
 
     #[test]
