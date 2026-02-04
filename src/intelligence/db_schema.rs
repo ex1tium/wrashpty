@@ -6,7 +6,7 @@ use tracing::{debug, info};
 use super::error::CIError;
 
 /// Current schema version.
-pub const SCHEMA_VERSION: i32 = 2;
+pub const SCHEMA_VERSION: i32 = 1;
 
 /// Creates the Command Intelligence schema in the given database connection.
 ///
@@ -655,7 +655,6 @@ pub fn reset_database(conn: &Connection) -> Result<(), CIError> {
         "ci_template_values",
         "ci_transitions",
         "ci_sequences",
-        "ci_ngrams", // Legacy table from schema v1
         "ci_pipe_chains",
         "ci_flag_values",
         "ci_command_hierarchy",
