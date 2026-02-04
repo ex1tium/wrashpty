@@ -80,8 +80,7 @@ impl FileBrowserPanel {
             if !entry.is_dir {
                 debug!(file = %entry.name, "Entering file edit mode");
                 let filepath = shell_quote(&entry.path.to_string_lossy());
-                let mut state = CommandEditState::for_file(&entry.name, &filepath);
-                state.update_suggestions_for_file(&entry.name);
+                let state = CommandEditState::for_file(&entry.name, &filepath);
                 self.edit_filename = Some(entry.name);
                 self.edit_mode = Some(state);
             }
@@ -225,13 +224,13 @@ impl FileBrowserPanel {
         ])
         .split(area);
 
-        // Title with filename and suggestion count
+        // Title with filename and suggestion count (only show count for editable tokens)
         let filename = self.edit_filename.as_deref().unwrap_or("file");
         let mut title_spans = vec![
             Span::styled(" Edit Command for: ", Style::default().fg(self.theme.header_fg)),
             Span::styled(filename, Style::default().fg(self.theme.text_highlight).add_modifier(Modifier::BOLD)),
         ];
-        if !edit_state.suggestions.is_empty() {
+        if !edit_state.is_selected_locked() && !edit_state.suggestions.is_empty() {
             title_spans.push(Span::styled(
                 format!(" [{} suggestions]", edit_state.suggestions.len()),
                 Style::default().fg(self.theme.text_secondary),
@@ -259,14 +258,16 @@ impl FileBrowserPanel {
         }
         selected_x_offset += 1 + 1;
 
-        // Previous suggestion row
-        if let Some(prev_sugg) = edit_state.prev_suggestion() {
-            let padding = " ".repeat(selected_x_offset);
-            let prev_line = Line::from(vec![
-                Span::styled(padding, Style::default()),
-                Span::styled(prev_sugg, Style::default().fg(self.theme.text_secondary)),
-            ]);
-            Paragraph::new(prev_line).render(chunks[2], buffer);
+        // Previous suggestion row (only show for editable tokens)
+        if !edit_state.is_selected_locked() {
+            if let Some(prev_sugg) = edit_state.prev_suggestion() {
+                let padding = " ".repeat(selected_x_offset);
+                let prev_line = Line::from(vec![
+                    Span::styled(padding, Style::default()),
+                    Span::styled(prev_sugg, Style::default().fg(self.theme.text_secondary)),
+                ]);
+                Paragraph::new(prev_line).render(chunks[2], buffer);
+            }
         }
 
         // Current token strip with brackets and superscript numbers
@@ -326,14 +327,16 @@ impl FileBrowserPanel {
         let token_line = Line::from(spans);
         Paragraph::new(token_line).render(chunks[3], buffer);
 
-        // Next suggestion row
-        if let Some(next_sugg) = edit_state.next_suggestion() {
-            let padding = " ".repeat(selected_x_offset);
-            let next_line = Line::from(vec![
-                Span::styled(padding, Style::default()),
-                Span::styled(next_sugg, Style::default().fg(self.theme.text_secondary)),
-            ]);
-            Paragraph::new(next_line).render(chunks[4], buffer);
+        // Next suggestion row (only show for editable tokens)
+        if !edit_state.is_selected_locked() {
+            if let Some(next_sugg) = edit_state.next_suggestion() {
+                let padding = " ".repeat(selected_x_offset);
+                let next_line = Line::from(vec![
+                    Span::styled(padding, Style::default()),
+                    Span::styled(next_sugg, Style::default().fg(self.theme.text_secondary)),
+                ]);
+                Paragraph::new(next_line).render(chunks[4], buffer);
+            }
         }
 
         // Edit input line with type hint
@@ -405,7 +408,6 @@ impl FileBrowserPanel {
     /// Handles input in edit mode - matches history browser pattern.
     fn handle_edit_input(&mut self, key: KeyEvent) -> Option<PanelResult> {
         let edit_state = self.edit_mode.as_mut()?;
-        let filename = self.edit_filename.clone();
 
         // Handle Ctrl+key commands
         if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -416,23 +418,17 @@ impl FileBrowserPanel {
                 }
                 KeyCode::Char('d') => {
                     edit_state.delete_token();
-                    if let Some(ref fname) = filename {
-                        edit_state.update_suggestions_for_file(fname);
-                    }
+                    edit_state.update_suggestions();
                     return Some(PanelResult::Continue);
                 }
                 KeyCode::Char('a') => {
                     edit_state.insert_token_after();
-                    if let Some(ref fname) = filename {
-                        edit_state.update_suggestions_for_file(fname);
-                    }
+                    edit_state.update_suggestions();
                     return Some(PanelResult::Continue);
                 }
                 KeyCode::Char('i') => {
                     edit_state.insert_token_before();
-                    if let Some(ref fname) = filename {
-                        edit_state.update_suggestions_for_file(fname);
-                    }
+                    edit_state.update_suggestions();
                     return Some(PanelResult::Continue);
                 }
                 _ => {}
@@ -446,50 +442,44 @@ impl FileBrowserPanel {
             }
             KeyCode::Enter => {
                 let command = edit_state.build_command();
+                debug!(
+                    command = %command,
+                    edit_buffer = %edit_state.edit_buffer,
+                    tokens = ?edit_state.tokens.iter().map(|t| &t.text).collect::<Vec<_>>(),
+                    "File browser executing command"
+                );
                 self.exit_edit_mode();
                 Some(PanelResult::Execute(command))
             }
             KeyCode::Left => {
                 edit_state.prev();
-                if let Some(ref fname) = filename {
-                    edit_state.update_suggestions_for_file(fname);
-                }
+                edit_state.update_suggestions();
                 Some(PanelResult::Continue)
             }
             KeyCode::Right => {
                 edit_state.next();
-                if let Some(ref fname) = filename {
-                    edit_state.update_suggestions_for_file(fname);
-                }
+                edit_state.update_suggestions();
                 Some(PanelResult::Continue)
             }
             KeyCode::Tab => {
                 edit_state.next();
-                if let Some(ref fname) = filename {
-                    edit_state.update_suggestions_for_file(fname);
-                }
+                edit_state.update_suggestions();
                 Some(PanelResult::Continue)
             }
             KeyCode::BackTab => {
                 edit_state.prev();
-                if let Some(ref fname) = filename {
-                    edit_state.update_suggestions_for_file(fname);
-                }
+                edit_state.update_suggestions();
                 Some(PanelResult::Continue)
             }
             KeyCode::Home => {
                 edit_state.select(0);
-                if let Some(ref fname) = filename {
-                    edit_state.update_suggestions_for_file(fname);
-                }
+                edit_state.update_suggestions();
                 Some(PanelResult::Continue)
             }
             KeyCode::End => {
                 let last = edit_state.token_count().saturating_sub(1);
                 edit_state.select(last);
-                if let Some(ref fname) = filename {
-                    edit_state.update_suggestions_for_file(fname);
-                }
+                edit_state.update_suggestions();
                 Some(PanelResult::Continue)
             }
             KeyCode::Up => {
@@ -506,9 +496,7 @@ impl FileBrowserPanel {
                 // Save current and insert new token after
                 if !edit_state.is_selected_locked() {
                     edit_state.insert_token_after();
-                    if let Some(ref fname) = filename {
-                        edit_state.update_suggestions_for_file(fname);
-                    }
+                    edit_state.update_suggestions();
                 }
                 Some(PanelResult::Continue)
             }

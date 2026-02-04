@@ -16,518 +16,10 @@ use ratatui_core::widgets::Widget;
 use ratatui_widgets::paragraph::Paragraph;
 use tracing::{debug, warn};
 
-use super::command_knowledge::COMMAND_KNOWLEDGE;
+use super::command_edit::{superscript_digit, token_type_style, CommandEditState};
 use super::panel::{Panel, PanelResult};
 use super::theme::Theme;
 use crate::history_store::{FilterMode, HistoryRecord, HistoryStore, SortMode};
-
-/// Token type for semantic classification.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum TokenType {
-    Command,    // First token (ls, git, etc.)
-    Subcommand, // Second token for compound commands (checkout, push)
-    Flag,       // Starts with - or --
-    Path,       // Contains / or starts with . or ~
-    Url,        // Contains :// or looks like git@...
-    Argument,   // Generic argument
-}
-
-/// Quote style for tokens.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum QuoteStyle {
-    None,
-    Single, // 'text'
-    Double, // "text"
-}
-
-/// A token from a shell command (word, flag, or quoted string).
-#[derive(Debug, Clone)]
-struct CommandToken {
-    /// The text content of this token.
-    text: String,
-    /// Semantic type of this token.
-    token_type: TokenType,
-}
-
-/// Returns a superscript digit for display (¹²³...²⁰).
-fn superscript_digit(n: usize) -> &'static str {
-    const SUPERSCRIPTS: [&str; 20] = [
-        "¹", "²", "³", "⁴", "⁵", "⁶", "⁷", "⁸", "⁹", "¹⁰",
-        "¹¹", "¹²", "¹³", "¹⁴", "¹⁵", "¹⁶", "¹⁷", "¹⁸", "¹⁹", "²⁰",
-    ];
-    if n >= 1 && n <= 20 {
-        SUPERSCRIPTS[n - 1]
-    } else {
-        "·" // Fallback for >20 tokens
-    }
-}
-
-/// Classifies a token based on its content and position.
-fn classify_token(text: &str, position: usize, prev_token: Option<&str>) -> TokenType {
-    if position == 0 {
-        return TokenType::Command;
-    }
-    if text.starts_with('-') {
-        return TokenType::Flag;
-    }
-    if text.contains("://") || text.starts_with("git@") {
-        return TokenType::Url;
-    }
-    if text.contains('/') || text.starts_with('.') || text.starts_with('~') {
-        return TokenType::Path;
-    }
-    // Check for subcommand (second token after known compound commands)
-    if position == 1 {
-        if let Some(cmd) = prev_token {
-            if matches!(cmd, "git" | "docker" | "kubectl" | "cargo" | "npm" | "yarn" | "systemctl" | "journalctl") {
-                return TokenType::Subcommand;
-            }
-        }
-    }
-    TokenType::Argument
-}
-
-/// Returns the style for a token based on its type and theme.
-fn token_type_style(token_type: TokenType, theme: &Theme) -> Style {
-    match token_type {
-        TokenType::Command => Style::default().fg(theme.semantic_success).add_modifier(Modifier::BOLD),
-        TokenType::Subcommand => Style::default().fg(theme.header_fg),
-        TokenType::Flag => Style::default().fg(theme.text_highlight),
-        TokenType::Path => Style::default().fg(theme.semantic_info),
-        TokenType::Url => Style::default().fg(theme.git_fg),
-        TokenType::Argument => Style::default().fg(theme.text_primary),
-    }
-}
-
-/// Parses quote style from a token.
-fn parse_quotes(text: &str) -> (String, QuoteStyle) {
-    if text.starts_with('\'') && text.ends_with('\'') && text.len() >= 2 {
-        (text[1..text.len() - 1].to_string(), QuoteStyle::Single)
-    } else if text.starts_with('"') && text.ends_with('"') && text.len() >= 2 {
-        (text[1..text.len() - 1].to_string(), QuoteStyle::Double)
-    } else {
-        (text.to_string(), QuoteStyle::None)
-    }
-}
-
-/// Applies a quote style to text.
-fn apply_quotes(text: &str, style: QuoteStyle) -> String {
-    match style {
-        QuoteStyle::None => text.to_string(),
-        QuoteStyle::Single => format!("'{}'", text),
-        QuoteStyle::Double => format!("\"{}\"", text),
-    }
-}
-
-/// Checks if a command is potentially dangerous.
-fn is_dangerous_command(command: &str) -> Option<&'static str> {
-    let lower = command.to_lowercase();
-
-    if lower.contains("rm -rf") || lower.contains("rm -fr") {
-        return Some("Recursive force delete");
-    }
-    if lower.contains("dd if=") && lower.contains("of=/dev/") {
-        return Some("Direct disk write");
-    }
-    if lower.contains("mkfs") {
-        return Some("Filesystem format");
-    }
-    if lower.contains("> /dev/sd") || lower.contains(">/dev/sd") {
-        return Some("Direct device write");
-    }
-    if lower.contains("chmod -r 777") || lower.contains("chmod 777 -r") {
-        return Some("Overly permissive chmod");
-    }
-    if lower.contains(":(){ :|:& };:") {
-        return Some("Fork bomb");
-    }
-
-    None
-}
-
-/// State for edit mode.
-#[derive(Debug, Clone)]
-struct EditModeState {
-    /// The original command being edited.
-    original: String,
-    /// Tokenized parts of the command.
-    tokens: Vec<CommandToken>,
-    /// Index of the currently selected token (0-based).
-    selected: usize,
-    /// Current edit buffer for the selected token.
-    edit_buffer: String,
-    /// Whether we're actively editing the current token.
-    editing: bool,
-    /// Undo stack for reverting changes.
-    undo_stack: Vec<Vec<CommandToken>>,
-    /// Pending command awaiting confirmation (for dangerous commands).
-    pending_confirm: Option<String>,
-    /// Warning message for dangerous command.
-    danger_warning: Option<&'static str>,
-    /// Skip dangerous command checks (toggled with Ctrl+!)
-    skip_danger_check: bool,
-    /// Current suggestions for the selected token position.
-    current_suggestions: Vec<String>,
-    /// Index into current_suggestions (None = using custom/typed value).
-    suggestion_index: Option<usize>,
-}
-
-impl EditModeState {
-    /// Creates a new edit mode state from a command string.
-    fn new(command: &str) -> Self {
-        let mut tokens = tokenize_command(command);
-        // Ensure tokens is never empty to prevent panics in token-indexing methods
-        if tokens.is_empty() {
-            tokens.push(CommandToken {
-                text: String::new(),
-                token_type: TokenType::Command,
-            });
-        }
-        let edit_buffer = tokens[0].text.clone();
-        Self {
-            original: command.to_string(),
-            tokens,
-            selected: 0,
-            edit_buffer,
-            editing: false,
-            undo_stack: Vec::new(),
-            pending_confirm: None,
-            danger_warning: None,
-            skip_danger_check: false,
-            current_suggestions: Vec::new(),
-            suggestion_index: None,
-        }
-    }
-
-    /// Returns the number of tokens.
-    fn token_count(&self) -> usize {
-        self.tokens.len()
-    }
-
-    /// Selects a token by index.
-    fn select(&mut self, index: usize) {
-        if index < self.tokens.len() {
-            // Save current edit
-            if let Some(token) = self.tokens.get_mut(self.selected) {
-                token.text = self.edit_buffer.clone();
-            }
-            // Reclassify after saving (text change may affect token types)
-            self.reclassify_tokens();
-            self.selected = index;
-            self.edit_buffer = self.tokens[index].text.clone();
-            self.editing = true;
-        }
-    }
-
-    /// Moves to the next token.
-    fn next(&mut self) {
-        if self.selected + 1 < self.tokens.len() {
-            self.select(self.selected + 1);
-        }
-    }
-
-    /// Moves to the previous token.
-    fn prev(&mut self) {
-        if self.selected > 0 {
-            self.select(self.selected - 1);
-        }
-    }
-
-    /// Builds the final command from the edited tokens.
-    fn build_command(&mut self) -> String {
-        // Save current edit buffer
-        if let Some(token) = self.tokens.get_mut(self.selected) {
-            token.text = self.edit_buffer.clone();
-        }
-        self.tokens.iter().map(|t| t.text.as_str()).collect::<Vec<_>>().join(" ")
-    }
-
-    /// Saves current state to undo stack.
-    fn save_undo(&mut self) {
-        self.undo_stack.push(self.tokens.clone());
-        // Limit stack size
-        if self.undo_stack.len() > 50 {
-            self.undo_stack.remove(0);
-        }
-    }
-
-    /// Restores previous state from undo stack.
-    fn undo(&mut self) {
-        if let Some(prev) = self.undo_stack.pop() {
-            self.tokens = prev;
-            self.selected = self.selected.min(self.tokens.len().saturating_sub(1));
-            self.edit_buffer = self.tokens.get(self.selected)
-                .map(|t| t.text.clone())
-                .unwrap_or_default();
-            self.reclassify_tokens();
-        }
-    }
-
-    /// Deletes the currently selected token.
-    fn delete_token(&mut self) {
-        if self.tokens.len() <= 1 {
-            return; // Don't delete last token
-        }
-        self.save_undo();
-        self.tokens.remove(self.selected);
-        if self.selected >= self.tokens.len() {
-            self.selected = self.tokens.len() - 1;
-        }
-        self.edit_buffer = self.tokens[self.selected].text.clone();
-        self.reclassify_tokens();
-    }
-
-    /// Inserts a new token after the current one.
-    fn insert_token_after(&mut self) {
-        self.save_undo();
-        // Save current edit first
-        if let Some(token) = self.tokens.get_mut(self.selected) {
-            token.text = self.edit_buffer.clone();
-        }
-        let new_token = CommandToken {
-            text: String::new(),
-            token_type: TokenType::Argument,
-        };
-        self.tokens.insert(self.selected + 1, new_token);
-        self.selected += 1;
-        self.edit_buffer.clear();
-        self.editing = true;
-        self.reclassify_tokens();
-    }
-
-    /// Inserts a new token before the current one.
-    fn insert_token_before(&mut self) {
-        self.save_undo();
-        // Save current edit first
-        if let Some(token) = self.tokens.get_mut(self.selected) {
-            token.text = self.edit_buffer.clone();
-        }
-        let new_token = CommandToken {
-            text: String::new(),
-            token_type: TokenType::Argument,
-        };
-        self.tokens.insert(self.selected, new_token);
-        self.edit_buffer.clear();
-        self.editing = true;
-        self.reclassify_tokens();
-    }
-
-    /// Cycles through quote styles for current token.
-    fn cycle_quote(&mut self) {
-        let (inner, current_style) = parse_quotes(&self.edit_buffer);
-
-        let new_style = match current_style {
-            QuoteStyle::None => QuoteStyle::Single,
-            QuoteStyle::Single => QuoteStyle::Double,
-            QuoteStyle::Double => QuoteStyle::None,
-        };
-
-        self.edit_buffer = apply_quotes(&inner, new_style);
-    }
-
-    /// Clears any pending confirmation state.
-    fn clear_confirm(&mut self) {
-        self.pending_confirm = None;
-        self.danger_warning = None;
-    }
-
-    /// Reclassifies all tokens based on their current text and positions.
-    ///
-    /// This should be called after any mutation that changes token positions
-    /// (delete, insert) or token text (editing), to ensure token_type stays
-    /// accurate for UI hints and styling.
-    fn reclassify_tokens(&mut self) {
-        for i in 0..self.tokens.len() {
-            let prev_text = if i > 0 {
-                Some(self.tokens[i - 1].text.as_str())
-            } else {
-                None
-            };
-            self.tokens[i].token_type = classify_token(&self.tokens[i].text, i, prev_text);
-        }
-    }
-
-    /// Returns true if waiting for confirmation.
-    fn is_confirming(&self) -> bool {
-        self.pending_confirm.is_some()
-    }
-
-    /// Returns true if there are any unsaved changes.
-    fn has_changes(&self) -> bool {
-        // Build current command to compare
-        let current: String = self.tokens.iter().enumerate().map(|(i, t)| {
-            if i == self.selected {
-                self.edit_buffer.clone()
-            } else {
-                t.text.clone()
-            }
-        }).collect::<Vec<_>>().join(" ");
-        current != self.original
-    }
-
-    /// Reverts all changes back to the original command.
-    fn revert(&mut self) {
-        self.tokens = tokenize_command(&self.original);
-        self.selected = 0;
-        self.edit_buffer = self.tokens.first().map(|t| t.text.clone()).unwrap_or_default();
-        self.undo_stack.clear();
-    }
-
-    /// Updates suggestions for the currently selected token position.
-    fn update_suggestions(&mut self, history_store: Option<&HistoryStore>) {
-        // Get preceding tokens
-        let preceding: Vec<&str> = self.tokens[..self.selected]
-            .iter()
-            .map(|t| t.text.as_str())
-            .collect();
-
-        // Get static suggestions from command knowledge
-        let static_suggestions: Vec<String> = COMMAND_KNOWLEDGE
-            .suggestions_for_position(&preceding)
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-
-        // Get history-based suggestions
-        let mut history_suggestions = Vec::new();
-        if let Some(store) = history_store {
-            if let Ok(suggestions) = store.tokens_at_position(&preceding, 20) {
-                history_suggestions = suggestions;
-            }
-        }
-
-        // Merge suggestions: history first (more relevant), then static
-        let mut merged = Vec::new();
-        for hist_sugg in &history_suggestions {
-            if !merged.contains(hist_sugg) {
-                merged.push(hist_sugg.clone());
-            }
-        }
-        for static_sugg in &static_suggestions {
-            if !merged.contains(static_sugg) {
-                merged.push(static_sugg.clone());
-            }
-        }
-
-        self.current_suggestions = merged;
-        self.suggestion_index = None;
-    }
-
-    /// Cycles through suggestions in the given direction.
-    ///
-    /// # Arguments
-    ///
-    /// * `direction` - Positive for forward (down), negative for backward (up)
-    fn cycle_suggestion(&mut self, direction: i32) {
-        if self.current_suggestions.is_empty() {
-            return;
-        }
-
-        let new_index = match self.suggestion_index {
-            None => {
-                // First press: enter suggestion mode
-                if direction > 0 {
-                    0
-                } else {
-                    self.current_suggestions.len() - 1
-                }
-            }
-            Some(idx) => {
-                // Cycle with wrapping
-                let len = self.current_suggestions.len();
-                if direction > 0 {
-                    (idx + 1) % len
-                } else {
-                    (idx + len - 1) % len
-                }
-            }
-        };
-
-        self.suggestion_index = Some(new_index);
-        self.edit_buffer = self.current_suggestions[new_index].clone();
-    }
-
-    /// Returns the previous suggestion (for three-row display).
-    fn prev_suggestion(&self) -> Option<&str> {
-        if self.current_suggestions.is_empty() {
-            return None;
-        }
-        let idx = self.suggestion_index.unwrap_or(0);
-        let len = self.current_suggestions.len();
-        let prev_idx = if idx == 0 { len - 1 } else { idx - 1 };
-        self.current_suggestions.get(prev_idx).map(|s| s.as_str())
-    }
-
-    /// Returns the next suggestion (for three-row display).
-    fn next_suggestion(&self) -> Option<&str> {
-        if self.current_suggestions.is_empty() {
-            return None;
-        }
-        let idx = self.suggestion_index.unwrap_or(0);
-        let len = self.current_suggestions.len();
-        let next_idx = (idx + 1) % len;
-        self.current_suggestions.get(next_idx).map(|s| s.as_str())
-    }
-}
-
-/// Tokenizes a shell command into words, respecting quotes.
-fn tokenize_command(command: &str) -> Vec<CommandToken> {
-    let mut raw_tokens: Vec<String> = Vec::new();
-    let mut current = String::new();
-    let mut in_single_quote = false;
-    let mut in_double_quote = false;
-    let mut escape_next = false;
-
-    for ch in command.chars() {
-        if escape_next {
-            current.push(ch);
-            escape_next = false;
-            continue;
-        }
-
-        match ch {
-            '\\' if !in_single_quote => {
-                current.push(ch);
-                escape_next = true;
-            }
-            '\'' if !in_double_quote => {
-                current.push(ch);
-                in_single_quote = !in_single_quote;
-            }
-            '"' if !in_single_quote => {
-                current.push(ch);
-                in_double_quote = !in_double_quote;
-            }
-            ' ' | '\t' if !in_single_quote && !in_double_quote => {
-                if !current.is_empty() {
-                    raw_tokens.push(current.clone());
-                    current.clear();
-                }
-            }
-            _ => {
-                current.push(ch);
-            }
-        }
-    }
-
-    // Don't forget the last token
-    if !current.is_empty() {
-        raw_tokens.push(current);
-    }
-
-    // Now classify each token
-    let mut tokens = Vec::new();
-    for (i, text) in raw_tokens.iter().enumerate() {
-        let prev = if i > 0 { Some(raw_tokens[i - 1].as_str()) } else { None };
-        let token_type = classify_token(text, i, prev);
-        tokens.push(CommandToken {
-            text: text.clone(),
-            token_type,
-        });
-    }
-
-    tokens
-}
 
 /// Column widths for the table view
 struct ColumnWidths {
@@ -571,7 +63,7 @@ pub struct HistoryBrowserPanel {
     /// Reference to the history store.
     history_store: Option<Arc<Mutex<HistoryStore>>>,
     /// Edit mode state (None when not in edit mode).
-    edit_mode: Option<EditModeState>,
+    edit_mode: Option<CommandEditState>,
     /// Theme for rendering.
     theme: &'static Theme,
 }
@@ -678,12 +170,23 @@ impl HistoryBrowserPanel {
     fn enter_edit_mode(&mut self) {
         if let Some(cmd) = self.selected_command() {
             debug!(command = %cmd, "Entering edit mode");
-            let mut edit_state = EditModeState::new(cmd);
+            let mut edit_state = CommandEditState::from_command(cmd);
 
-            // Initialize suggestions with history store
-            let history_store = self.history_store.as_ref().and_then(|s| s.lock().ok());
-            edit_state.update_suggestions(history_store.as_deref());
-            drop(history_store);
+            // Get suggestions from command knowledge
+            edit_state.update_suggestions();
+
+            // Add history-based suggestions
+            if let Some(store) = &self.history_store {
+                if let Ok(store) = store.lock() {
+                    let preceding: Vec<&str> = edit_state.tokens[..edit_state.selected]
+                        .iter()
+                        .map(|t| t.text.as_str())
+                        .collect();
+                    if let Ok(history_suggestions) = store.tokens_at_position(&preceding, 20) {
+                        edit_state.add_suggestions(history_suggestions);
+                    }
+                }
+            }
 
             self.edit_mode = Some(edit_state);
         }
@@ -699,6 +202,27 @@ impl HistoryBrowserPanel {
         self.edit_mode.is_some()
     }
 
+    /// Updates suggestions with history data after navigation.
+    fn update_suggestions_with_history(&mut self) {
+        let Some(edit_state) = &mut self.edit_mode else { return };
+
+        // First update from command knowledge
+        edit_state.update_suggestions();
+
+        // Then add history-based suggestions
+        if let Some(store) = &self.history_store {
+            if let Ok(store) = store.lock() {
+                let preceding: Vec<&str> = edit_state.tokens[..edit_state.selected]
+                    .iter()
+                    .map(|t| t.text.as_str())
+                    .collect();
+                if let Ok(history_suggestions) = store.tokens_at_position(&preceding, 20) {
+                    edit_state.add_suggestions(history_suggestions);
+                }
+            }
+        }
+    }
+
     /// Renders the edit mode UI with three-row depth display.
     fn render_edit_mode(&self, buffer: &mut Buffer, area: Rect) {
         let Some(edit_state) = &self.edit_mode else { return };
@@ -709,30 +233,29 @@ impl HistoryBrowserPanel {
             return;
         }
 
-        // Layout with three-row depth UI and spacing - 15 rows total
+        // Layout with three-row depth UI - 12 rows to match file browser
         let chunks = Layout::vertical([
-            Constraint::Length(1), // 0: Title
-            Constraint::Length(1), // 1: Original command (dim)
-            Constraint::Length(1), // 2: Empty line (spacer above token block)
-            Constraint::Length(1), // 3: Previous suggestion row (dim)
-            Constraint::Length(1), // 4: Current token strip (highlighted)
-            Constraint::Length(1), // 5: Next suggestion row (dim)
-            Constraint::Length(1), // 6: Empty line (spacer below token block)
-            Constraint::Length(1), // 7: Edit input line
-            Constraint::Length(1), // 8: Empty line (spacer before result)
-            Constraint::Length(1), // 9: Result preview
-            Constraint::Min(1),    // 10: Flexible spacer
-            Constraint::Length(1), // 11: Border
-            Constraint::Length(1), // 12: Keybind hints
+            Constraint::Length(1), // 0: Title with original command
+            Constraint::Length(1), // 1: Separator
+            Constraint::Length(1), // 2: Previous suggestion row (dim)
+            Constraint::Length(1), // 3: Current token strip (highlighted)
+            Constraint::Length(1), // 4: Next suggestion row (dim)
+            Constraint::Length(1), // 5: Spacer
+            Constraint::Length(1), // 6: Edit input line
+            Constraint::Length(1), // 7: Spacer before result
+            Constraint::Length(1), // 8: Result preview
+            Constraint::Min(1),    // 9: Flexible spacer
+            Constraint::Length(1), // 10: Border
+            Constraint::Length(1), // 11: Keybind hints
         ])
         .split(area);
 
-        // Title with optional unsafe mode indicator and suggestion count
+        // Title with suggestion count and unsafe indicator
         let mut title_spans = vec![
             Span::styled(" Edit Command", Style::default().fg(self.theme.header_fg).add_modifier(Modifier::BOLD)),
         ];
-        if !edit_state.current_suggestions.is_empty() {
-            let sugg_count = format!(" [{} suggestions]", edit_state.current_suggestions.len());
+        if !edit_state.suggestions.is_empty() {
+            let sugg_count = format!(" [{} suggestions]", edit_state.suggestions.len());
             title_spans.push(Span::styled(sugg_count, Style::default().fg(self.theme.text_secondary)));
         }
         if edit_state.skip_danger_check {
@@ -741,24 +264,34 @@ impl HistoryBrowserPanel {
         let title = Line::from(title_spans);
         Paragraph::new(title).render(chunks[0], buffer);
 
-        // Original command (dimmed reference)
-        let original_line = Line::from(vec![
-            Span::styled(" Original: ", Style::default().fg(self.theme.text_secondary)),
-            Span::styled(&edit_state.original, Style::default().fg(self.theme.text_secondary)),
-        ]);
-        Paragraph::new(original_line).render(chunks[1], buffer);
+        // Separator with original command hint
+        let border_style = Style::default().fg(self.theme.panel_border);
+        let orig_hint = format!(" Original: {} ", edit_state.original);
+        let hint_len = orig_hint.chars().count().min(area.width as usize - 4);
+        let truncated_hint: String = orig_hint.chars().take(hint_len).collect();
+
+        for x in chunks[1].x..chunks[1].x + chunks[1].width {
+            if let Some(cell) = buffer.cell_mut((x, chunks[1].y)) {
+                let rel_x = (x - chunks[1].x) as usize;
+                if rel_x < truncated_hint.len() {
+                    let ch = truncated_hint.chars().nth(rel_x).unwrap_or('─');
+                    cell.set_char(ch);
+                    cell.set_style(Style::default().fg(self.theme.text_secondary));
+                } else {
+                    cell.set_char('─');
+                    cell.set_style(border_style);
+                }
+            }
+        }
 
         // Calculate the x-position where the selected token starts
-        // We'll align prev/next suggestions under the selected token
-        let mut selected_x_offset: usize = 3; // Initial padding
+        let mut selected_x_offset: usize = 3;
         for (i, token) in edit_state.tokens.iter().enumerate() {
             if i == edit_state.selected {
                 break;
             }
-            // Add superscript + bracket + token + bracket + spacing
             selected_x_offset += 1 + 1 + token.text.len() + 1 + 3;
         }
-        // Add superscript + opening bracket for selected token
         selected_x_offset += 1 + 1;
 
         // Previous suggestion row (dim, aligned under selected token)
@@ -768,7 +301,7 @@ impl HistoryBrowserPanel {
                 Span::styled(padding, Style::default()),
                 Span::styled(prev_sugg, Style::default().fg(self.theme.text_secondary)),
             ]);
-            Paragraph::new(prev_line).render(chunks[3], buffer);
+            Paragraph::new(prev_line).render(chunks[2], buffer);
         }
 
         // Current token strip with double brackets and superscript numbers
@@ -810,7 +343,11 @@ impl HistoryBrowserPanel {
                     edit_state.edit_buffer.clone()
                 }
             } else {
-                token.text.clone()
+                if token.text.is_empty() {
+                    "_".to_string()
+                } else {
+                    token.text.clone()
+                }
             };
             spans.push(Span::styled(display_text, token_style));
 
@@ -822,7 +359,7 @@ impl HistoryBrowserPanel {
         }
 
         let token_line = Line::from(spans);
-        Paragraph::new(token_line).render(chunks[4], buffer);
+        Paragraph::new(token_line).render(chunks[3], buffer);
 
         // Next suggestion row (dim, aligned under selected token)
         if let Some(next_sugg) = edit_state.next_suggestion() {
@@ -831,22 +368,15 @@ impl HistoryBrowserPanel {
                 Span::styled(padding, Style::default()),
                 Span::styled(next_sugg, Style::default().fg(self.theme.text_secondary)),
             ]);
-            Paragraph::new(next_line).render(chunks[5], buffer);
+            Paragraph::new(next_line).render(chunks[4], buffer);
         }
 
         // Edit input line with type hint and cycling indicator
-        let type_hint = match edit_state.tokens.get(edit_state.selected).map(|t| t.token_type) {
-            Some(TokenType::Command) => "cmd",
-            Some(TokenType::Subcommand) => "sub",
-            Some(TokenType::Flag) => "flag",
-            Some(TokenType::Path) => "path",
-            Some(TokenType::Url) => "url",
-            Some(TokenType::Argument) | None => "arg",
-        };
+        let type_hint = edit_state.type_hint();
         let cycling_indicator = if edit_state.suggestion_index.is_some() {
             format!(" [{}/{}]",
                 edit_state.suggestion_index.unwrap_or(0) + 1,
-                edit_state.current_suggestions.len())
+                edit_state.suggestions.len())
         } else {
             String::new()
         };
@@ -857,7 +387,7 @@ impl HistoryBrowserPanel {
             Span::styled("█", Style::default().fg(self.theme.header_fg)),
             Span::styled(cycling_indicator, Style::default().fg(self.theme.text_secondary)),
         ]);
-        Paragraph::new(edit_line).render(chunks[7], buffer);
+        Paragraph::new(edit_line).render(chunks[6], buffer);
 
         // Build and show result preview
         let result_preview: String = edit_state.tokens.iter().enumerate().map(|(i, t)| {
@@ -866,7 +396,7 @@ impl HistoryBrowserPanel {
             } else {
                 t.text.clone()
             }
-        }).collect::<Vec<_>>().join(" ");
+        }).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ");
 
         let preview_changed = result_preview != edit_state.original;
         let preview_style = if preview_changed {
@@ -878,18 +408,17 @@ impl HistoryBrowserPanel {
             Span::styled("  Result: ", Style::default().fg(self.theme.text_secondary)),
             Span::styled(&result_preview, preview_style),
         ]);
-        Paragraph::new(preview_line).render(chunks[9], buffer);
+        Paragraph::new(preview_line).render(chunks[8], buffer);
 
         // Border
-        let border_style = Style::default().fg(self.theme.panel_border);
-        for x in chunks[11].x..chunks[11].x + chunks[11].width {
-            if let Some(cell) = buffer.cell_mut((x, chunks[11].y)) {
+        for x in chunks[10].x..chunks[10].x + chunks[10].width {
+            if let Some(cell) = buffer.cell_mut((x, chunks[10].y)) {
                 cell.set_char('─');
                 cell.set_style(border_style);
             }
         }
 
-        // Keybind hints - updated to show Up/Down for cycling
+        // Keybind hints
         let key_style = Style::default().fg(self.theme.text_highlight);
         let label_style = Style::default().fg(self.theme.text_secondary);
 
@@ -915,11 +444,11 @@ impl HistoryBrowserPanel {
             Span::styled("Esc", key_style),
             Span::styled(" Back", label_style),
         ]);
-        Paragraph::new(hints).render(chunks[12], buffer);
+        Paragraph::new(hints).render(chunks[11], buffer);
     }
 
     /// Renders the danger confirmation dialog.
-    fn render_danger_confirm(&self, buffer: &mut Buffer, area: Rect, edit_state: &EditModeState) {
+    fn render_danger_confirm(&self, buffer: &mut Buffer, area: Rect, edit_state: &CommandEditState) {
         let chunks = Layout::vertical([
             Constraint::Length(1), // Warning header
             Constraint::Length(1), // Warning message
@@ -937,7 +466,9 @@ impl HistoryBrowserPanel {
         Paragraph::new(header).render(chunks[0], buffer);
 
         // Warning message
-        let warning_msg = edit_state.danger_warning.unwrap_or("Potentially dangerous command");
+        let warning_msg = edit_state.pending_confirm.as_ref()
+            .map(|c| c.warning.message)
+            .unwrap_or("Potentially dangerous command");
         let warning_line = Line::from(vec![
             Span::styled(" ", Style::default()),
             Span::styled(warning_msg, Style::default().fg(self.theme.semantic_error).add_modifier(Modifier::BOLD)),
@@ -945,7 +476,9 @@ impl HistoryBrowserPanel {
         Paragraph::new(warning_line).render(chunks[1], buffer);
 
         // Command
-        let cmd = edit_state.pending_confirm.as_deref().unwrap_or("");
+        let cmd = edit_state.pending_confirm.as_ref()
+            .map(|c| c.command.as_str())
+            .unwrap_or("");
         let cmd_line = Line::from(vec![
             Span::styled(" Command: ", Style::default().fg(self.theme.text_secondary)),
             Span::styled(cmd, Style::default().fg(self.theme.text_primary)),
@@ -974,7 +507,7 @@ impl HistoryBrowserPanel {
         Paragraph::new(hints).render(chunks[5], buffer);
     }
 
-    /// Handles input in edit mode. Returns Some(PanelResult) if handled.
+    /// Handles input in edit mode.
     fn handle_edit_input(&mut self, key: KeyEvent) -> Option<PanelResult> {
         let edit_state = self.edit_mode.as_mut()?;
 
@@ -982,21 +515,19 @@ impl HistoryBrowserPanel {
         if edit_state.is_confirming() {
             return match key.code {
                 KeyCode::Enter => {
-                    // User confirmed - execute the dangerous command
-                    let command = edit_state.pending_confirm.take().unwrap_or_default();
+                    let command = edit_state.confirm_dangerous().unwrap_or_default();
                     self.exit_edit_mode();
                     Some(PanelResult::Execute(command))
                 }
                 KeyCode::Esc => {
-                    // Cancel confirmation, go back to editing
-                    edit_state.clear_confirm();
+                    edit_state.cancel_confirm();
                     Some(PanelResult::Continue)
                 }
                 _ => Some(PanelResult::Continue),
             };
         }
 
-        // Handle Ctrl+key commands (don't interfere with text editing)
+        // Handle Ctrl+key commands
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Char('z') | KeyCode::Char('u') => {
@@ -1005,14 +536,17 @@ impl HistoryBrowserPanel {
                 }
                 KeyCode::Char('d') => {
                     edit_state.delete_token();
+                    self.update_suggestions_with_history();
                     return Some(PanelResult::Continue);
                 }
                 KeyCode::Char('a') => {
                     edit_state.insert_token_after();
+                    self.update_suggestions_with_history();
                     return Some(PanelResult::Continue);
                 }
                 KeyCode::Char('i') => {
                     edit_state.insert_token_before();
+                    self.update_suggestions_with_history();
                     return Some(PanelResult::Continue);
                 }
                 KeyCode::Char('q') => {
@@ -1020,7 +554,7 @@ impl HistoryBrowserPanel {
                     return Some(PanelResult::Continue);
                 }
                 KeyCode::Char('!') => {
-                    edit_state.skip_danger_check = !edit_state.skip_danger_check;
+                    edit_state.toggle_danger_check();
                     return Some(PanelResult::Continue);
                 }
                 _ => {}
@@ -1038,69 +572,45 @@ impl HistoryBrowserPanel {
                     .unwrap_or("");
 
                 if edit_state.edit_buffer != token_text {
-                    // Stage 1: Revert current token to its saved value
                     edit_state.edit_buffer = token_text.to_string();
                     Some(PanelResult::Continue)
                 } else if edit_state.has_changes() {
-                    // Stage 2: Revert entire command to original
                     edit_state.revert();
                     Some(PanelResult::Continue)
                 } else {
-                    // Stage 3: Exit edit mode
                     self.exit_edit_mode();
                     Some(PanelResult::Continue)
                 }
             }
             KeyCode::Enter => {
-                // Build the edited command
-                let command = edit_state.build_command();
-
-                // Check for dangerous patterns (unless bypassed)
-                if !edit_state.skip_danger_check {
-                    if let Some(warning) = is_dangerous_command(&command) {
-                        edit_state.pending_confirm = Some(command);
-                        edit_state.danger_warning = Some(warning);
-                        return Some(PanelResult::Continue);
-                    }
+                // Use check_and_prepare_execute for danger checking
+                if let Some(command) = edit_state.check_and_prepare_execute() {
+                    self.exit_edit_mode();
+                    Some(PanelResult::Execute(command))
+                } else {
+                    // Danger confirmation needed - stay in edit mode
+                    Some(PanelResult::Continue)
                 }
-                self.exit_edit_mode();
-                Some(PanelResult::Execute(command))
             }
             KeyCode::Left => {
                 edit_state.prev();
-                // Update suggestions for new token position
-                let history_store = self.history_store.as_ref().and_then(|s| s.lock().ok());
-                if let Some(ref mut state) = self.edit_mode {
-                    state.update_suggestions(history_store.as_deref());
-                }
+                self.update_suggestions_with_history();
                 Some(PanelResult::Continue)
             }
             KeyCode::Right => {
                 edit_state.next();
-                // Update suggestions for new token position
-                let history_store = self.history_store.as_ref().and_then(|s| s.lock().ok());
-                if let Some(ref mut state) = self.edit_mode {
-                    state.update_suggestions(history_store.as_deref());
-                }
+                self.update_suggestions_with_history();
                 Some(PanelResult::Continue)
             }
             KeyCode::Home => {
                 edit_state.select(0);
-                // Update suggestions for new token position
-                let history_store = self.history_store.as_ref().and_then(|s| s.lock().ok());
-                if let Some(ref mut state) = self.edit_mode {
-                    state.update_suggestions(history_store.as_deref());
-                }
+                self.update_suggestions_with_history();
                 Some(PanelResult::Continue)
             }
             KeyCode::End => {
                 let last = edit_state.token_count().saturating_sub(1);
                 edit_state.select(last);
-                // Update suggestions for new token position
-                let history_store = self.history_store.as_ref().and_then(|s| s.lock().ok());
-                if let Some(ref mut state) = self.edit_mode {
-                    state.update_suggestions(history_store.as_deref());
-                }
+                self.update_suggestions_with_history();
                 Some(PanelResult::Continue)
             }
             KeyCode::Up => {
@@ -1113,33 +623,20 @@ impl HistoryBrowserPanel {
             }
             KeyCode::Tab => {
                 edit_state.next();
-                // Update suggestions for new token position
-                let history_store = self.history_store.as_ref().and_then(|s| s.lock().ok());
-                if let Some(ref mut state) = self.edit_mode {
-                    state.update_suggestions(history_store.as_deref());
-                }
+                self.update_suggestions_with_history();
                 Some(PanelResult::Continue)
             }
             KeyCode::BackTab => {
                 edit_state.prev();
-                // Update suggestions for new token position
-                let history_store = self.history_store.as_ref().and_then(|s| s.lock().ok());
-                if let Some(ref mut state) = self.edit_mode {
-                    state.update_suggestions(history_store.as_deref());
-                }
+                self.update_suggestions_with_history();
                 Some(PanelResult::Continue)
             }
             KeyCode::Char(c) => {
-                edit_state.edit_buffer.push(c);
-                edit_state.editing = true;
+                edit_state.type_char(c);
                 Some(PanelResult::Continue)
             }
             KeyCode::Backspace => {
-                edit_state.edit_buffer.pop();
-                // If buffer becomes empty, reset editing state
-                if edit_state.edit_buffer.is_empty() {
-                    edit_state.editing = false;
-                }
+                edit_state.backspace();
                 Some(PanelResult::Continue)
             }
             _ => Some(PanelResult::Continue),
@@ -1326,7 +823,6 @@ impl HistoryBrowserPanel {
             base_style.fg(self.theme.text_primary)
         };
         let cmd_width = cols.command.saturating_sub(1) as usize;
-        // Use char-based truncation to avoid panicking on UTF-8 boundaries
         let cmd_display = if record.command.chars().count() > cmd_width {
             let truncated: String = record.command
                 .chars()
@@ -1427,16 +923,9 @@ impl HistoryBrowserPanel {
     }
 }
 
-// Note: Default is removed since HistoryBrowserPanel now requires a theme parameter
-
 impl Panel for HistoryBrowserPanel {
     fn preferred_height(&self) -> u16 {
-        // Enhanced edit mode needs 15 rows (with spacing), list mode needs 15
-        if self.edit_mode.is_some() {
-            15
-        } else {
-            15
-        }
+        15
     }
 
     fn title(&self) -> &str {
@@ -1483,7 +972,6 @@ impl Panel for HistoryBrowserPanel {
                 Style::default().fg(self.theme.text_secondary),
             ),
         ];
-        // Show current directory when filtering by it
         if self.filter_mode.current_dir_only {
             if let Some(ref cwd) = self.current_cwd {
                 let path_str = cwd.to_string_lossy();
@@ -1613,7 +1101,6 @@ impl Panel for HistoryBrowserPanel {
                 }
             }
             KeyCode::Tab => {
-                // Insert command into buffer without executing
                 if let Some(cmd) = self.selected_command() {
                     PanelResult::InsertText(cmd.to_string())
                 } else {
@@ -1671,6 +1158,7 @@ impl Panel for HistoryBrowserPanel {
 mod tests {
     use super::*;
     use super::super::theme::AMBER_THEME;
+    use super::super::command_edit::{tokenize_command, TokenType, check_dangerous_command, parse_quotes, apply_quotes, QuoteStyle};
 
     #[test]
     fn test_history_browser_new() {
@@ -1706,133 +1194,51 @@ mod tests {
         assert_eq!(cols.count, 5);
         assert_eq!(cols.time, 6);
         assert_eq!(cols.duration, 8);
-        // command should get remaining space
         assert!(cols.command > 0);
     }
 
-    // =========================================================================
-    // Tokenizer Tests
-    // =========================================================================
-
+    // Tokenizer tests (delegated to command_edit module)
     #[test]
     fn test_tokenize_simple_command() {
         let tokens = tokenize_command("ls -la /tmp");
         assert_eq!(tokens.len(), 3);
         assert_eq!(tokens[0].text, "ls");
         assert_eq!(tokens[0].token_type, TokenType::Command);
-        assert_eq!(tokens[1].text, "-la");
-        assert_eq!(tokens[1].token_type, TokenType::Flag);
-        assert_eq!(tokens[2].text, "/tmp");
-        assert_eq!(tokens[2].token_type, TokenType::Path);
     }
 
     #[test]
     fn test_tokenize_quoted_string() {
         let tokens = tokenize_command("echo \"hello world\"");
         assert_eq!(tokens.len(), 2);
-        assert_eq!(tokens[0].text, "echo");
         assert_eq!(tokens[1].text, "\"hello world\"");
-        assert_eq!(tokens[1].token_type, TokenType::Argument);
-    }
-
-    #[test]
-    fn test_tokenize_single_quoted() {
-        let tokens = tokenize_command("grep 'pattern with spaces' file.txt");
-        assert_eq!(tokens.len(), 3);
-        assert_eq!(tokens[1].text, "'pattern with spaces'");
-        assert_eq!(tokens[1].token_type, TokenType::Argument);
     }
 
     #[test]
     fn test_tokenize_git_command() {
-        let tokens = tokenize_command("git checkout -b feature/new-branch origin/main");
-        assert_eq!(tokens.len(), 5);
-        assert_eq!(tokens[0].text, "git");
-        assert_eq!(tokens[0].token_type, TokenType::Command);
-        assert_eq!(tokens[1].text, "checkout");
+        let tokens = tokenize_command("git checkout -b feature/new-branch");
+        assert_eq!(tokens.len(), 4);
         assert_eq!(tokens[1].token_type, TokenType::Subcommand);
-        assert_eq!(tokens[2].text, "-b");
-        assert_eq!(tokens[2].token_type, TokenType::Flag);
-        assert_eq!(tokens[3].text, "feature/new-branch");
-        assert_eq!(tokens[3].token_type, TokenType::Path);
-        assert_eq!(tokens[4].text, "origin/main");
-        assert_eq!(tokens[4].token_type, TokenType::Path);
+    }
+
+    // Dangerous command tests
+    #[test]
+    fn test_dangerous_rm_rf() {
+        assert!(check_dangerous_command("rm -rf /").is_some());
+        assert!(check_dangerous_command("sudo rm -rf /tmp/build").is_some());
     }
 
     #[test]
-    fn test_tokenize_empty() {
-        let tokens = tokenize_command("");
-        assert!(tokens.is_empty());
+    fn test_safe_commands() {
+        assert!(check_dangerous_command("ls -la").is_none());
+        assert!(check_dangerous_command("git push origin main").is_none());
     }
 
+    // Quote handling tests
     #[test]
-    fn test_tokenize_url() {
-        let tokens = tokenize_command("git remote add origin git@github.com:user/repo.git");
-        assert_eq!(tokens.len(), 5);
-        assert_eq!(tokens[4].text, "git@github.com:user/repo.git");
-        assert_eq!(tokens[4].token_type, TokenType::Url);
-    }
-
-    // =========================================================================
-    // Token Type Tests
-    // =========================================================================
-
-    #[test]
-    fn test_classify_command() {
-        assert_eq!(classify_token("ls", 0, None), TokenType::Command);
-        assert_eq!(classify_token("git", 0, None), TokenType::Command);
-    }
-
-    #[test]
-    fn test_classify_subcommand() {
-        assert_eq!(classify_token("checkout", 1, Some("git")), TokenType::Subcommand);
-        assert_eq!(classify_token("build", 1, Some("cargo")), TokenType::Subcommand);
-        // Not a known compound command
-        assert_eq!(classify_token("something", 1, Some("echo")), TokenType::Argument);
-    }
-
-    #[test]
-    fn test_classify_flag() {
-        assert_eq!(classify_token("-la", 1, Some("ls")), TokenType::Flag);
-        assert_eq!(classify_token("--help", 2, Some("checkout")), TokenType::Flag);
-    }
-
-    #[test]
-    fn test_classify_path() {
-        assert_eq!(classify_token("/tmp", 1, Some("ls")), TokenType::Path);
-        assert_eq!(classify_token("./file.txt", 2, Some("-la")), TokenType::Path);
-        assert_eq!(classify_token("~/Documents", 1, Some("cd")), TokenType::Path);
-    }
-
-    #[test]
-    fn test_classify_url() {
-        assert_eq!(classify_token("https://example.com", 1, Some("curl")), TokenType::Url);
-        assert_eq!(classify_token("git@github.com:user/repo.git", 4, Some("origin")), TokenType::Url);
-    }
-
-    // =========================================================================
-    // Quote Handling Tests
-    // =========================================================================
-
-    #[test]
-    fn test_parse_quotes_none() {
-        let (inner, style) = parse_quotes("hello");
-        assert_eq!(inner, "hello");
-        assert_eq!(style, QuoteStyle::None);
-    }
-
-    #[test]
-    fn test_parse_quotes_single() {
-        let (inner, style) = parse_quotes("'hello world'");
-        assert_eq!(inner, "hello world");
-        assert_eq!(style, QuoteStyle::Single);
-    }
-
-    #[test]
-    fn test_parse_quotes_double() {
-        let (inner, style) = parse_quotes("\"hello world\"");
-        assert_eq!(inner, "hello world");
-        assert_eq!(style, QuoteStyle::Double);
+    fn test_parse_quotes() {
+        assert_eq!(parse_quotes("hello"), ("hello".to_string(), QuoteStyle::None));
+        assert_eq!(parse_quotes("'hello'"), ("hello".to_string(), QuoteStyle::Single));
+        assert_eq!(parse_quotes("\"hello\""), ("hello".to_string(), QuoteStyle::Double));
     }
 
     #[test]
@@ -1842,262 +1248,45 @@ mod tests {
         assert_eq!(apply_quotes("hello", QuoteStyle::Double), "\"hello\"");
     }
 
-    // =========================================================================
-    // Dangerous Command Tests
-    // =========================================================================
-
+    // Edit state tests (using shared module)
     #[test]
-    fn test_dangerous_rm_rf() {
-        assert!(is_dangerous_command("rm -rf /").is_some());
-        assert!(is_dangerous_command("sudo rm -rf /tmp/build").is_some());
-        assert!(is_dangerous_command("rm -fr ~/").is_some());
-    }
-
-    #[test]
-    fn test_dangerous_dd() {
-        assert!(is_dangerous_command("dd if=/dev/zero of=/dev/sda").is_some());
-    }
-
-    #[test]
-    fn test_safe_commands() {
-        assert!(is_dangerous_command("ls -la").is_none());
-        assert!(is_dangerous_command("git push origin main").is_none());
-        assert!(is_dangerous_command("rm file.txt").is_none()); // No -rf
-    }
-
-    // =========================================================================
-    // Edit Mode Tests
-    // =========================================================================
-
-    #[test]
-    fn test_edit_mode_state_new() {
-        let state = EditModeState::new("echo hello");
-        assert_eq!(state.original, "echo hello");
-        assert_eq!(state.token_count(), 2);
+    fn test_edit_state_navigation() {
+        let mut state = CommandEditState::from_command("git push origin main");
         assert_eq!(state.selected, 0);
-        assert!(state.undo_stack.is_empty());
-    }
-
-    #[test]
-    fn test_edit_mode_state_new_empty_command_has_placeholder() {
-        let state = EditModeState::new("");
-        // Should have exactly one placeholder token to prevent panics
-        assert_eq!(state.token_count(), 1);
-        assert_eq!(state.selected, 0);
-        assert!(state.tokens[0].text.is_empty());
-        assert_eq!(state.tokens[0].token_type, TokenType::Command);
-    }
-
-    #[test]
-    fn test_edit_mode_insert_after_on_empty_command_succeeds() {
-        let mut state = EditModeState::new("");
-        // This should not panic - we have a placeholder token
-        state.insert_token_after();
-        assert_eq!(state.token_count(), 2);
-    }
-
-    #[test]
-    fn test_edit_mode_navigation() {
-        let mut state = EditModeState::new("git push origin main");
-        assert_eq!(state.selected, 0);
-
         state.next();
         assert_eq!(state.selected, 1);
-
-        state.next();
-        assert_eq!(state.selected, 2);
-
         state.prev();
-        assert_eq!(state.selected, 1);
+        assert_eq!(state.selected, 0);
     }
 
     #[test]
-    fn test_edit_mode_build_command() {
-        let mut state = EditModeState::new("echo hello");
-        state.select(1);
-        state.edit_buffer = "world".to_string();
-
-        let result = state.build_command();
-        assert_eq!(result, "echo world");
-    }
-
-    #[test]
-    fn test_edit_mode_delete_token() {
-        let mut state = EditModeState::new("git push origin main");
-        assert_eq!(state.token_count(), 4);
-
-        state.select(2); // Select "origin"
-        state.delete_token();
-
-        assert_eq!(state.token_count(), 3);
-        assert_eq!(state.build_command(), "git push main");
-    }
-
-    #[test]
-    fn test_edit_mode_insert_token() {
-        let mut state = EditModeState::new("git push");
+    fn test_edit_state_insert_delete() {
+        let mut state = CommandEditState::from_command("git push");
         assert_eq!(state.token_count(), 2);
-
-        state.select(1); // Select "push"
+        state.select(1);
         state.insert_token_after();
-        state.edit_buffer = "origin".to_string();
-
         assert_eq!(state.token_count(), 3);
-        assert_eq!(state.build_command(), "git push origin");
+        state.delete_token();
+        assert_eq!(state.token_count(), 2);
     }
 
     #[test]
-    fn test_edit_mode_undo() {
-        let mut state = EditModeState::new("git push origin main");
-        assert_eq!(state.token_count(), 4);
-
+    fn test_edit_state_undo() {
+        let mut state = CommandEditState::from_command("git push origin main");
         state.select(2);
         state.delete_token();
         assert_eq!(state.token_count(), 3);
-
         state.undo();
         assert_eq!(state.token_count(), 4);
-        assert_eq!(state.build_command(), "git push origin main");
     }
 
     #[test]
-    fn test_edit_mode_quote_cycling() {
-        let mut state = EditModeState::new("echo hello");
+    fn test_edit_state_quote_cycling() {
+        let mut state = CommandEditState::from_command("echo hello");
         state.select(1);
-
-        // Start with no quotes
-        assert_eq!(state.edit_buffer, "hello");
-
         state.cycle_quote();
         assert_eq!(state.edit_buffer, "'hello'");
-
         state.cycle_quote();
         assert_eq!(state.edit_buffer, "\"hello\"");
-
-        state.cycle_quote();
-        assert_eq!(state.edit_buffer, "hello");
-    }
-
-    #[test]
-    fn test_edit_mode_danger_confirm() {
-        let mut state = EditModeState::new("rm -rf /");
-        assert!(!state.is_confirming());
-
-        state.pending_confirm = Some("rm -rf /".to_string());
-        state.danger_warning = Some("Test warning");
-
-        assert!(state.is_confirming());
-
-        state.clear_confirm();
-        assert!(!state.is_confirming());
-    }
-
-    #[test]
-    fn test_edit_mode_has_changes() {
-        let mut state = EditModeState::new("echo hello");
-        assert!(!state.has_changes()); // No changes yet
-
-        state.select(1);
-        state.edit_buffer = "world".to_string();
-        assert!(state.has_changes()); // Now has changes
-    }
-
-    #[test]
-    fn test_edit_mode_revert() {
-        let mut state = EditModeState::new("echo hello");
-        state.select(1);
-        state.edit_buffer = "world".to_string();
-        assert!(state.has_changes());
-
-        state.revert();
-        assert!(!state.has_changes());
-        assert_eq!(state.selected, 0);
-        assert_eq!(state.edit_buffer, "echo");
-    }
-
-    // =========================================================================
-    // Helper Function Tests
-    // =========================================================================
-
-    #[test]
-    fn test_superscript_digit() {
-        assert_eq!(superscript_digit(1), "¹");
-        assert_eq!(superscript_digit(10), "¹⁰");
-        assert_eq!(superscript_digit(20), "²⁰");
-        assert_eq!(superscript_digit(21), "·"); // Fallback
-        assert_eq!(superscript_digit(0), "·"); // Fallback
-    }
-
-    #[test]
-    fn test_edit_mode_reclassify_after_delete() {
-        // When deleting first token, second token should become Command
-        let mut state = EditModeState::new("sudo git push");
-        assert_eq!(state.tokens[0].token_type, TokenType::Command);
-        assert_eq!(state.tokens[1].token_type, TokenType::Argument); // "git" at position 1 is argument
-
-        state.select(0); // Select "sudo"
-        state.delete_token();
-
-        // After deleting "sudo", "git" is now position 0 and should be Command
-        assert_eq!(state.tokens[0].text, "git");
-        assert_eq!(state.tokens[0].token_type, TokenType::Command);
-        // "push" is now position 1 after "git", so it's a Subcommand
-        assert_eq!(state.tokens[1].text, "push");
-        assert_eq!(state.tokens[1].token_type, TokenType::Subcommand);
-    }
-
-    #[test]
-    fn test_edit_mode_reclassify_after_insert() {
-        let mut state = EditModeState::new("push origin");
-        // Initially "push" is Command (position 0)
-        assert_eq!(state.tokens[0].token_type, TokenType::Command);
-
-        // Insert "git" before "push"
-        state.select(0);
-        state.insert_token_before();
-        state.edit_buffer = "git".to_string();
-        // Commit by selecting another token
-        state.select(1);
-
-        // Now "git" is Command, "push" is Subcommand
-        assert_eq!(state.tokens[0].text, "git");
-        assert_eq!(state.tokens[0].token_type, TokenType::Command);
-        assert_eq!(state.tokens[1].text, "push");
-        assert_eq!(state.tokens[1].token_type, TokenType::Subcommand);
-    }
-
-    #[test]
-    fn test_edit_mode_reclassify_after_text_change() {
-        let mut state = EditModeState::new("ls origin");
-        // "ls" is Command, "origin" is Argument
-        assert_eq!(state.tokens[0].token_type, TokenType::Command);
-        assert_eq!(state.tokens[1].token_type, TokenType::Argument);
-
-        // Change "ls" to "git"
-        state.select(0);
-        state.edit_buffer = "git".to_string();
-        state.select(1); // Commit the change
-
-        // Now "origin" after "git" should be reclassified as Subcommand
-        assert_eq!(state.tokens[0].text, "git");
-        assert_eq!(state.tokens[0].token_type, TokenType::Command);
-        assert_eq!(state.tokens[1].text, "origin");
-        // Note: "origin" isn't a recognized git subcommand, so it stays Argument
-        // Let's change to a better test...
-    }
-
-    #[test]
-    fn test_edit_mode_reclassify_git_subcommand() {
-        let mut state = EditModeState::new("ls push");
-        assert_eq!(state.tokens[1].token_type, TokenType::Argument);
-
-        // Change "ls" to "git"
-        state.select(0);
-        state.edit_buffer = "git".to_string();
-        state.select(1);
-
-        // "push" after "git" should become Subcommand
-        assert_eq!(state.tokens[1].text, "push");
-        assert_eq!(state.tokens[1].token_type, TokenType::Subcommand);
     }
 }

@@ -1,22 +1,45 @@
-//! Shared command editing state for history and file browser panels.
+//! Unified command editing state for browser panels.
 //!
-//! Provides a unified token-based command editor with support for locked
-//! (non-editable) tokens like filenames.
+//! Provides a configurable token-based command editor with support for:
+//! - Locked (non-editable) tokens (e.g., filename in file browser)
+//! - Dangerous command detection and confirmation
+//! - Quote style cycling
+//! - Undo/redo stack
+//! - Pluggable suggestion providers
 
 use super::command_knowledge::COMMAND_KNOWLEDGE;
 use super::theme::Theme;
 use ratatui_core::style::{Modifier, Style};
 
-/// Token type for semantic classification.
-#[derive(Debug, Clone, Copy, PartialEq)]
+// ============================================================================
+// Token Types and Classification
+// ============================================================================
+
+/// Token type for semantic classification and styling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenType {
-    Command,    // First token (ls, git, etc.)
-    Subcommand, // Second token for compound commands (checkout, push)
-    Flag,       // Starts with - or --
-    Path,       // Contains / or starts with . or ~
-    Url,        // Contains :// or looks like git@...
-    Argument,   // Generic argument
-    Locked,     // Non-editable token (e.g., filename in file browser)
+    /// First token - the command (ls, git, etc.)
+    Command,
+    /// Second token for compound commands (checkout, push)
+    Subcommand,
+    /// Starts with - or --
+    Flag,
+    /// Contains / or starts with . or ~
+    Path,
+    /// Contains :// or looks like git@...
+    Url,
+    /// Generic argument
+    Argument,
+    /// Non-editable token (e.g., filename in file browser)
+    Locked,
+}
+
+/// Quote style for tokens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuoteStyle {
+    None,
+    Single, // 'text'
+    Double, // "text"
 }
 
 /// A token from a shell command.
@@ -32,34 +55,21 @@ pub struct CommandToken {
 
 impl CommandToken {
     /// Creates a new editable token.
-    pub fn new(text: String, token_type: TokenType) -> Self {
+    pub fn new(text: impl Into<String>, token_type: TokenType) -> Self {
         Self {
-            text,
+            text: text.into(),
             token_type,
             locked: false,
         }
     }
 
     /// Creates a new locked (non-editable) token.
-    pub fn locked(text: String) -> Self {
+    pub fn locked(text: impl Into<String>) -> Self {
         Self {
-            text,
+            text: text.into(),
             token_type: TokenType::Locked,
             locked: true,
         }
-    }
-}
-
-/// Returns a superscript digit for display (¹²³...²⁰).
-pub fn superscript_digit(n: usize) -> &'static str {
-    const SUPERSCRIPTS: [&str; 20] = [
-        "¹", "²", "³", "⁴", "⁵", "⁶", "⁷", "⁸", "⁹", "¹⁰",
-        "¹¹", "¹²", "¹³", "¹⁴", "¹⁵", "¹⁶", "¹⁷", "¹⁸", "¹⁹", "²⁰",
-    ];
-    if n >= 1 && n <= 20 {
-        SUPERSCRIPTS[n - 1]
-    } else {
-        "·" // Fallback for >20 tokens
     }
 }
 
@@ -80,7 +90,7 @@ pub fn classify_token(text: &str, position: usize, prev_token: Option<&str>) -> 
     // Check for subcommand (second token after known compound commands)
     if position == 1 {
         if let Some(cmd) = prev_token {
-            if matches!(cmd, "git" | "docker" | "kubectl" | "cargo" | "npm" | "yarn" | "systemctl" | "journalctl") {
+            if is_compound_command(cmd) {
                 return TokenType::Subcommand;
             }
         }
@@ -88,7 +98,16 @@ pub fn classify_token(text: &str, position: usize, prev_token: Option<&str>) -> 
     TokenType::Argument
 }
 
-/// Returns the style for a token based on its type and theme.
+/// Returns true if the command has subcommands.
+fn is_compound_command(cmd: &str) -> bool {
+    matches!(
+        cmd,
+        "git" | "docker" | "kubectl" | "cargo" | "npm" | "yarn"
+        | "systemctl" | "journalctl" | "apt" | "brew" | "pacman"
+    )
+}
+
+/// Returns the style for a token based on its type.
 pub fn token_type_style(token_type: TokenType, theme: &Theme) -> Style {
     match token_type {
         TokenType::Command => Style::default().fg(theme.semantic_success).add_modifier(Modifier::BOLD),
@@ -101,10 +120,211 @@ pub fn token_type_style(token_type: TokenType, theme: &Theme) -> Style {
     }
 }
 
-/// Shared state for command editing.
+/// Returns a superscript digit for display (¹²³...²⁰).
+pub fn superscript_digit(n: usize) -> &'static str {
+    const SUPERSCRIPTS: [&str; 20] = [
+        "¹", "²", "³", "⁴", "⁵", "⁶", "⁷", "⁸", "⁹", "¹⁰",
+        "¹¹", "¹²", "¹³", "¹⁴", "¹⁵", "¹⁶", "¹⁷", "¹⁸", "¹⁹", "²⁰",
+    ];
+    if n >= 1 && n <= 20 {
+        SUPERSCRIPTS[n - 1]
+    } else {
+        "·"
+    }
+}
+
+// ============================================================================
+// Quote Handling
+// ============================================================================
+
+/// Parses quote style from a token, returning inner text and style.
+pub fn parse_quotes(text: &str) -> (String, QuoteStyle) {
+    if text.len() >= 2 {
+        if text.starts_with('\'') && text.ends_with('\'') {
+            return (text[1..text.len() - 1].to_string(), QuoteStyle::Single);
+        }
+        if text.starts_with('"') && text.ends_with('"') {
+            return (text[1..text.len() - 1].to_string(), QuoteStyle::Double);
+        }
+    }
+    (text.to_string(), QuoteStyle::None)
+}
+
+/// Applies a quote style to text.
+pub fn apply_quotes(text: &str, style: QuoteStyle) -> String {
+    match style {
+        QuoteStyle::None => text.to_string(),
+        QuoteStyle::Single => format!("'{}'", text),
+        QuoteStyle::Double => format!("\"{}\"", text),
+    }
+}
+
+// ============================================================================
+// Dangerous Command Detection
+// ============================================================================
+
+/// Result of dangerous command check.
+#[derive(Debug, Clone)]
+pub struct DangerWarning {
+    pub message: &'static str,
+}
+
+/// Checks if a command is potentially dangerous.
+pub fn check_dangerous_command(command: &str) -> Option<DangerWarning> {
+    let lower = command.to_lowercase();
+
+    if lower.contains("rm -rf") || lower.contains("rm -fr") {
+        return Some(DangerWarning { message: "Recursive force delete" });
+    }
+    if lower.contains("dd if=") && lower.contains("of=/dev/") {
+        return Some(DangerWarning { message: "Direct disk write" });
+    }
+    if lower.contains("mkfs") {
+        return Some(DangerWarning { message: "Filesystem format" });
+    }
+    if lower.contains("> /dev/sd") || lower.contains(">/dev/sd") {
+        return Some(DangerWarning { message: "Direct device write" });
+    }
+    if lower.contains("chmod -r 777") || lower.contains("chmod 777 -r") {
+        return Some(DangerWarning { message: "Overly permissive chmod" });
+    }
+    if lower.contains(":(){ :|:& };:") {
+        return Some(DangerWarning { message: "Fork bomb" });
+    }
+
+    None
+}
+
+// ============================================================================
+// Tokenizer
+// ============================================================================
+
+/// Tokenizes a shell command into words, respecting quotes.
+pub fn tokenize_command(command: &str) -> Vec<CommandToken> {
+    let mut raw_tokens: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut escape_next = false;
+
+    for ch in command.chars() {
+        if escape_next {
+            current.push(ch);
+            escape_next = false;
+            continue;
+        }
+
+        match ch {
+            '\\' if !in_single_quote => {
+                current.push(ch);
+                escape_next = true;
+            }
+            '\'' if !in_double_quote => {
+                current.push(ch);
+                in_single_quote = !in_single_quote;
+            }
+            '"' if !in_single_quote => {
+                current.push(ch);
+                in_double_quote = !in_double_quote;
+            }
+            ' ' | '\t' if !in_single_quote && !in_double_quote => {
+                if !current.is_empty() {
+                    raw_tokens.push(current.clone());
+                    current.clear();
+                }
+            }
+            _ => {
+                current.push(ch);
+            }
+        }
+    }
+
+    if !current.is_empty() {
+        raw_tokens.push(current);
+    }
+
+    // Classify each token
+    raw_tokens
+        .iter()
+        .enumerate()
+        .map(|(i, text)| {
+            let prev = if i > 0 { Some(raw_tokens[i - 1].as_str()) } else { None };
+            let token_type = classify_token(text, i, prev);
+            CommandToken::new(text.clone(), token_type)
+        })
+        .collect()
+}
+
+// ============================================================================
+// Configuration
+// ============================================================================
+
+/// Configuration for command edit behavior.
+#[derive(Debug, Clone)]
+pub struct EditConfig {
+    /// Enable dangerous command detection and confirmation.
+    pub danger_check: bool,
+    /// Enable undo/redo functionality.
+    pub enable_undo: bool,
+    /// Enable quote style cycling (Ctrl+Q).
+    pub enable_quotes: bool,
+    /// Maximum undo stack size.
+    pub max_undo_size: usize,
+}
+
+impl Default for EditConfig {
+    fn default() -> Self {
+        Self {
+            danger_check: true,
+            enable_undo: true,
+            enable_quotes: true,
+            max_undo_size: 50,
+        }
+    }
+}
+
+impl EditConfig {
+    /// Config for history browser (full features).
+    pub fn for_history() -> Self {
+        Self::default()
+    }
+
+    /// Config for file browser (minimal features).
+    pub fn for_file() -> Self {
+        Self {
+            danger_check: false,
+            enable_undo: true,
+            enable_quotes: false,
+            max_undo_size: 20,
+        }
+    }
+}
+
+// ============================================================================
+// Confirmation State
+// ============================================================================
+
+/// State for dangerous command confirmation.
+#[derive(Debug, Clone)]
+pub struct ConfirmState {
+    /// The command awaiting confirmation.
+    pub command: String,
+    /// Warning message to display.
+    pub warning: DangerWarning,
+}
+
+// ============================================================================
+// Command Edit State
+// ============================================================================
+
+/// Unified state for command editing.
+///
+/// This is the core editing state used by both history and file browsers.
+/// Features can be enabled/disabled via `EditConfig`.
 #[derive(Debug, Clone)]
 pub struct CommandEditState {
-    /// The original command (for revert).
+    // --- Core State ---
+    /// The original command (for revert and change detection).
     pub original: String,
     /// Tokenized parts of the command.
     pub tokens: Vec<CommandToken>,
@@ -112,17 +332,39 @@ pub struct CommandEditState {
     pub selected: usize,
     /// Current edit buffer for the selected token.
     pub edit_buffer: String,
+
+    // --- Configuration ---
+    /// Feature configuration.
+    pub config: EditConfig,
+
+    // --- Undo State ---
     /// Undo stack for reverting changes.
-    pub undo_stack: Vec<Vec<CommandToken>>,
+    undo_stack: Vec<Vec<CommandToken>>,
+
+    // --- Suggestion State ---
     /// Current suggestions for the selected token position.
     pub suggestions: Vec<String>,
     /// Index into suggestions (None = using custom/typed value).
     pub suggestion_index: Option<usize>,
+
+    // --- Confirmation State ---
+    /// Pending dangerous command confirmation.
+    pub pending_confirm: Option<ConfirmState>,
+    /// Skip dangerous command checks (toggled with Ctrl+!).
+    pub skip_danger_check: bool,
+
+    // --- Context ---
+    /// Optional context for suggestions (e.g., filename for file browser).
+    context: Option<String>,
 }
 
 impl CommandEditState {
+    // ========================================================================
+    // Constructors
+    // ========================================================================
+
     /// Creates a new edit state from a list of tokens.
-    pub fn new(tokens: Vec<CommandToken>) -> Self {
+    pub fn new(tokens: Vec<CommandToken>, config: EditConfig) -> Self {
         let original = tokens.iter().map(|t| t.text.as_str()).collect::<Vec<_>>().join(" ");
         let edit_buffer = tokens.first().map(|t| t.text.clone()).unwrap_or_default();
         Self {
@@ -130,40 +372,41 @@ impl CommandEditState {
             tokens,
             selected: 0,
             edit_buffer,
+            config,
             undo_stack: Vec::new(),
             suggestions: Vec::new(),
             suggestion_index: None,
+            pending_confirm: None,
+            skip_danger_check: false,
+            context: None,
         }
     }
 
-    /// Creates a new edit state from a command string.
+    /// Creates edit state from a command string (for history browser).
     pub fn from_command(command: &str) -> Self {
         let mut tokens = tokenize_command(command);
-        // Ensure tokens is never empty to prevent panics
+        // Ensure tokens is never empty
         if tokens.is_empty() {
             tokens.push(CommandToken::new(String::new(), TokenType::Command));
         }
-        Self::new(tokens)
+        Self::new(tokens, EditConfig::for_history())
     }
 
-    /// Creates a new edit state for file editing with a locked filename token.
+    /// Creates edit state for file editing with a locked filename token.
     pub fn for_file(filename: &str, filepath: &str) -> Self {
-        let suggestions: Vec<String> = COMMAND_KNOWLEDGE
-            .commands_for_filetype(filename)
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-
-        // Start with an empty command token, then the locked filename
         let tokens = vec![
             CommandToken::new(String::new(), TokenType::Command),
-            CommandToken::locked(filepath.to_string()),
+            CommandToken::locked(filepath),
         ];
-
-        let mut state = Self::new(tokens);
-        state.suggestions = suggestions;
+        let mut state = Self::new(tokens, EditConfig::for_file());
+        state.context = Some(filename.to_string());
+        state.update_suggestions();
         state
     }
+
+    // ========================================================================
+    // Token Access
+    // ========================================================================
 
     /// Returns the number of tokens.
     pub fn token_count(&self) -> usize {
@@ -174,6 +417,28 @@ impl CommandEditState {
     pub fn is_selected_locked(&self) -> bool {
         self.tokens.get(self.selected).map(|t| t.locked).unwrap_or(false)
     }
+
+    /// Returns the currently selected token, if any.
+    pub fn selected_token(&self) -> Option<&CommandToken> {
+        self.tokens.get(self.selected)
+    }
+
+    /// Returns the type hint for the current token position.
+    pub fn type_hint(&self) -> &'static str {
+        match self.selected_token().map(|t| t.token_type) {
+            Some(TokenType::Command) => "cmd",
+            Some(TokenType::Subcommand) => "sub",
+            Some(TokenType::Flag) => "flag",
+            Some(TokenType::Path) => "path",
+            Some(TokenType::Url) => "url",
+            Some(TokenType::Locked) => "file",
+            Some(TokenType::Argument) | None => "arg",
+        }
+    }
+
+    // ========================================================================
+    // Navigation
+    // ========================================================================
 
     /// Saves current edit to the selected token.
     fn save_current_edit(&mut self) {
@@ -187,9 +452,7 @@ impl CommandEditState {
     /// Selects a token by index.
     pub fn select(&mut self, index: usize) {
         if index < self.tokens.len() {
-            // Save current edit first
             self.save_current_edit();
-            // Reclassify after saving
             self.reclassify_tokens();
             self.selected = index;
             self.edit_buffer = self.tokens[index].text.clone();
@@ -211,6 +474,26 @@ impl CommandEditState {
         }
     }
 
+    // ========================================================================
+    // Editing
+    // ========================================================================
+
+    /// Types a character into the edit buffer (if not locked).
+    pub fn type_char(&mut self, c: char) {
+        if !self.is_selected_locked() {
+            self.edit_buffer.push(c);
+            self.suggestion_index = None;
+        }
+    }
+
+    /// Deletes a character from the edit buffer (if not locked).
+    pub fn backspace(&mut self) {
+        if !self.is_selected_locked() {
+            self.edit_buffer.pop();
+            self.suggestion_index = None;
+        }
+    }
+
     /// Builds the final command from the edited tokens.
     pub fn build_command(&mut self) -> String {
         self.save_current_edit();
@@ -222,10 +505,32 @@ impl CommandEditState {
             .join(" ")
     }
 
+    /// Reclassifies all non-locked tokens based on their position.
+    pub fn reclassify_tokens(&mut self) {
+        for i in 0..self.tokens.len() {
+            if self.tokens[i].locked {
+                continue;
+            }
+            let prev_text = if i > 0 {
+                Some(self.tokens[i - 1].text.as_str())
+            } else {
+                None
+            };
+            self.tokens[i].token_type = classify_token(&self.tokens[i].text, i, prev_text);
+        }
+    }
+
+    // ========================================================================
+    // Token Mutation
+    // ========================================================================
+
     /// Saves current state to undo stack.
-    pub fn save_undo(&mut self) {
+    fn save_undo(&mut self) {
+        if !self.config.enable_undo {
+            return;
+        }
         self.undo_stack.push(self.tokens.clone());
-        if self.undo_stack.len() > 50 {
+        if self.undo_stack.len() > self.config.max_undo_size {
             self.undo_stack.remove(0);
         }
     }
@@ -244,7 +549,6 @@ impl CommandEditState {
 
     /// Deletes the currently selected token (if not locked).
     pub fn delete_token(&mut self) {
-        // Don't delete locked tokens
         if self.is_selected_locked() {
             return;
         }
@@ -290,20 +594,27 @@ impl CommandEditState {
         self.suggestion_index = None;
     }
 
-    /// Reclassifies all non-locked tokens based on their position.
-    pub fn reclassify_tokens(&mut self) {
-        for i in 0..self.tokens.len() {
-            if self.tokens[i].locked {
-                continue;
-            }
-            let prev_text = if i > 0 {
-                Some(self.tokens[i - 1].text.as_str())
-            } else {
-                None
-            };
-            self.tokens[i].token_type = classify_token(&self.tokens[i].text, i, prev_text);
+    // ========================================================================
+    // Quote Cycling
+    // ========================================================================
+
+    /// Cycles through quote styles for current token.
+    pub fn cycle_quote(&mut self) {
+        if !self.config.enable_quotes || self.is_selected_locked() {
+            return;
         }
+        let (inner, current_style) = parse_quotes(&self.edit_buffer);
+        let new_style = match current_style {
+            QuoteStyle::None => QuoteStyle::Single,
+            QuoteStyle::Single => QuoteStyle::Double,
+            QuoteStyle::Double => QuoteStyle::None,
+        };
+        self.edit_buffer = apply_quotes(&inner, new_style);
     }
+
+    // ========================================================================
+    // Suggestions
+    // ========================================================================
 
     /// Cycles through suggestions in the given direction.
     pub fn cycle_suggestion(&mut self, direction: i32) {
@@ -351,68 +662,80 @@ impl CommandEditState {
         self.suggestions.get(next_idx).map(|s| s.as_str())
     }
 
-    /// Updates suggestions based on current position.
-    /// For file browser: show file-type commands at position 0, pipeable after |
-    pub fn update_suggestions_for_file(&mut self, filename: &str) {
+    /// Updates suggestions based on current context.
+    ///
+    /// When on a locked token, suggestions are preserved (not cleared) so
+    /// the suggestion rows remain visible for context. Users can't cycle
+    /// suggestions on locked tokens, but they can still see what was suggested.
+    pub fn update_suggestions(&mut self) {
         if self.is_selected_locked() {
-            self.suggestions.clear();
+            // Don't clear suggestions on locked tokens - preserve them for display
             return;
         }
 
-        // Check if we're after a pipe
-        let has_pipe_before = self.tokens[..self.selected]
+        // Get preceding tokens for context
+        let preceding: Vec<&str> = self.tokens[..self.selected]
             .iter()
-            .any(|t| t.text == "|" || t.text.ends_with('|'));
+            .map(|t| t.text.as_str())
+            .collect();
+
+        // Check for pipe context
+        let has_pipe_before = preceding.iter().any(|t| *t == "|" || t.ends_with('|'));
 
         if has_pipe_before {
+            // After pipe: suggest pipeable commands
             self.suggestions = COMMAND_KNOWLEDGE
                 .pipeable_commands()
                 .iter()
                 .map(|s| s.to_string())
                 .collect();
         } else if self.selected == 0 {
-            // First position: suggest commands for this file type
+            // First position: suggest based on context or general commands
+            if let Some(ref filename) = self.context {
+                self.suggestions = COMMAND_KNOWLEDGE
+                    .commands_for_filetype(filename)
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+            } else {
+                self.suggestions = COMMAND_KNOWLEDGE
+                    .suggestions_for_position(&[])
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+            }
+        } else {
+            // Other positions: use command knowledge
             self.suggestions = COMMAND_KNOWLEDGE
-                .commands_for_filetype(filename)
+                .suggestions_for_position(&preceding)
                 .iter()
                 .map(|s| s.to_string())
                 .collect();
-        } else {
-            self.suggestions.clear();
         }
+
         self.suggestion_index = None;
     }
 
-    /// Updates suggestions based on preceding tokens (for history browser).
-    pub fn update_suggestions_for_position(&mut self, preceding: &[&str]) {
-        if self.is_selected_locked() {
-            self.suggestions.clear();
-            return;
+    /// Adds external suggestions (e.g., from history) to the front.
+    pub fn add_suggestions(&mut self, external: Vec<String>) {
+        // Merge: external first (more relevant), then existing
+        let mut merged = Vec::new();
+        for sugg in external {
+            if !merged.contains(&sugg) {
+                merged.push(sugg);
+            }
         }
-
-        self.suggestions = COMMAND_KNOWLEDGE
-            .suggestions_for_position(preceding)
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        self.suggestion_index = None;
+        for sugg in &self.suggestions {
+            if !merged.contains(sugg) {
+                merged.push(sugg.clone());
+            }
+        }
+        self.suggestions = merged;
     }
 
-    /// Type a character into the edit buffer (if not locked).
-    pub fn type_char(&mut self, c: char) {
-        if !self.is_selected_locked() {
-            self.edit_buffer.push(c);
-            self.suggestion_index = None;
-        }
-    }
-
-    /// Delete a character from the edit buffer (if not locked).
-    pub fn backspace(&mut self) {
-        if !self.is_selected_locked() {
-            self.edit_buffer.pop();
-            self.suggestion_index = None;
-        }
-    }
+    // ========================================================================
+    // Change Detection
+    // ========================================================================
 
     /// Returns true if there are any changes from the original.
     pub fn has_changes(&self) -> bool {
@@ -426,74 +749,63 @@ impl CommandEditState {
         current != self.original
     }
 
-    /// Returns the type hint for the current token position.
-    pub fn type_hint(&self) -> &'static str {
-        match self.tokens.get(self.selected).map(|t| t.token_type) {
-            Some(TokenType::Command) => "cmd",
-            Some(TokenType::Subcommand) => "sub",
-            Some(TokenType::Flag) => "flag",
-            Some(TokenType::Path) => "path",
-            Some(TokenType::Url) => "url",
-            Some(TokenType::Locked) => "file",
-            Some(TokenType::Argument) | None => "arg",
+    /// Reverts all changes back to the original command.
+    pub fn revert(&mut self) {
+        self.tokens = tokenize_command(&self.original);
+        if self.tokens.is_empty() {
+            self.tokens.push(CommandToken::new(String::new(), TokenType::Command));
         }
+        self.selected = 0;
+        self.edit_buffer = self.tokens.first().map(|t| t.text.clone()).unwrap_or_default();
+        self.undo_stack.clear();
+        self.suggestion_index = None;
+    }
+
+    // ========================================================================
+    // Dangerous Command Handling
+    // ========================================================================
+
+    /// Checks if current command is dangerous and needs confirmation.
+    /// Returns the command if safe to execute, None if confirmation needed.
+    pub fn check_and_prepare_execute(&mut self) -> Option<String> {
+        let command = self.build_command();
+
+        if !self.config.danger_check || self.skip_danger_check {
+            return Some(command);
+        }
+
+        if let Some(warning) = check_dangerous_command(&command) {
+            self.pending_confirm = Some(ConfirmState { command, warning });
+            return None;
+        }
+
+        Some(command)
+    }
+
+    /// Confirms and returns the pending dangerous command.
+    pub fn confirm_dangerous(&mut self) -> Option<String> {
+        self.pending_confirm.take().map(|c| c.command)
+    }
+
+    /// Cancels the pending dangerous command confirmation.
+    pub fn cancel_confirm(&mut self) {
+        self.pending_confirm = None;
+    }
+
+    /// Returns true if waiting for confirmation.
+    pub fn is_confirming(&self) -> bool {
+        self.pending_confirm.is_some()
+    }
+
+    /// Toggles the skip_danger_check flag.
+    pub fn toggle_danger_check(&mut self) {
+        self.skip_danger_check = !self.skip_danger_check;
     }
 }
 
-/// Tokenizes a shell command into words, respecting quotes.
-pub fn tokenize_command(command: &str) -> Vec<CommandToken> {
-    let mut raw_tokens: Vec<String> = Vec::new();
-    let mut current = String::new();
-    let mut in_single_quote = false;
-    let mut in_double_quote = false;
-    let mut escape_next = false;
-
-    for ch in command.chars() {
-        if escape_next {
-            current.push(ch);
-            escape_next = false;
-            continue;
-        }
-
-        match ch {
-            '\\' if !in_single_quote => {
-                current.push(ch);
-                escape_next = true;
-            }
-            '\'' if !in_double_quote => {
-                current.push(ch);
-                in_single_quote = !in_single_quote;
-            }
-            '"' if !in_single_quote => {
-                current.push(ch);
-                in_double_quote = !in_double_quote;
-            }
-            ' ' | '\t' if !in_single_quote && !in_double_quote => {
-                if !current.is_empty() {
-                    raw_tokens.push(current.clone());
-                    current.clear();
-                }
-            }
-            _ => {
-                current.push(ch);
-            }
-        }
-    }
-
-    if !current.is_empty() {
-        raw_tokens.push(current);
-    }
-
-    // Classify each token
-    let mut tokens = Vec::new();
-    for (i, text) in raw_tokens.iter().enumerate() {
-        let prev = if i > 0 { Some(raw_tokens[i - 1].as_str()) } else { None };
-        let token_type = classify_token(text, i, prev);
-        tokens.push(CommandToken::new(text.clone(), token_type));
-    }
-
-    tokens
-}
+// ============================================================================
+// Tests
+// ============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -504,8 +816,27 @@ mod tests {
         let tokens = tokenize_command("ls -la /tmp");
         assert_eq!(tokens.len(), 3);
         assert_eq!(tokens[0].text, "ls");
+        assert_eq!(tokens[0].token_type, TokenType::Command);
         assert_eq!(tokens[1].text, "-la");
+        assert_eq!(tokens[1].token_type, TokenType::Flag);
         assert_eq!(tokens[2].text, "/tmp");
+        assert_eq!(tokens[2].token_type, TokenType::Path);
+    }
+
+    #[test]
+    fn test_tokenize_quoted() {
+        let tokens = tokenize_command("echo \"hello world\"");
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[1].text, "\"hello world\"");
+    }
+
+    #[test]
+    fn test_tokenize_git_command() {
+        let tokens = tokenize_command("git checkout -b feature");
+        assert_eq!(tokens.len(), 4);
+        assert_eq!(tokens[0].token_type, TokenType::Command);
+        assert_eq!(tokens[1].token_type, TokenType::Subcommand);
+        assert_eq!(tokens[2].token_type, TokenType::Flag);
     }
 
     #[test]
@@ -518,27 +849,204 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_after_locked() {
+    fn test_for_file_populates_suggestions() {
+        let state = CommandEditState::for_file("test.rs", "/path/to/test.rs");
+        // Should have suggestions for Rust files
+        assert!(!state.suggestions.is_empty(), "Suggestions should be populated for .rs files");
+        assert!(state.suggestions.iter().any(|s| s.contains("cargo")), "Should suggest cargo commands for .rs files");
+    }
+
+    #[test]
+    fn test_next_prev_suggestion() {
+        let state = CommandEditState::for_file("test.rs", "/path/to/test.rs");
+        // Should return suggestions for display
+        assert!(state.next_suggestion().is_some(), "next_suggestion should return Some when suggestions exist");
+        assert!(state.prev_suggestion().is_some(), "prev_suggestion should return Some when suggestions exist");
+    }
+
+    #[test]
+    fn test_suggestions_preserved_on_locked_token() {
         let mut state = CommandEditState::for_file("test.rs", "/path/to/test.rs");
-        state.select(1); // Select the locked filename
+        // Initially on command token (index 0), suggestions should exist
+        assert!(!state.suggestions.is_empty(), "Suggestions should exist initially");
+        let initial_count = state.suggestions.len();
+
+        // Move to locked token (filename)
+        state.next();
+        state.update_suggestions();
+
+        // Suggestions should be preserved, not cleared
+        assert_eq!(state.suggestions.len(), initial_count, "Suggestions should be preserved when on locked token");
+        assert!(state.next_suggestion().is_some(), "next_suggestion should still work on locked token");
+    }
+
+    #[test]
+    fn test_history_browser_suggestions() {
+        // Simulate history browser: "git remote add origin url"
+        let mut state = CommandEditState::from_command("git remote add origin git@github.com:user/repo.git");
+
+        // from_command doesn't call update_suggestions, so we need to call it (like history browser does)
+        state.update_suggestions();
+
+        // Initially at token 0 (git), suggestions should be populated
+        assert!(!state.suggestions.is_empty(), "Suggestions should exist for git command");
+
+        // Move to token 1 (remote)
+        state.select(1);
+        state.update_suggestions();
+
+        // After moving, suggestions should be for git subcommands
+        assert!(!state.suggestions.is_empty(), "Suggestions should exist for git subcommand position");
+        assert!(state.suggestions.len() > 1, "Should have multiple suggestions: {:?}", state.suggestions);
+
+        // Both prev and next should return values
+        let prev = state.prev_suggestion();
+        let next = state.next_suggestion();
+
+        assert!(prev.is_some(), "prev_suggestion should return Some, got None. Suggestions: {:?}", state.suggestions);
+        assert!(next.is_some(), "next_suggestion should return Some, got None. Suggestions: {:?}, suggestion_index: {:?}", state.suggestions, state.suggestion_index);
+
+        // They should be different (not same item)
+        if state.suggestions.len() > 1 {
+            assert_ne!(prev, next, "prev and next should show different suggestions");
+        }
+    }
+
+    #[test]
+    fn test_file_browser_build_command_after_cycling() {
+        // Simulate file browser edit mode flow
+        let mut state = CommandEditState::for_file("test.txt", "/path/to/test.txt");
+
+        // Initially token 0 is empty, token 1 is the locked filepath
+        assert_eq!(state.tokens[0].text, "");
+        assert_eq!(state.tokens[1].text, "/path/to/test.txt");
+        assert!(state.tokens[1].locked);
+
+        // User cycles through suggestions to select "cat"
+        assert!(!state.suggestions.is_empty(), "Should have suggestions");
+        state.cycle_suggestion(1); // Cycle to first suggestion
+        assert!(!state.edit_buffer.is_empty(), "Edit buffer should have suggestion after cycling");
+
+        // Simulate finding "cat" in suggestions (it should be there for a .txt file)
+        // For testing, manually set it
+        state.edit_buffer = "cat".to_string();
+
+        // User presses Enter - build_command should create the full command
+        let command = state.build_command();
+
+        assert!(!command.is_empty(), "Command should not be empty");
+        assert!(command.starts_with("cat"), "Command should start with 'cat', got: {}", command);
+        assert!(command.contains("/path/to/test.txt"), "Command should contain the filepath, got: {}", command);
+        assert_eq!(command, "cat /path/to/test.txt", "Full command should be 'cat /path/to/test.txt'");
+    }
+
+    #[test]
+    fn test_insert_after() {
+        let mut state = CommandEditState::from_command("git push");
+        assert_eq!(state.token_count(), 2);
+        state.select(1);
         state.insert_token_after();
-        assert_eq!(state.tokens.len(), 3);
-        assert_eq!(state.selected, 2); // Should be on the new token
-        assert!(!state.tokens[2].locked);
+        assert_eq!(state.token_count(), 3);
+        assert_eq!(state.selected, 2);
     }
 
     #[test]
     fn test_cannot_delete_locked() {
         let mut state = CommandEditState::for_file("test.rs", "/path/to/test.rs");
-        state.select(1); // Select the locked filename
+        state.select(1); // Select locked token
         state.delete_token();
-        assert_eq!(state.tokens.len(), 2); // Should not have deleted
-        assert!(state.tokens[1].locked);
+        assert_eq!(state.tokens.len(), 2); // Should not delete
     }
 
     #[test]
-    fn test_navigation() {
-        let state = CommandEditState::from_command("git push origin main");
+    fn test_undo() {
+        let mut state = CommandEditState::from_command("git push origin main");
         assert_eq!(state.token_count(), 4);
+        state.select(2);
+        state.delete_token();
+        assert_eq!(state.token_count(), 3);
+        state.undo();
+        assert_eq!(state.token_count(), 4);
+    }
+
+    #[test]
+    fn test_quote_cycling() {
+        let mut state = CommandEditState::from_command("echo hello");
+        state.select(1);
+        assert_eq!(state.edit_buffer, "hello");
+
+        state.cycle_quote();
+        assert_eq!(state.edit_buffer, "'hello'");
+
+        state.cycle_quote();
+        assert_eq!(state.edit_buffer, "\"hello\"");
+
+        state.cycle_quote();
+        assert_eq!(state.edit_buffer, "hello");
+    }
+
+    #[test]
+    fn test_dangerous_command_detection() {
+        assert!(check_dangerous_command("rm -rf /").is_some());
+        assert!(check_dangerous_command("sudo rm -rf /tmp").is_some());
+        assert!(check_dangerous_command("ls -la").is_none());
+    }
+
+    #[test]
+    fn test_has_changes() {
+        let mut state = CommandEditState::from_command("echo hello");
+        assert!(!state.has_changes());
+
+        state.select(1);
+        state.edit_buffer = "world".to_string();
+        assert!(state.has_changes());
+    }
+
+    #[test]
+    fn test_revert() {
+        let mut state = CommandEditState::from_command("echo hello");
+        state.select(1);
+        state.edit_buffer = "world".to_string();
+        state.save_current_edit();
+
+        state.revert();
+        assert!(!state.has_changes());
+        assert_eq!(state.tokens[1].text, "hello");
+    }
+
+    #[test]
+    fn test_config_for_history() {
+        let config = EditConfig::for_history();
+        assert!(config.danger_check);
+        assert!(config.enable_quotes);
+    }
+
+    #[test]
+    fn test_config_for_file() {
+        let config = EditConfig::for_file();
+        assert!(!config.danger_check);
+        assert!(!config.enable_quotes);
+    }
+
+    #[test]
+    fn test_superscript_digit() {
+        assert_eq!(superscript_digit(1), "¹");
+        assert_eq!(superscript_digit(10), "¹⁰");
+        assert_eq!(superscript_digit(20), "²⁰");
+        assert_eq!(superscript_digit(21), "·");
+    }
+
+    #[test]
+    fn test_parse_quotes() {
+        assert_eq!(parse_quotes("hello"), ("hello".to_string(), QuoteStyle::None));
+        assert_eq!(parse_quotes("'hello'"), ("hello".to_string(), QuoteStyle::Single));
+        assert_eq!(parse_quotes("\"hello\""), ("hello".to_string(), QuoteStyle::Double));
+    }
+
+    #[test]
+    fn test_apply_quotes() {
+        assert_eq!(apply_quotes("hello", QuoteStyle::None), "hello");
+        assert_eq!(apply_quotes("hello", QuoteStyle::Single), "'hello'");
+        assert_eq!(apply_quotes("hello", QuoteStyle::Double), "\"hello\"");
     }
 }
