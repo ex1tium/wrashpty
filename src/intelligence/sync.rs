@@ -52,11 +52,15 @@ pub fn sync_from_reedline(conn: &Connection, last_sync_id: i64) -> Result<(SyncS
          LIMIT 1000"
     )?;
 
+    // Use current timestamp as fallback for entries missing start_timestamp
+    // This ensures fresh synced commands aren't scored as ancient (timestamp 0)
+    let now = chrono::Utc::now().timestamp();
+
     let rows = stmt.query_map([last_sync_id], |row| {
         Ok(HistoryEntry {
             id: row.get(0)?,
             command_line: row.get(1)?,
-            timestamp: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+            timestamp: row.get::<_, Option<i64>>(2)?.unwrap_or(now),
             exit_status: row.get(3)?,
             cwd: row.get(4)?,
         })

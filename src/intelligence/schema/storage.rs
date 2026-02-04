@@ -77,7 +77,7 @@ impl<'a> SchemaStore<'a> {
 
         // Store each subcommand schema separately for quick lookup
         for subcmd in &schema.subcommands {
-            self.store_subcommand(&schema.command, subcmd, source, now)?;
+            self.store_subcommand(&schema.command, subcmd, None, source, now)?;
         }
 
         info!(
@@ -90,13 +90,23 @@ impl<'a> SchemaStore<'a> {
     }
 
     /// Stores a subcommand schema.
+    ///
+    /// The `parent_path` parameter tracks the full path of parent subcommands
+    /// for nested hierarchies (e.g., "remote add" for "git remote add").
     fn store_subcommand(
         &self,
         base_command: &str,
         subcmd: &SubcommandSchema,
+        parent_path: Option<&str>,
         source: &str,
         timestamp: i64,
     ) -> Result<(), CIError> {
+        // Build the full subcommand path
+        let full_subcommand = match parent_path {
+            Some(parent) => format!("{} {}", parent, subcmd.name),
+            None => subcmd.name.clone(),
+        };
+
         let schema_json = serde_json::to_string(subcmd)
             .map_err(|e| CIError::Internal(format!("JSON serialization failed: {}", e)))?;
 
@@ -106,30 +116,21 @@ impl<'a> SchemaStore<'a> {
              VALUES (?1, ?2, ?3, ?4, 1.0, ?5)",
             rusqlite::params![
                 base_command,
-                subcmd.name,
+                full_subcommand,
                 schema_json,
                 source,
                 timestamp,
             ],
         )?;
 
-        // Recursively store nested subcommands
+        // Recursively store nested subcommands with the updated path
         for nested in &subcmd.subcommands {
-            let full_subcommand = format!("{} {}", subcmd.name, nested.name);
-            let nested_json = serde_json::to_string(nested)
-                .map_err(|e| CIError::Internal(format!("JSON serialization failed: {}", e)))?;
-
-            self.conn.execute(
-                "INSERT OR REPLACE INTO ci_command_schemas
-                 (command, subcommand, schema_json, source, confidence, extracted_at)
-                 VALUES (?1, ?2, ?3, ?4, 1.0, ?5)",
-                rusqlite::params![
-                    base_command,
-                    full_subcommand,
-                    nested_json,
-                    source,
-                    timestamp,
-                ],
+            self.store_subcommand(
+                base_command,
+                nested,
+                Some(&full_subcommand),
+                source,
+                timestamp,
             )?;
         }
 

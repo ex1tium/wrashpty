@@ -5,7 +5,9 @@
 
 use std::collections::HashSet;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 use tracing::{debug, info};
+use wait_timeout::ChildExt;
 
 use super::parser::HelpParser;
 use super::types::{ExtractionResult, SubcommandSchema};
@@ -33,45 +35,73 @@ pub fn probe_command_help(command: &str) -> Option<String> {
         // Special case: "help" subcommand goes after the command
         if *help_flag == "help" && parts.len() > 1 {
             // For "git remote", try "git help remote"
+            // Insert "help" after the base command, keeping subcommand(s) intact
             cmd_parts.insert(1, "help");
-            cmd_parts.pop(); // Remove the subcommand from end
         } else {
             cmd_parts.push(help_flag);
         }
 
         debug!(command = ?cmd_parts, "Probing help");
 
-        let result = Command::new(cmd_parts[0])
+        let spawn_result = Command::new(cmd_parts[0])
             .args(&cmd_parts[1..])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .output();
+            .spawn();
 
-        match result {
-            Ok(output) => {
-                // Some commands output help to stderr
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
+        match spawn_result {
+            Ok(mut child) => {
+                let timeout = Duration::from_millis(HELP_TIMEOUT_MS);
+                match child.wait_timeout(timeout) {
+                    Ok(Some(_status)) => {
+                        // Process completed within timeout, collect output
+                        match child.wait_with_output() {
+                            Ok(output) => {
+                                // Some commands output help to stderr
+                                let stdout = String::from_utf8_lossy(&output.stdout);
+                                let stderr = String::from_utf8_lossy(&output.stderr);
 
-                let help_text = if stdout.len() > stderr.len() {
-                    stdout.to_string()
-                } else {
-                    stderr.to_string()
-                };
+                                let help_text = if stdout.len() > stderr.len() {
+                                    stdout.to_string()
+                                } else {
+                                    stderr.to_string()
+                                };
 
-                // Validate it looks like help output
-                if is_help_output(&help_text) {
-                    debug!(
-                        command = command,
-                        help_flag = help_flag,
-                        length = help_text.len(),
-                        "Got help output"
-                    );
-                    return Some(help_text);
+                                // Validate it looks like help output
+                                if is_help_output(&help_text) {
+                                    debug!(
+                                        command = command,
+                                        help_flag = help_flag,
+                                        length = help_text.len(),
+                                        "Got help output"
+                                    );
+                                    return Some(help_text);
+                                }
+                            }
+                            Err(e) => {
+                                debug!(command = ?cmd_parts, error = %e, "Failed to collect help output");
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        // Timeout expired, kill the process
+                        debug!(
+                            command = ?cmd_parts,
+                            timeout_ms = HELP_TIMEOUT_MS,
+                            "Help command timed out, killing process"
+                        );
+                        let _ = child.kill();
+                        let _ = child.wait(); // Reap the zombie process
+                    }
+                    Err(e) => {
+                        debug!(command = ?cmd_parts, error = %e, "Failed to wait on help command");
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
                 }
             }
             Err(e) => {
-                debug!(command = ?cmd_parts, error = %e, "Failed to run help command");
+                debug!(command = ?cmd_parts, error = %e, "Failed to spawn help command");
             }
         }
     }
