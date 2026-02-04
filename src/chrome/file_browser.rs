@@ -596,7 +596,19 @@ impl FileBrowserPanel {
         let suggestion_offset = match state.selected_section {
             FileEditSection::Prefix => 3, // Initial "   " padding
             FileEditSection::Filename => 3 + prefix_display.len() + 1, // After prefix + space
-            FileEditSection::Suffix => 3 + prefix_display.len() + 1 + state.filename.len() + 1, // After filename + space
+            FileEditSection::Suffix => {
+                // Start after filename
+                let mut offset = 3 + prefix_display.len() + 1 + state.filename.len() + 1;
+                // Add width of suffix tokens before the selected position
+                for (i, token) in state.suffix_tokens.iter().enumerate() {
+                    if i < state.selected_index {
+                        offset += token.len() + 1; // token + space
+                    }
+                }
+                // Add opening bracket for the edit slot
+                offset += 1; // "⟦"
+                offset
+            }
         };
         let suggestion_padding = " ".repeat(suggestion_offset);
 
@@ -625,23 +637,41 @@ impl FileBrowserPanel {
         let filename_style = Style::default().fg(self.theme.text_highlight);
         spans.push(Span::styled(format!("{} ", state.filename), filename_style));
 
-        // Suffix section
-        let suffix_style = if state.selected_section == FileEditSection::Suffix {
-            Style::default().fg(self.theme.git_fg).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(self.theme.git_fg)
-        };
-        let suffix_display = if state.suffix_tokens.is_empty() {
-            if state.selected_section == FileEditSection::Suffix && !state.edit_buffer.is_empty() {
-                format!("⟦{}⟧", state.edit_buffer)
+        // Suffix section - show individual tokens with edit slot
+        let suffix_style = Style::default().fg(self.theme.git_fg);
+        let suffix_selected_style = Style::default().fg(self.theme.git_fg).add_modifier(Modifier::BOLD);
+
+        if state.selected_section == FileEditSection::Suffix {
+            // Show suffix tokens individually with edit slot at selected_index
+            if state.suffix_tokens.is_empty() && state.edit_buffer.is_empty() {
+                spans.push(Span::styled("[args]", suffix_style));
             } else {
-                "[args]".to_string()
+                for (i, token) in state.suffix_tokens.iter().enumerate() {
+                    if i == state.selected_index {
+                        // This token is being edited
+                        spans.push(Span::styled(format!("⟦{}⟧ ", state.edit_buffer), suffix_selected_style));
+                    } else {
+                        spans.push(Span::styled(format!("{} ", token), suffix_style));
+                    }
+                }
+                // If selected_index is at or beyond tokens, show edit slot for new token
+                if state.selected_index >= state.suffix_tokens.len() {
+                    if state.edit_buffer.is_empty() {
+                        spans.push(Span::styled("⟦_⟧", suffix_selected_style));
+                    } else {
+                        spans.push(Span::styled(format!("⟦{}⟧", state.edit_buffer), suffix_selected_style));
+                    }
+                }
             }
         } else {
-            let tokens: Vec<&str> = state.suffix_tokens.iter().map(|s| s.as_str()).collect();
-            tokens.join(" ")
-        };
-        spans.push(Span::styled(suffix_display, suffix_style));
+            // Not in suffix section - just show tokens or placeholder
+            if state.suffix_tokens.is_empty() {
+                spans.push(Span::styled("[args]", suffix_style));
+            } else {
+                let tokens: Vec<&str> = state.suffix_tokens.iter().map(|s| s.as_str()).collect();
+                spans.push(Span::styled(tokens.join(" "), suffix_style));
+            }
+        }
 
         let command_line = Line::from(spans);
         Paragraph::new(command_line).render(chunks[3], buffer);
