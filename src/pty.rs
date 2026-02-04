@@ -78,6 +78,16 @@ impl Pty {
         cmd.arg("--rcfile");
         cmd.arg(bashrc_path);
 
+        // Set TERM so ncurses-based applications (nano, htop, vim) work correctly.
+        // Without this, control characters like Ctrl+X may not be interpreted properly.
+        // Inherit TERM from parent if available, otherwise default to xterm-256color.
+        // Treat empty or missing TERM as missing.
+        let term = std::env::var("TERM")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "xterm-256color".to_string());
+        cmd.env("TERM", term);
+
         let child = pair
             .slave
             .spawn_command(cmd)
@@ -207,6 +217,18 @@ impl Pty {
     /// Returns an error if terminal attributes cannot be read or modified.
     pub fn create_echo_guard(&self) -> Result<EchoGuard> {
         EchoGuard::new(self.master_fd())
+    }
+
+    /// Returns the process ID of the child Bash process.
+    ///
+    /// This can be used to query the child's current working directory
+    /// via `/proc/<pid>/cwd`.
+    ///
+    /// # Returns
+    ///
+    /// The child's PID if available, or `None` if the PID cannot be determined.
+    pub fn child_pid(&self) -> Option<u32> {
+        self.child.process_id()
     }
 }
 

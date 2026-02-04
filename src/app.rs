@@ -32,25 +32,35 @@
 
 use std::io::Write;
 use std::os::unix::io::{AsRawFd, BorrowedFd, RawFd};
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
-use std::sync::Arc;
+use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use nix::poll::{poll, PollFd, PollFlags};
+use crossterm::event::{self, Event};
+use nix::poll::{PollFd, PollFlags, poll};
 use nix::unistd::read;
 use portable_pty::ExitStatus;
+use ratatui_core::buffer::Buffer;
+use ratatui_core::layout::Rect;
 use tracing::{debug, info, warn};
 
+use crate::chrome::panel::{Panel, PanelResult};
+use crate::chrome::tabbed_panel::TabbedPanel;
+use crate::chrome::{Chrome, ChromeContext, NotificationStyle, SizeCheckResult};
+use crate::config::Config;
 use crate::editor::{Editor, EditorResult};
+use crate::history_store::HistoryStore;
 use crate::prompt::WrashPrompt;
 use crate::pty::Pty;
 use crate::pump::{Pump, PumpResult};
 use crate::signals::SignalHandler;
 use crate::terminal::TerminalGuard;
-use crate::types::{MarkerEvent, Mode, SignalEvent};
+use crate::types::{ChromeMode, MarkerEvent, Mode, SignalEvent};
 
 /// Extracts the actual exit code from an ExitStatus.
 ///
@@ -108,6 +118,36 @@ struct DrainGuard {
     stop_flag: Arc<AtomicBool>,
     /// Handle to the drain thread (Option to allow taking in drop).
     handle: Option<JoinHandle<()>>,
+}
+
+/// RAII guard for cursor visibility.
+///
+/// Ensures the cursor is shown again on all exit paths, including
+/// panics and early returns during panel mode.
+struct CursorGuard;
+
+impl CursorGuard {
+    /// Creates a new cursor guard and hides the cursor.
+    ///
+    /// The cursor will be shown again when the guard is dropped.
+    fn new() -> std::io::Result<Self> {
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        use std::io::Write;
+        write!(out, "{}", crossterm::cursor::Hide)?;
+        out.flush()?;
+        Ok(Self)
+    }
+}
+
+impl Drop for CursorGuard {
+    fn drop(&mut self) {
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        use std::io::Write;
+        let _ = write!(out, "{}", crossterm::cursor::Show);
+        let _ = out.flush();
+    }
 }
 
 impl DrainGuard {
@@ -257,6 +297,9 @@ pub struct App {
     /// Unix signal handler.
     signal_handler: SignalHandler,
 
+    /// Chrome layer for status bars and scroll regions.
+    chrome: Chrome,
+
     /// Exit code from last command execution.
     last_exit_code: i32,
 
@@ -273,11 +316,36 @@ pub struct App {
     /// Reedline-based line editor.
     editor: Editor,
 
+    /// Centralized history store with SQLite backend.
+    history_store: Arc<Mutex<HistoryStore>>,
+
     /// Command pending injection after transitioning to Injecting mode.
     pending_command: Option<String>,
 
+    /// Whether we're waiting for wipe confirmation (after `:wipe` was entered).
+    pending_wipe_confirmation: bool,
+
     /// Timestamp when injection started (for timeout).
     injection_start: Option<Instant>,
+
+    // Command execution metadata for context bar
+    /// Current working directory (of the shell, not the parent process).
+    current_cwd: PathBuf,
+    /// Git branch name, if in a repository.
+    git_branch: Option<String>,
+    /// Whether git working directory is dirty.
+    git_dirty: bool,
+    /// Cached git info to avoid repeated expensive queries.
+    git_cache: Option<crate::git::CachedGitInfo>,
+    /// Last command that was executed.
+    last_command: Option<String>,
+    /// Duration of the last command execution.
+    last_command_duration: Option<Duration>,
+    /// Timestamp when command started (for duration tracking).
+    command_start_time: Option<Instant>,
+    /// Flag indicating a resize occurred during Edit mode and chrome needs updating.
+    /// This defers scroll region and context bar updates until after reedline yields.
+    pending_resize: bool,
 }
 
 impl App {
@@ -287,6 +355,8 @@ impl App {
     ///
     /// * `bashrc_path` - Path to the generated bashrc file
     /// * `session_token` - 16-byte session token for marker validation
+    /// * `chrome_mode` - Chrome display mode (Headless or Full)
+    /// * `config` - Application configuration (theme, symbols)
     ///
     /// # Errors
     ///
@@ -296,13 +366,21 @@ impl App {
     /// - PTY spawn fails
     /// - Signal handler registration fails
     /// - Editor creation fails
-    pub fn new(bashrc_path: &str, session_token: [u8; 16]) -> Result<Self> {
+    pub fn new(
+        bashrc_path: &str,
+        session_token: [u8; 16],
+        chrome_mode: ChromeMode,
+        config: &Config,
+    ) -> Result<Self> {
         // Create terminal guard first (enables raw mode)
         let terminal_guard =
             TerminalGuard::new().context("Failed to initialize terminal raw mode")?;
 
         // Get terminal size for PTY
         let (cols, rows) = TerminalGuard::get_size().context("Failed to get terminal size")?;
+
+        // Create chrome layer with theme and symbols from config
+        let chrome = Chrome::new(chrome_mode, config);
 
         // Spawn PTY with bash
         let pty = Pty::spawn(bashrc_path, cols, rows).context("Failed to spawn PTY")?;
@@ -317,8 +395,22 @@ impl App {
             Some(signal_handler.as_raw_fd()),
         );
 
-        // Create the reedline editor
-        let editor = Editor::new().context("Failed to create editor")?;
+        // Create the history store with SQLite backend
+        let history_store = Arc::new(Mutex::new(
+            HistoryStore::new(session_token).context("Failed to create history store")?
+        ));
+
+        // Create reedline history from the store
+        let reedline_history = history_store
+            .lock()
+            .map_err(|_| anyhow::anyhow!("History store lock poisoned"))?
+            .create_reedline_history()?;
+
+        // Create the reedline editor with the history
+        let editor = Editor::new(reedline_history).context("Failed to create editor")?;
+
+        // Get initial working directory
+        let current_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
 
         info!(mode = ?Mode::Initializing, "App starting");
 
@@ -328,13 +420,24 @@ impl App {
             pump,
             terminal_guard,
             signal_handler,
+            chrome,
             last_exit_code: 0,
             startup_time: Instant::now(),
             session_token,
             bashrc_path: bashrc_path.to_string(),
             editor,
+            history_store,
             pending_command: None,
+            pending_wipe_confirmation: false,
             injection_start: None,
+            current_cwd,
+            git_branch: None,
+            git_dirty: false,
+            git_cache: None,
+            last_command: None,
+            last_command_duration: None,
+            command_start_time: None,
+            pending_resize: false,
         })
     }
 
@@ -484,12 +587,63 @@ impl App {
                     dropped_bytes = dropped,
                     "Background output exceeded buffer, {} bytes dropped", dropped
                 );
-                // Show warning to user in terminal
-                let _ = writeln!(
-                    std::io::stderr(),
-                    "\x1b[33m[wrashpty: {} bytes of background output dropped due to buffer overflow]\x1b[0m",
-                    dropped
+                // Queue warning notification for display in context bar
+                self.chrome.notify(
+                    format!("{} bytes dropped (buffer overflow)", dropped),
+                    NotificationStyle::Warning,
+                    Duration::from_secs(5),
                 );
+            }
+        }
+
+        // Handle deferred resize from SIGWINCH during Edit mode.
+        // This is done here (before reedline takes control) rather than in the
+        // signal handler to avoid interfering with reedline's internal repaint.
+        if self.pending_resize {
+            self.pending_resize = false;
+            if let Ok((cols, rows)) = TerminalGuard::get_size() {
+                match self.chrome.check_minimum_size(cols, rows) {
+                    SizeCheckResult::Suspended => {
+                        if let Err(e) = self.chrome.clear_bars(rows) {
+                            warn!("Failed to clear chrome bars on suspend: {}", e);
+                        }
+                        if let Err(e) = Chrome::reset_scroll_region() {
+                            warn!("Failed to reset scroll region on suspend: {}", e);
+                        }
+                        debug!("Chrome suspended due to small terminal (deferred)");
+                    }
+                    SizeCheckResult::Resumed | SizeCheckResult::NoChange => {
+                        if self.chrome.is_active() {
+                            if let Err(e) = self.chrome.setup_scroll_region_preserve_cursor(rows) {
+                                warn!("Failed to reapply scroll region on resize: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Redraw context bar right before reedline takes over
+        // This ensures the bar is visible even if flush_pending wrote output that scrolled.
+        // Note: We do NOT call position_cursor_in_scroll_region() here because:
+        // 1. After command execution, cursor should be where output ended
+        // 2. Context bar drawing uses save/restore cursor, so it doesn't affect position
+        // 3. Reedline will position its prompt at the current cursor location
+        if self.chrome.is_active() {
+            if let Ok((cols, _rows)) = TerminalGuard::get_size() {
+                let timestamp = chrono::Local::now().format("%H:%M").to_string();
+                let ctx = ChromeContext {
+                    cwd: &self.current_cwd,
+                    git_branch: self.git_branch.as_deref(),
+                    git_dirty: self.git_dirty,
+                    last_exit_code: self.last_exit_code,
+                    last_command: self.last_command.as_deref(),
+                    last_duration: self.last_command_duration,
+                    timestamp: &timestamp,
+                };
+                if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &ctx) {
+                    warn!("Failed to redraw context bar before prompt: {}", e);
+                }
             }
         }
 
@@ -514,17 +668,17 @@ impl App {
         let mut drain_guard = DrainGuard::new(stop_flag, drain_handle);
 
         // Read line from user (blocks until input)
-        // Use match instead of ? to ensure drain_guard is dropped before returning
+        // Use match instead of ? to ensure drain guard is dropped before returning
         let editor_result = match self.editor.read_line(&prompt) {
             Ok(result) => result,
             Err(e) => {
-                // Guard will stop and join the drain thread on drop
+                // Guard will stop and join thread on drop
                 drop(drain_guard);
                 return Err(e).context("Reedline read_line failed");
             }
         };
 
-        // Explicitly stop the drain thread before processing results
+        // Explicitly stop background drain thread before processing results
         drain_guard.stop();
 
         // Collect and process all bytes from the drain thread
@@ -545,10 +699,11 @@ impl App {
                 dropped_bytes = channel_dropped_bytes,
                 "Background drain channel full, {} bytes dropped", channel_dropped_bytes
             );
-            let _ = writeln!(
-                std::io::stderr(),
-                "\x1b[33m[wrashpty: {} bytes of background output dropped due to channel backpressure]\x1b[0m",
-                channel_dropped_bytes
+            // Queue warning notification for display in context bar
+            self.chrome.notify(
+                format!("{} bytes dropped (channel full)", channel_dropped_bytes),
+                NotificationStyle::Warning,
+                Duration::from_secs(5),
             );
         }
 
@@ -599,12 +754,62 @@ impl App {
         // Handle the editor result
         match editor_result {
             EditorResult::Command(line) => {
-                // Check for built-in exit command
+                // Check for built-in commands
                 let trimmed = line.trim();
+
+                // Exit command
                 if trimmed == "exit" || trimmed.starts_with("exit ") {
                     info!("User typed 'exit' command");
                     self.transition_to_terminating();
                     return Ok(());
+                }
+
+                // Panel command - opens the command palette
+                if trimmed == ":panel" || trimmed == ":p" {
+                    debug!("User requested panel via command");
+                    self.open_panel()?;
+                    return Ok(());
+                }
+
+                // History wipe command - sets pending confirmation flag
+                if trimmed == ":wipe" {
+                    self.pending_wipe_confirmation = true;
+                    self.chrome.notify(
+                        "Type 'wipe' to confirm history deletion",
+                        NotificationStyle::Warning,
+                        Duration::from_secs(10),
+                    );
+                    return Ok(());
+                }
+
+                // Handle wipe confirmation (only if :wipe was entered first)
+                if trimmed == "wipe" && self.pending_wipe_confirmation {
+                    self.pending_wipe_confirmation = false;
+                    self.chrome.clear_notifications();
+                    if let Ok(store) = self.history_store.lock() {
+                        match store.wipe("wipe") {
+                            Ok(()) => {
+                                self.chrome.notify(
+                                    "History database deleted",
+                                    NotificationStyle::Success,
+                                    Duration::from_secs(3),
+                                );
+                            }
+                            Err(e) => {
+                                self.chrome.notify(
+                                    format!("Failed to delete history: {}", e),
+                                    NotificationStyle::Error,
+                                    Duration::from_secs(5),
+                                );
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+
+                // Clear pending wipe confirmation if user enters anything else
+                if self.pending_wipe_confirmation && trimmed != "wipe" {
+                    self.pending_wipe_confirmation = false;
                 }
 
                 // Skip empty commands
@@ -624,6 +829,18 @@ impl App {
             EditorResult::Exit => {
                 info!("Ctrl+D at empty prompt, exiting");
                 self.transition_to_terminating();
+            }
+            EditorResult::HostCommand(cmd) => {
+                // Handle host commands (like panel open requests)
+                debug!(command = %cmd, "Host command received");
+                match cmd.as_str() {
+                    "open_panel" => {
+                        self.open_panel()?;
+                    }
+                    _ => {
+                        warn!(command = %cmd, "Unknown host command");
+                    }
+                }
             }
         }
 
@@ -680,6 +897,371 @@ impl App {
 
         Ok(None)
     }
+}
+
+/// RAII guard that ensures `collapse_panel` is called even on panic or early return.
+///
+/// Construct with [`PanelGuard::new`], which marks it as "armed". If the guarded
+/// code completes successfully, call [`PanelGuard::disarm`] to prevent the cleanup
+/// from running twice. If dropped while still armed (e.g., due to panic or `?`),
+/// the `Drop` impl will call `collapse_panel`.
+struct PanelGuard<'a> {
+    chrome: &'a mut Chrome,
+    total_rows: u16,
+    armed: bool,
+}
+
+impl<'a> PanelGuard<'a> {
+    /// Creates a new armed guard.
+    fn new(chrome: &'a mut Chrome, total_rows: u16) -> Self {
+        Self {
+            chrome,
+            total_rows,
+            armed: true,
+        }
+    }
+
+    /// Disarms the guard, preventing `collapse_panel` from being called in `Drop`.
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PanelGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            // Ignore the Result in Drop - we can't propagate errors here
+            let _ = self.chrome.collapse_panel(self.total_rows);
+        }
+    }
+}
+
+impl App {
+    /// Runs the panel mode with the given panel.
+    ///
+    /// This method handles the panel input loop, rendering the panel and
+    /// processing key events until the user dismisses it or executes a command.
+    ///
+    /// # Arguments
+    ///
+    /// * `panel` - The panel to display and interact with
+    ///
+    /// # Returns
+    ///
+    /// The result of the panel interaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if terminal operations fail.
+    fn run_panel_mode<P: Panel>(&mut self, panel: &mut P) -> Result<PanelResult> {
+        // Ensure raw mode is active - reedline may have toggled terminal modes
+        self.terminal_guard.ensure_raw_mode().context("Failed to ensure raw mode for panel")?;
+
+        let (cols, rows) =
+            TerminalGuard::get_size().context("Failed to get terminal size for panel")?;
+
+        // Minimum terminal height needed for panel mode (panel + at least 1 row for PTY)
+        const MIN_PANEL_ROWS: u16 = 6; // 5 for panel + 1 for PTY
+        if rows < MIN_PANEL_ROWS {
+            debug!(rows, min = MIN_PANEL_ROWS, "Terminal too small for panel");
+            return Ok(PanelResult::Dismiss);
+        }
+
+        // Calculate panel height (min of preferred and half terminal height)
+        // Clamp to ensure at least 1 row remains for the PTY
+        let preferred = panel.preferred_height();
+        let max_panel_height = rows.saturating_sub(1); // Leave at least 1 row for PTY
+        let panel_height = preferred.min(max_panel_height / 2).max(5).min(max_panel_height);
+
+        // Calculate effective rows and verify it's valid
+        let effective_rows = rows.saturating_sub(panel_height);
+        if effective_rows == 0 {
+            debug!(rows, panel_height, "Cannot open panel: no space for PTY");
+            return Ok(PanelResult::Dismiss);
+        }
+
+        debug!(cols, rows, panel_height, effective_rows, preferred, "Entering panel mode");
+
+        // Expand panel area
+        self.chrome
+            .expand_panel(panel_height, rows)
+            .context("Failed to expand panel")?;
+
+        // Create guard to ensure collapse_panel is called even on panic or early return
+        let guard = PanelGuard::new(&mut self.chrome, rows);
+
+        // Resize PTY to account for panel - access through guard's chrome reference
+        // Note: We need to drop the guard temporarily to access self.pty due to borrow rules
+        // For the resize, we handle errors explicitly to maintain guard safety
+        let resize_result = {
+            // Temporarily disarm and drop guard to access self
+            guard.disarm();
+            self.pty.resize(cols, effective_rows)
+        };
+
+        // If resize failed, collapse panel and propagate error
+        if let Err(e) = resize_result {
+            self.chrome
+                .collapse_panel(rows)
+                .context("Failed to collapse panel after resize error")?;
+            return Err(e).context("Failed to resize PTY for panel");
+        }
+
+        // Use catch_unwind for panic safety during panel_input_loop
+        // Note: We don't use PanelGuard here because we need &mut self for panel_input_loop,
+        // and the guard would hold a mutable borrow of self.chrome. The catch_unwind
+        // provides panic safety, and we explicitly call collapse_panel after.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.panel_input_loop(panel, cols, panel_height, rows)
+        }));
+
+        // Collapse panel - always runs after panel_input_loop completes or panics
+        self.chrome
+            .collapse_panel(rows)
+            .context("Failed to collapse panel")?;
+
+        // Restore PTY size (accounting for chrome bar if active)
+        let effective_rows = if self.chrome.is_active() {
+            rows.saturating_sub(1)
+        } else {
+            rows
+        };
+        self.pty
+            .resize(cols, effective_rows)
+            .context("Failed to restore PTY size")?;
+
+        debug!("Exited panel mode");
+
+        // Handle the result from catch_unwind
+        match result {
+            Ok(r) => r,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    /// Inner loop for panel input handling.
+    fn panel_input_loop<P: Panel>(
+        &mut self,
+        panel: &mut P,
+        cols: u16,
+        panel_height: u16,
+        _total_rows: u16,
+    ) -> Result<PanelResult> {
+        use crossterm::terminal::enable_raw_mode;
+
+        // Ensure raw mode is enabled for crossterm event handling
+        enable_raw_mode().context("Failed to enable raw mode for panel")?;
+
+        // RAII guard ensures cursor is shown on all exit paths (including panics/errors)
+        let _cursor_guard = CursorGuard::new().context("Failed to hide cursor for panel")?;
+
+        // Clear the panel area first
+        {
+            let stdout = std::io::stdout();
+            let mut out = stdout.lock();
+            use std::io::Write;
+            for row in 1..=panel_height {
+                write!(out, "\x1b[{};1H\x1b[K", row)?;
+            }
+            out.flush()?;
+        }
+
+        let result = self.panel_input_loop_inner(panel, cols, panel_height);
+
+        // Note: We don't disable raw mode here as wrashpty needs it for PTY handling
+        // The TerminalGuard manages the overall raw mode state
+        // Cursor will be shown when _cursor_guard is dropped
+
+        result
+    }
+
+    /// Inner implementation of panel input loop.
+    fn panel_input_loop_inner<P: Panel>(
+        &mut self,
+        panel: &mut P,
+        cols: u16,
+        panel_height: u16,
+    ) -> Result<PanelResult> {
+        use ratatui_core::style::Style;
+        use ratatui_core::widgets::Widget;
+        use ratatui_widgets::block::Block;
+        use ratatui_widgets::borders::Borders;
+
+        // Get theme for panel styling
+        let theme = self.chrome.theme();
+
+        // Track if we need to redraw - start with true for initial render
+        let mut needs_redraw = true;
+
+        loop {
+            // Only render when needed (after input or on first draw)
+            if needs_redraw {
+                // Create buffer for panel area (starting at row 1, which is terminal row 1)
+                // We use row 0 in buffer coordinates, which maps to terminal row 1
+                let area = Rect::new(0, 0, cols, panel_height);
+                let mut buffer = Buffer::empty(area);
+
+                // Create a bordered block for the panel with theme colors
+                let block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme.panel_border))
+                    .title(" Wrashpty Panel (Esc to close) ")
+                    .title_style(Style::default().fg(theme.header_fg));
+
+                // Get the inner area for panel content
+                let inner_area = block.inner(area);
+
+                // Render the border
+                block.render(area, &mut buffer);
+
+                // Render panel content inside the border
+                panel.render(&mut buffer, inner_area);
+
+                // Write buffer to terminal (row 0 in buffer = terminal row 1)
+                self.chrome
+                    .render_panel_buffer(&buffer, area)
+                    .context("Failed to render panel buffer")?;
+
+                // Flush stdout to ensure panel is visible
+                {
+                    use std::io::Write;
+                    std::io::stdout().flush()?;
+                }
+
+                needs_redraw = false;
+            }
+
+            // Poll for input with timeout - use a longer timeout since we don't redraw constantly
+            match event::poll(std::time::Duration::from_millis(100)) {
+                Ok(true) => {
+                    match event::read() {
+                        Ok(Event::Key(key)) => {
+                            // Skip key release events (only handle press)
+                            if key.kind != crossterm::event::KeyEventKind::Press {
+                                continue;
+                            }
+
+                            debug!(key = ?key.code, "Panel received key");
+
+                            match panel.handle_input(key) {
+                                PanelResult::Continue => {
+                                    // Input processed, need to redraw
+                                    needs_redraw = true;
+                                }
+                                result => {
+                                    debug!(result = ?result, "Panel returning result");
+                                    return Ok(result);
+                                }
+                            }
+                        }
+                        Ok(Event::Resize(new_cols, new_rows)) => {
+                            debug!(new_cols, new_rows, "Terminal resized during panel");
+                            // For now, just dismiss on resize - could handle more gracefully
+                            return Ok(PanelResult::Dismiss);
+                        }
+                        Ok(_) => {
+                            // Mouse or other events - ignore but don't redraw
+                        }
+                        Err(e) => {
+                            warn!("Error reading event: {}", e);
+                            return Ok(PanelResult::Dismiss);
+                        }
+                    }
+                }
+                Ok(false) => {
+                    // No event available - don't redraw, just continue polling
+                }
+                Err(e) => {
+                    warn!("Error polling for events: {}", e);
+                    return Ok(PanelResult::Dismiss);
+                }
+            }
+
+            // Check for signals
+            self.handle_signals()?;
+
+            if self.should_shutdown() {
+                return Ok(PanelResult::Dismiss);
+            }
+        }
+    }
+
+    /// Opens the command panel.
+    ///
+    /// Creates a tabbed panel with all available panels (command palette,
+    /// file browser, history browser, help) and runs it in panel mode.
+    ///
+    /// # Returns
+    ///
+    /// Ok(()) if the panel was handled successfully (command executed or dismissed).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if terminal operations fail.
+    pub fn open_panel(&mut self) -> Result<()> {
+        let mut panel = TabbedPanel::new(self.chrome.theme());
+        panel.set_history_store(Arc::clone(&self.history_store));
+        panel.load_context(&self.current_cwd);
+
+        match self.run_panel_mode(&mut panel)? {
+            PanelResult::Execute(cmd) => {
+                debug!(command = %cmd, "Panel executing command");
+                // Use the same restore flow as Dismiss - this properly clears the panel
+                // and restores terminal state. Then inject the command.
+                self.restore_after_panel()?;
+                self.pending_command = Some(cmd);
+                self.inject_pending_command()?;
+            }
+            PanelResult::InsertText(text) => {
+                // Pre-fill the reedline buffer with the selected text
+                debug!(text = %text, "Panel requested text insertion, pre-filling buffer");
+                self.restore_after_panel()?;
+                // Insert the text into reedline's buffer before the next read_line call
+                self.editor.prefill_buffer(&text);
+            }
+            PanelResult::Dismiss | PanelResult::Continue => {
+                debug!("Panel dismissed, restoring chrome");
+                // Return to editing - redraw context bar and restore terminal state
+                self.restore_after_panel()?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Restores terminal state after panel closes without executing a command.
+    fn restore_after_panel(&mut self) -> Result<()> {
+        let (cols, rows) = TerminalGuard::get_size()
+            .context("Failed to get terminal size after panel")?;
+
+        // Re-establish scroll region for chrome
+        if self.chrome.is_active() {
+            self.chrome.setup_scroll_region(rows)?;
+        }
+
+        // Redraw context bar
+        let timestamp = chrono::Local::now().format("%H:%M").to_string();
+        let ctx = ChromeContext {
+            cwd: &self.current_cwd,
+            git_branch: self.git_branch.as_deref(),
+            git_dirty: self.git_dirty,
+            last_exit_code: self.last_exit_code,
+            last_command: self.last_command.as_deref(),
+            last_duration: self.last_command_duration,
+            timestamp: &timestamp,
+        };
+
+        if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &ctx) {
+            warn!("Failed to redraw context bar after panel: {}", e);
+        }
+
+        // Position cursor in scroll region (but not at bottom - let reedline handle it)
+        if self.chrome.is_active() {
+            self.chrome.position_cursor_in_scroll_region()?;
+        }
+
+        Ok(())
+    }
 
     /// Injects the pending command into the PTY.
     ///
@@ -692,7 +1274,10 @@ impl App {
 
         debug!(command = %command, "Injecting command");
 
-        // Transition to Injecting mode first (syncs PTY size)
+        // Store command for context bar display
+        self.last_command = Some(command.clone());
+
+        // Transition to Injecting mode first (syncs PTY size, records start time)
         self.transition_to_injecting()?;
 
         // Create echo guard to suppress command echo
@@ -735,7 +1320,10 @@ impl App {
 
         // Use bounded wait so we can re-check injection_start timeout
         // even when no PTY data arrives
-        match self.pump.run_once_with_timeout(Some(INJECTION_POLL_TIMEOUT))? {
+        match self
+            .pump
+            .run_once_with_timeout(Some(INJECTION_POLL_TIMEOUT))?
+        {
             PumpResult::MarkerDetected(markers) => {
                 for marker in markers {
                     match marker {
@@ -784,10 +1372,16 @@ impl App {
             return Ok(code);
         }
 
-        // Try to send exit command
-        debug!("Sending 'exit' command to PTY");
-        if let Err(e) = self.pty.write_command("exit") {
-            warn!("Failed to send exit command: {}", e);
+        // Send SIGHUP to the shell (standard "terminal hangup" signal)
+        // This is cleaner than sending "exit" command which pollutes shell history
+        if let Some(pid) = self.pty.child_pid() {
+            debug!(pid, "Sending SIGHUP to child process");
+            // SAFETY: Sending SIGHUP to our own child process is safe
+            unsafe {
+                libc::kill(pid as i32, libc::SIGHUP);
+            }
+        } else {
+            warn!("Could not get child PID for SIGHUP");
         }
 
         // Wait for child to exit with timeout
@@ -811,22 +1405,185 @@ impl App {
     }
 
     /// Transitions to Edit mode.
+    ///
+    /// Sets up scroll region and renders context bar if chrome is active.
+    /// Resizes PTY to effective rows (accounting for top bar).
+    ///
+    /// When coming from Passthrough, the scroll region is already set and cursor
+    /// is at the end of command output. We preserve cursor position so the prompt
+    /// appears after the output (natural shell flow).
     fn transition_to_edit(&mut self) {
-        info!(from = ?self.mode, to = ?Mode::Edit, "Mode transition");
+        let from_mode = self.mode;
+        info!(from = ?from_mode, to = ?Mode::Edit, "Mode transition");
+
+        // Calculate command duration if coming from command execution
+        if let Some(start) = self.command_start_time.take() {
+            self.last_command_duration = Some(start.elapsed());
+
+            // Update history metadata with exit status, duration, and cwd
+            if let Ok(mut store) = self.history_store.lock() {
+                let exit_status = Some(self.last_exit_code);
+                let cwd = Some(self.current_cwd.clone());
+                if let Err(e) = store.update_last_command(exit_status, self.last_command_duration, cwd) {
+                    warn!("Failed to update history metadata: {}", e);
+                }
+            }
+        }
+
+        // Update context information using shell's cwd (not parent process)
+        self.current_cwd = self.get_shell_cwd();
+        self.update_git_info();
+
+        // Query terminal size for chrome setup
+        let (cols, rows) = match TerminalGuard::get_size() {
+            Ok(size) => size,
+            Err(e) => {
+                warn!("Failed to get terminal size for Edit mode: {}", e);
+                self.mode = Mode::Edit;
+                return;
+            }
+        };
+
+        // Check minimum size and auto-suspend chrome if needed
+        let _ = self.chrome.check_minimum_size(cols, rows);
+
+        let coming_from_passthrough = from_mode == Mode::Passthrough;
+
+        if self.chrome.is_active() {
+            if coming_from_passthrough {
+                // Coming from Passthrough: cursor is at end of command output.
+                // Re-establish scroll region using cursor-preserving variant.
+                if let Err(e) = self.chrome.setup_scroll_region_preserve_cursor(rows) {
+                    warn!("Failed to restore scroll region: {}", e);
+                }
+            } else {
+                // Initial startup: set up scroll region
+                if let Err(e) = self.chrome.enter_edit_mode(rows) {
+                    warn!("Failed to set up chrome scroll region: {}", e);
+                }
+            }
+
+            // SINGLE RENDER POINT: Render context bar BEFORE reedline starts
+            let timestamp = chrono::Local::now().format("%H:%M").to_string();
+            let ctx = ChromeContext {
+                cwd: &self.current_cwd,
+                git_branch: self.git_branch.as_deref(),
+                git_dirty: self.git_dirty,
+                last_exit_code: self.last_exit_code,
+                last_command: self.last_command.as_deref(),
+                last_duration: self.last_command_duration,
+                timestamp: &timestamp,
+            };
+
+            if let Err(e) = self.chrome.render_context_bar(cols, &ctx) {
+                warn!("Failed to render context bar: {}", e);
+            }
+
+            // Only position cursor for initial startup
+            if !coming_from_passthrough {
+                if let Err(e) = self.chrome.position_cursor_in_scroll_region() {
+                    warn!("Failed to position cursor in scroll region: {}", e);
+                }
+            }
+        }
+
+        // Calculate effective rows for PTY (subtract 1 for top bar if chrome active)
+        let effective_rows = if self.chrome.is_active() {
+            rows.saturating_sub(1)
+        } else {
+            rows
+        };
+
+        // Resize PTY to effective rows
+        if let Err(e) = self.pty.resize(cols, effective_rows) {
+            warn!("Failed to resize PTY for Edit mode: {}", e);
+        }
+        debug!(
+            cols,
+            effective_rows,
+            chrome_active = self.chrome.is_active(),
+            "PTY resized for Edit mode"
+        );
+
         self.mode = Mode::Edit;
+    }
+
+    /// Updates git information for the current working directory.
+    ///
+    /// Uses a cache to avoid expensive git status queries on every transition.
+    /// The cache is valid for a short duration and is invalidated when the
+    /// working directory changes.
+    fn update_git_info(&mut self) {
+        let git_info = crate::git::get_git_info_cached(&self.current_cwd, &mut self.git_cache);
+        self.git_branch = git_info.branch;
+        self.git_dirty = git_info.dirty;
+    }
+
+    /// Gets the shell's current working directory via /proc/<pid>/cwd.
+    ///
+    /// This reads the symlink at /proc/<pid>/cwd to determine the shell's
+    /// actual working directory, which may differ from the parent process's
+    /// cwd after `cd` commands.
+    ///
+    /// Falls back to the parent process's cwd if the shell's cwd cannot be read.
+    fn get_shell_cwd(&self) -> PathBuf {
+        if let Some(pid) = self.pty.child_pid() {
+            let proc_cwd = format!("/proc/{}/cwd", pid);
+            if let Ok(cwd) = std::fs::read_link(&proc_cwd) {
+                return cwd;
+            }
+        }
+        // Fallback to parent process cwd
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
     }
 
     /// Transitions to Passthrough mode.
     ///
-    /// **Critical**: Resets the scroll region before entering Passthrough
-    /// to ensure proper terminal behavior.
+    /// **Scroll Region**: Re-established in transition_to_injecting() which runs
+    /// before this. We re-apply here as well for safety (belt and suspenders).
+    ///
+    /// **PTY Size**: Keeps PTY at effective_rows (total_rows - 2 when chrome is
+    /// active) to match the scroll region. The shell sees the constrained size
+    /// and formats output accordingly.
+    ///
+    /// **Raw Mode**: Ensures terminal raw mode is active so control characters
+    /// are forwarded as bytes to the PTY rather than generating signals.
     fn transition_to_passthrough(&mut self) -> Result<()> {
         info!(from = ?self.mode, to = ?Mode::Passthrough, "Mode transition");
 
-        // Reset scroll region before entering passthrough
-        if let Err(e) = TerminalGuard::reset_scroll_region() {
-            warn!("Failed to reset scroll region: {}", e);
+        // Ensure raw mode is active - reedline may have toggled terminal modes.
+        // This is critical for control character passthrough (Ctrl+C -> 0x03, not SIGINT).
+        self.terminal_guard.ensure_raw_mode().context("Failed to ensure raw mode for Passthrough")?;
+
+        // Get terminal size
+        let (cols, rows) =
+            TerminalGuard::get_size().context("Failed to get terminal size for Passthrough")?;
+
+        // Safety: ensure scroll region is set before any output flows.
+        // This should already be set by transition_to_injecting(), but we re-apply
+        // here as a defensive measure in case we enter Passthrough from another path.
+        if self.chrome.is_active() {
+            if let Err(e) = self.chrome.setup_scroll_region_preserve_cursor(rows) {
+                warn!("Failed to ensure scroll region for Passthrough: {}", e);
+            }
         }
+
+        // Calculate effective rows (matching Edit mode) to keep output constrained
+        // Subtract 1 for top bar when chrome is active
+        let effective_rows = if self.chrome.is_active() {
+            rows.saturating_sub(1)
+        } else {
+            rows
+        };
+
+        // Keep PTY at effective_rows so command output stays within scroll region.
+        self.pty
+            .resize(cols, effective_rows)
+            .context("Failed to resize PTY for Passthrough")?;
+        debug!(
+            cols,
+            effective_rows, "PTY sized for Passthrough (within scroll region)"
+        );
 
         self.mode = Mode::Passthrough;
         Ok(())
@@ -834,20 +1591,60 @@ impl App {
 
     /// Transitions to Injecting mode.
     ///
-    /// **Critical**: Synchronizes PTY size before entering Injecting mode.
-    /// The terminal may have been resized while reedline was active in Edit
-    /// mode. Since reedline owns SIGWINCH during Edit mode, we sync here
-    /// to ensure the PTY has the correct geometry before command execution.
+    /// **Critical**: Synchronizes PTY size and scroll region before command execution.
+    /// The terminal may have been resized while reedline was active in Edit mode.
+    /// Since reedline owns SIGWINCH during Edit mode, we sync here to ensure
+    /// the PTY has the correct geometry before command execution.
+    ///
+    /// **Scroll Region**: Reedline/crossterm RESETS the scroll region during Edit mode.
+    /// We MUST re-establish it here BEFORE command output flows, otherwise output
+    /// will not be constrained to the content area and will overflow to the footer row.
+    ///
+    /// **PTY Size**: Uses effective_rows (total_rows - 2 when chrome is active)
+    /// to match the scroll region. This ensures command output stays constrained
+    /// to the content area.
+    ///
+    /// **Raw Mode**: Ensures terminal raw mode is active. Reedline may toggle
+    /// terminal modes during Edit mode, so we must explicitly re-enable raw mode
+    /// here to ensure control characters are forwarded correctly to the PTY.
     fn transition_to_injecting(&mut self) -> Result<()> {
         info!(from = ?self.mode, to = ?Mode::Injecting, "Mode transition");
+
+        // Record command start time for duration tracking
+        self.command_start_time = Some(Instant::now());
+
+        // Ensure raw mode is active - reedline may have toggled terminal modes.
+        // This is critical for control character passthrough during command injection.
+        self.terminal_guard.ensure_raw_mode().context("Failed to ensure raw mode for Injecting")?;
 
         // Sync PTY size - terminal may have been resized during Edit mode
         let (cols, rows) =
             TerminalGuard::get_size().context("Failed to get terminal size for transition")?;
+
+        // CRITICAL: Re-establish scroll region BEFORE command output flows.
+        // Reedline/crossterm RESETS the scroll region during Edit mode.
+        // Without this, command output will overflow to the footer row.
+        if self.chrome.is_active() {
+            if let Err(e) = self.chrome.setup_scroll_region_preserve_cursor(rows) {
+                warn!("Failed to re-establish scroll region for Injecting: {}", e);
+            }
+        }
+
+        // Use effective_rows to keep output within scroll region
+        // Subtract 1 for top bar when chrome is active
+        let effective_rows = if self.chrome.is_active() {
+            rows.saturating_sub(1)
+        } else {
+            rows
+        };
+
         self.pty
-            .resize(cols, rows)
+            .resize(cols, effective_rows)
             .context("Failed to resize PTY on transition to Injecting")?;
-        debug!(cols, rows, "PTY size synchronized for command execution");
+        debug!(
+            cols,
+            effective_rows, "PTY size synchronized for command execution"
+        );
 
         self.mode = Mode::Injecting;
         self.injection_start = Some(Instant::now());
@@ -885,6 +1682,9 @@ impl App {
     /// Behavior depends on current mode:
     /// - Edit mode: Let reedline handle SIGWINCH internally via crossterm.
     ///   PTY will be synchronized when transitioning out of Edit mode.
+    ///   Chrome scroll region is reapplied and bars are redrawn if active.
+    ///   On suspend: clears bars and resets scroll region.
+    ///   On resume: sets up scroll region and draws bars.
     /// - Passthrough/Injecting/Initializing: Propagate resize to PTY
     /// - Terminating: Ignored
     ///
@@ -901,16 +1701,65 @@ impl App {
             Mode::Edit => {
                 // Let reedline handle SIGWINCH internally via crossterm.
                 // Do NOT resize PTY here - it will be synced on transition.
-                debug!("SIGWINCH in Edit mode - reedline handles display refresh");
+                // Do NOT emit terminal sequences here - they interfere with reedline's
+                // internal repaint cycle. Instead, set a flag to defer chrome updates
+                // until the next run_edit() iteration, before reedline takes control.
+                debug!("SIGWINCH in Edit mode - deferring chrome update");
+                self.pending_resize = true;
             }
-            Mode::Passthrough | Mode::Injecting | Mode::Initializing => {
-                // We own SIGWINCH in these modes - propagate resize to PTY
+            Mode::Initializing => {
+                // During initialization, chrome isn't fully active yet (scroll region
+                // not set up). Use full terminal size until first PROMPT marker.
                 let (cols, rows) =
                     TerminalGuard::get_size().context("Failed to get terminal size for resize")?;
                 self.pty
                     .resize(cols, rows)
                     .context("Failed to resize PTY")?;
                 info!(cols, rows, mode = ?self.mode, "PTY resized");
+            }
+            Mode::Passthrough | Mode::Injecting => {
+                // We own SIGWINCH in these modes - propagate resize to PTY
+                let (cols, rows) =
+                    TerminalGuard::get_size().context("Failed to get terminal size for resize")?;
+
+                // Calculate effective rows to match scroll region
+                // Subtract 1 for top bar when chrome is active
+                let effective_rows = if self.chrome.is_active() {
+                    rows.saturating_sub(1)
+                } else {
+                    rows
+                };
+
+                // Resize PTY to effective rows (matching scroll region)
+                self.pty
+                    .resize(cols, effective_rows)
+                    .context("Failed to resize PTY")?;
+
+                // Update chrome for new terminal dimensions
+                if self.chrome.is_active() {
+                    // Reapply scroll region for new size (preserving cursor)
+                    if let Err(e) = self.chrome.setup_scroll_region_preserve_cursor(rows) {
+                        warn!("Failed to reapply scroll region on resize: {}", e);
+                    }
+
+                    // Redraw context bar for new dimensions
+                    let timestamp = chrono::Local::now().format("%H:%M").to_string();
+                    let ctx = ChromeContext {
+                        cwd: &self.current_cwd,
+                        git_branch: self.git_branch.as_deref(),
+                        git_dirty: self.git_dirty,
+                        last_exit_code: self.last_exit_code,
+                        last_command: self.last_command.as_deref(),
+                        last_duration: self.last_command_duration,
+                        timestamp: &timestamp,
+                    };
+
+                    if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &ctx) {
+                        warn!("Failed to redraw context bar on resize: {}", e);
+                    }
+                }
+
+                info!(cols, effective_rows, mode = ?self.mode, "PTY resized");
             }
             Mode::Terminating => {
                 // Ignore resize during shutdown
@@ -939,6 +1788,64 @@ impl App {
     /// Returns whether the application should shut down.
     pub fn should_shutdown(&self) -> bool {
         self.signal_handler.should_shutdown()
+    }
+
+    /// Toggles chrome display mode.
+    ///
+    /// Switches between Headless and Full modes with full terminal update.
+    /// This can be called from keybinding handlers in future tickets.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if terminal operations fail.
+    #[allow(dead_code)]
+    pub fn toggle_chrome(&mut self) -> Result<()> {
+        let (cols, rows) =
+            TerminalGuard::get_size().context("Failed to get terminal size for chrome toggle")?;
+
+        self.chrome
+            .toggle_with_terminal_update(cols, rows)
+            .context("Failed to toggle chrome")?;
+
+        // Render context bar immediately after enabling chrome
+        if self.chrome.is_active() {
+            let timestamp = chrono::Local::now().format("%H:%M").to_string();
+            let ctx = ChromeContext {
+                cwd: &self.current_cwd,
+                git_branch: self.git_branch.as_deref(),
+                git_dirty: self.git_dirty,
+                last_exit_code: self.last_exit_code,
+                last_command: self.last_command.as_deref(),
+                last_duration: self.last_command_duration,
+                timestamp: &timestamp,
+            };
+
+            if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &ctx) {
+                warn!("Failed to render context bar after toggle: {}", e);
+            }
+        }
+
+        // Calculate new effective rows based on chrome state
+        // Subtract 1 for top bar when chrome is active
+        let effective_rows = if self.chrome.is_active() {
+            rows.saturating_sub(1)
+        } else {
+            rows
+        };
+
+        // Resize PTY to new effective rows
+        self.pty
+            .resize(cols, effective_rows)
+            .context("Failed to resize PTY after chrome toggle")?;
+
+        debug!(
+            cols,
+            effective_rows,
+            chrome_active = self.chrome.is_active(),
+            "PTY resized after chrome toggle"
+        );
+
+        Ok(())
     }
 
     /// Gets the path to the generated bashrc file.

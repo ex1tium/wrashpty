@@ -14,7 +14,10 @@
 use std::collections::VecDeque;
 
 use anyhow::{Context, Result};
-use reedline::{FileBackedHistory, HistoryItem, Prompt, Reedline, Signal};
+use reedline::{
+    ColumnarMenu, EditCommand, History, KeyCode, KeyModifiers, MenuBuilder, Prompt,
+    Reedline, ReedlineEvent, ReedlineMenu, Signal, default_emacs_keybindings,
+};
 use tracing::{debug, info, warn};
 
 use crate::complete::WrashCompleter;
@@ -22,6 +25,9 @@ use crate::suggest::HistoryHinter;
 
 /// Maximum size of the pending output buffer (64KB).
 const MAX_PENDING_OUTPUT: usize = 64 * 1024;
+
+/// Prefix for internal host commands to avoid collision with user input.
+const HOST_COMMAND_PREFIX: &str = "__wrashpty_";
 
 /// Buffer for PTY output received during Edit mode.
 ///
@@ -113,6 +119,8 @@ pub enum EditorResult {
     ClearLine,
     /// User pressed Ctrl+D to exit.
     Exit,
+    /// A host command was requested via ExecuteHostCommand.
+    HostCommand(String),
 }
 
 /// Reedline-based line editor with background output buffering.
@@ -128,74 +136,58 @@ pub struct Editor {
 }
 
 impl Editor {
-    /// Creates a new Editor with history loaded from ~/.bash_history.
+    /// Creates a new Editor with the provided history instance.
+    ///
+    /// # Arguments
+    ///
+    /// * `history` - A boxed History implementation (typically SqliteBackedHistory)
     ///
     /// # Errors
     ///
-    /// Returns an error if reedline cannot be created or history loading fails
-    /// critically (note: missing history file is not an error).
-    pub fn new() -> Result<Self> {
-        // Load history from bash_history file
-        let history_entries = crate::history::load_history().unwrap_or_else(|e| {
-            warn!("Failed to load history: {}", e);
-            Vec::new()
-        });
-
-        let entry_count = history_entries.len();
-
-        // Create file-backed history
-        // We use a temporary in-memory approach since FileBackedHistory
-        // manages its own file. We'll populate it with loaded entries.
-        let history = FileBackedHistory::with_file(
-            entry_count.max(10_000),
-            dirs::home_dir()
-                .map(|h| h.join(".wrashpty_history"))
-                .unwrap_or_else(|| "/tmp/.wrashpty_history".into()),
-        )
-        .context("Failed to create history storage")?;
-
+    /// Returns an error if reedline cannot be created.
+    pub fn new(history: Box<dyn History>) -> Result<Self> {
         // Create completer for tab completion
         let completer = Box::new(WrashCompleter::new());
 
         // Create hinter for fish-style autosuggestions
         let hinter = Box::new(HistoryHinter::new());
 
-        // Create reedline with history, completions, and autosuggestions
+        // Create a columnar completion menu
+        let completion_menu = Box::new(
+            ColumnarMenu::default()
+                .with_name("completion_menu")
+                .with_columns(4)
+                .with_column_width(None) // auto-width
+        );
+
+        // Set up keybindings with Tab triggering the completion menu
+        // and Ctrl+Space opening the panel
+        let mut keybindings = default_emacs_keybindings();
+        keybindings.add_binding(
+            KeyModifiers::NONE,
+            KeyCode::Tab,
+            ReedlineEvent::UntilFound(vec![
+                ReedlineEvent::Menu("completion_menu".to_string()),
+                ReedlineEvent::MenuNext,
+            ]),
+        );
+        keybindings.add_binding(
+            KeyModifiers::CONTROL,
+            KeyCode::Char(' '),
+            ReedlineEvent::ExecuteHostCommand(format!("{}open_panel", HOST_COMMAND_PREFIX)),
+        );
+
+        // Create reedline with history, completions, menu, and autosuggestions
         // Note: Ctrl+R history search and Up/Down prefix filtering are provided
         // by reedline's default keybindings when history is configured.
-        let mut reedline = Reedline::create()
-            .with_history(Box::new(history))
+        let reedline = Reedline::create()
+            .with_history(history)
             .with_completer(completer)
-            .with_hinter(hinter);
+            .with_hinter(hinter)
+            .with_menu(ReedlineMenu::EngineCompleter(completion_menu))
+            .with_edit_mode(Box::new(reedline::Emacs::new(keybindings)));
 
-        // Populate reedline history with loaded bash_history entries
-        // Use history_mut().save() to add each entry to the history store
-        let mut saved_count = 0;
-        let mut failed_count = 0;
-        for entry in history_entries {
-            let history_item = HistoryItem::from_command_line(&entry);
-            if let Err(e) = reedline.history_mut().save(history_item) {
-                // Log warning but don't abort - continue loading remaining entries
-                if failed_count == 0 {
-                    warn!("Failed to save history entry: {}", e);
-                }
-                failed_count += 1;
-            } else {
-                saved_count += 1;
-            }
-        }
-
-        // Sync history to persist the loaded entries
-        if let Err(e) = reedline.sync_history() {
-            warn!("Failed to sync history after loading: {}", e);
-        }
-
-        info!(
-            loaded = entry_count,
-            saved = saved_count,
-            failed = failed_count,
-            "Editor created with history, completions, and autosuggestions"
-        );
+        info!("Editor created with history, completions, and autosuggestions");
 
         Ok(Self {
             reedline,
@@ -222,8 +214,17 @@ impl Editor {
     pub fn read_line(&mut self, prompt: &dyn Prompt) -> Result<EditorResult> {
         match self.reedline.read_line(prompt) {
             Ok(Signal::Success(line)) => {
-                debug!(command = %line, "User submitted command");
-                Ok(EditorResult::Command(line))
+                // Check if this is a host command (from ExecuteHostCommand event)
+                // ExecuteHostCommand returns through Success in reedline 0.45
+                // Use prefix check to avoid collision with user input
+                if line.starts_with(HOST_COMMAND_PREFIX) {
+                    let cmd = line.strip_prefix(HOST_COMMAND_PREFIX).unwrap_or(&line);
+                    debug!(command = %cmd, "Host command received");
+                    Ok(EditorResult::HostCommand(cmd.to_string()))
+                } else {
+                    debug!(command = %line, "User submitted command");
+                    Ok(EditorResult::Command(line))
+                }
             }
             Ok(Signal::CtrlC) => {
                 debug!("User pressed Ctrl+C");
@@ -234,6 +235,21 @@ impl Editor {
                 Ok(EditorResult::Exit)
             }
             Err(e) => Err(e).context("Reedline read_line failed"),
+        }
+    }
+
+    /// Pre-fills the editor buffer with the given text.
+    ///
+    /// Call this before `read_line` to pre-populate the input with text.
+    /// The cursor will be positioned at the end of the inserted text.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The text to insert into the buffer
+    pub fn prefill_buffer(&mut self, text: &str) {
+        if !text.is_empty() {
+            self.reedline.run_edit_commands(&[EditCommand::InsertString(text.to_string())]);
+            debug!(text = %text, "Pre-filled editor buffer");
         }
     }
 

@@ -2,12 +2,13 @@
 name = "wrashpty"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.86"
 
 [dependencies]
 # PTY and terminal control
 portable-pty = "0.8"
-reedline = "0.45"
+reedline = { version = "0.45", features = ["sqlite"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
 crossterm = "0.29"
 
 # POSIX syscalls and signal handling
@@ -40,6 +41,29 @@ dirs = "5.0"
 
 # Unicode display width
 unicode-width = "0.1"
+
+# TUI rendering primitives (Buffer, Rect, Style, Layout)
+ratatui-core = "0.1"
+# TUI widgets (Block, List, Paragraph, Tabs)
+ratatui-widgets = "0.3"
+
+# Regex for Makefile/config parsing
+regex = "1.10"
+
+# JSON parsing for package.json
+serde_json = "1.0"
+
+# TOML parsing for Cargo.toml
+toml = "0.8"
+
+# CLI argument parsing
+clap = { version = "4.5", features = ["derive"] }
+
+# Time formatting for context bar
+chrono = "0.4"
+
+# Lazy static initialization
+once_cell = "1.19"
 
 [dev-dependencies]
 rexpect = "0.5"

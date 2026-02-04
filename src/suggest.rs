@@ -133,9 +133,7 @@ impl Hinter for HistoryHinter {
         }
 
         // Find end of first word (next whitespace or end of string)
-        let token_end = trimmed
-            .find(char::is_whitespace)
-            .unwrap_or(trimmed.len());
+        let token_end = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
 
         // Include leading whitespace from original hint plus the token
         let leading_ws_len = self.last_hint.len() - trimmed.len();
@@ -220,10 +218,7 @@ mod tests {
 
         // Cursor at position 2, but line is "echo" (length 4)
         let hint = hinter.handle("echo", 2, history.as_ref(), true, "");
-        assert!(
-            hint.is_empty(),
-            "Cursor not at end should not produce hint"
-        );
+        assert!(hint.is_empty(), "Cursor not at end should not produce hint");
     }
 
     #[test]
@@ -284,7 +279,10 @@ mod tests {
 
         // complete_hint should return the same hint
         let complete = hinter.complete_hint();
-        assert_eq!(complete, "ello world", "complete_hint should return last hint");
+        assert_eq!(
+            complete, "ello world",
+            "complete_hint should return last hint"
+        );
     }
 
     #[test]
@@ -337,7 +335,10 @@ mod tests {
         assert!(hint.is_empty());
 
         // last_hint should be cleared
-        assert!(hinter.complete_hint().is_empty(), "Hint should be cleared on no match");
+        assert!(
+            hinter.complete_hint().is_empty(),
+            "Hint should be cleared on no match"
+        );
     }
 
     // =========================================================================

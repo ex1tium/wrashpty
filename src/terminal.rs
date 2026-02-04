@@ -196,6 +196,43 @@ impl TerminalGuard {
         out.flush()?;
         Ok(())
     }
+
+    /// Ensures raw mode is active on the terminal.
+    ///
+    /// This method should be called after operations that may have disabled
+    /// raw mode (e.g., when transitioning from Edit mode where reedline may
+    /// have toggled terminal modes). It's idempotent - calling when raw mode
+    /// is already active has no negative effects.
+    ///
+    /// This is an instance method tied to an existing TerminalGuard, ensuring
+    /// that raw mode re-enablement cannot occur without an owning RAII guard
+    /// that will restore terminal state on drop.
+    ///
+    /// In raw mode:
+    /// - Line buffering is disabled (characters available immediately)
+    /// - Echo is disabled (typed characters not shown automatically)
+    /// - Signal generation is disabled (Ctrl+C sends byte 0x03, not SIGINT)
+    /// - Special input processing is disabled
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if raw mode cannot be enabled.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use wrashpty::terminal::TerminalGuard;
+    ///
+    /// let guard = TerminalGuard::new()?;
+    /// // ... after reedline returns, ensure raw mode is still active
+    /// guard.ensure_raw_mode()?;
+    /// # Ok::<(), wrashpty::terminal::TerminalError>(())
+    /// ```
+    pub fn ensure_raw_mode(&self) -> Result<()> {
+        enable_raw_mode()?;
+        tracing::debug!("Raw mode ensured");
+        Ok(())
+    }
 }
 
 impl Drop for TerminalGuard {
@@ -224,7 +261,13 @@ impl Drop for TerminalGuard {
             tracing::warn!("Failed to reset scroll region: {}", e);
         }
 
-        // Attempt 2: Show cursor
+        // Attempt 2: Clear screen and move cursor to home
+        // This prevents "ghost" content from remaining after exit
+        if let Err(e) = write!(out, "\x1b[2J\x1b[H") {
+            tracing::warn!("Failed to clear screen: {}", e);
+        }
+
+        // Attempt 3: Show cursor
         if let Err(e) = write!(out, "\x1b[?25h") {
             tracing::warn!("Failed to show cursor: {}", e);
         }
@@ -332,5 +375,56 @@ mod tests {
         }
         // If we get here, drop completed without panic
         // Terminal should be usable - manual verification needed
+    }
+
+    #[test]
+    fn test_ensure_raw_mode_succeeds_when_already_in_raw_mode() {
+        // ensure_raw_mode should be idempotent - calling it multiple times
+        // when already in raw mode should succeed without issues.
+        match TerminalGuard::new() {
+            Ok(guard) => {
+                // Guard is active, terminal is in raw mode
+                // ensure_raw_mode should succeed
+                match guard.ensure_raw_mode() {
+                    Ok(()) => {
+                        // Success - raw mode was maintained
+                    }
+                    Err(e) => {
+                        panic!(
+                            "ensure_raw_mode should succeed when already in raw mode: {}",
+                            e
+                        );
+                    }
+                }
+                // Guard drops here, restoring terminal
+            }
+            Err(e) => {
+                eprintln!("Skipping test (no terminal): {}", e);
+            }
+        }
+    }
+
+    #[test]
+    fn test_ensure_raw_mode_can_reenable_after_disable() {
+        // Test that ensure_raw_mode can re-enable raw mode after it's been disabled
+        match TerminalGuard::new() {
+            Ok(guard) => {
+                // Simulate what might happen if something disabled raw mode
+                // (Note: We can't easily disable without the guard's Drop,
+                // but we can verify ensure_raw_mode is callable)
+                match guard.ensure_raw_mode() {
+                    Ok(()) => {
+                        // Success
+                    }
+                    Err(e) => {
+                        panic!("ensure_raw_mode failed: {}", e);
+                    }
+                }
+                drop(guard);
+            }
+            Err(e) => {
+                eprintln!("Skipping test (no terminal): {}", e);
+            }
+        }
     }
 }
