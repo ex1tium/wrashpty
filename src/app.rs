@@ -1090,41 +1090,49 @@ impl App {
         // Get theme for panel styling
         let theme = self.chrome.theme();
 
+        // Track if we need to redraw - start with true for initial render
+        let mut needs_redraw = true;
+
         loop {
-            // Create buffer for panel area (starting at row 1, which is terminal row 1)
-            // We use row 0 in buffer coordinates, which maps to terminal row 1
-            let area = Rect::new(0, 0, cols, panel_height);
-            let mut buffer = Buffer::empty(area);
+            // Only render when needed (after input or on first draw)
+            if needs_redraw {
+                // Create buffer for panel area (starting at row 1, which is terminal row 1)
+                // We use row 0 in buffer coordinates, which maps to terminal row 1
+                let area = Rect::new(0, 0, cols, panel_height);
+                let mut buffer = Buffer::empty(area);
 
-            // Create a bordered block for the panel with theme colors
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.panel_border))
-                .title(" Wrashpty Panel (Esc to close) ")
-                .title_style(Style::default().fg(theme.header_fg));
+                // Create a bordered block for the panel with theme colors
+                let block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(theme.panel_border))
+                    .title(" Wrashpty Panel (Esc to close) ")
+                    .title_style(Style::default().fg(theme.header_fg));
 
-            // Get the inner area for panel content
-            let inner_area = block.inner(area);
+                // Get the inner area for panel content
+                let inner_area = block.inner(area);
 
-            // Render the border
-            block.render(area, &mut buffer);
+                // Render the border
+                block.render(area, &mut buffer);
 
-            // Render panel content inside the border
-            panel.render(&mut buffer, inner_area);
+                // Render panel content inside the border
+                panel.render(&mut buffer, inner_area);
 
-            // Write buffer to terminal (row 0 in buffer = terminal row 1)
-            self.chrome
-                .render_panel_buffer(&buffer, area)
-                .context("Failed to render panel buffer")?;
+                // Write buffer to terminal (row 0 in buffer = terminal row 1)
+                self.chrome
+                    .render_panel_buffer(&buffer, area)
+                    .context("Failed to render panel buffer")?;
 
-            // Flush stdout to ensure panel is visible
-            {
-                use std::io::Write;
-                std::io::stdout().flush()?;
+                // Flush stdout to ensure panel is visible
+                {
+                    use std::io::Write;
+                    std::io::stdout().flush()?;
+                }
+
+                needs_redraw = false;
             }
 
-            // Poll for input with timeout - use a shorter timeout for responsiveness
-            match event::poll(std::time::Duration::from_millis(50)) {
+            // Poll for input with timeout - use a longer timeout since we don't redraw constantly
+            match event::poll(std::time::Duration::from_millis(100)) {
                 Ok(true) => {
                     match event::read() {
                         Ok(Event::Key(key)) => {
@@ -1137,7 +1145,8 @@ impl App {
 
                             match panel.handle_input(key) {
                                 PanelResult::Continue => {
-                                    // Keep looping
+                                    // Input processed, need to redraw
+                                    needs_redraw = true;
                                 }
                                 result => {
                                     debug!(result = ?result, "Panel returning result");
@@ -1151,7 +1160,7 @@ impl App {
                             return Ok(PanelResult::Dismiss);
                         }
                         Ok(_) => {
-                            // Mouse or other events - ignore
+                            // Mouse or other events - ignore but don't redraw
                         }
                         Err(e) => {
                             warn!("Error reading event: {}", e);
@@ -1160,7 +1169,7 @@ impl App {
                     }
                 }
                 Ok(false) => {
-                    // No event available, continue loop
+                    // No event available - don't redraw, just continue polling
                 }
                 Err(e) => {
                     warn!("Error polling for events: {}", e);
