@@ -170,25 +170,8 @@ impl HistoryBrowserPanel {
     fn enter_edit_mode(&mut self) {
         if let Some(cmd) = self.selected_command() {
             debug!(command = %cmd, "Entering edit mode");
-            let mut edit_state = CommandEditState::from_command(cmd);
-
-            // Get suggestions from command knowledge
-            edit_state.update_suggestions();
-
-            // Add history-based suggestions
-            if let Some(store) = &self.history_store {
-                if let Ok(store) = store.lock() {
-                    let preceding: Vec<&str> = edit_state.tokens[..edit_state.selected]
-                        .iter()
-                        .map(|t| t.text.as_str())
-                        .collect();
-                    if let Ok(history_suggestions) = store.tokens_at_position(&preceding, 20) {
-                        edit_state.add_suggestions(history_suggestions);
-                    }
-                }
-            }
-
-            self.edit_mode = Some(edit_state);
+            self.edit_mode = Some(CommandEditState::from_command(cmd));
+            self.update_suggestions_with_history();
         }
     }
 
@@ -1161,7 +1144,7 @@ impl Panel for HistoryBrowserPanel {
 mod tests {
     use super::*;
     use super::super::theme::AMBER_THEME;
-    use super::super::command_edit::{tokenize_command, TokenType, check_dangerous_command, parse_quotes, apply_quotes, QuoteStyle};
+    use super::super::command_edit::{tokenize_command, TokenType, check_dangerous_command, split_quotes, apply_quotes, QuoteStyle};
 
     #[test]
     fn test_history_browser_new() {
@@ -1238,10 +1221,10 @@ mod tests {
 
     // Quote handling tests
     #[test]
-    fn test_parse_quotes() {
-        assert_eq!(parse_quotes("hello"), ("hello".to_string(), QuoteStyle::None));
-        assert_eq!(parse_quotes("'hello'"), ("hello".to_string(), QuoteStyle::Single));
-        assert_eq!(parse_quotes("\"hello\""), ("hello".to_string(), QuoteStyle::Double));
+    fn test_split_quotes() {
+        assert_eq!(split_quotes("hello"), ("hello".to_string(), QuoteStyle::None));
+        assert_eq!(split_quotes("'hello'"), ("hello".to_string(), QuoteStyle::Single));
+        assert_eq!(split_quotes("\"hello\""), ("hello".to_string(), QuoteStyle::Double));
     }
 
     #[test]
