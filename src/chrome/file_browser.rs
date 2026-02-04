@@ -3,6 +3,7 @@
 use std::any::Any;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -18,6 +19,8 @@ use tracing::debug;
 use super::command_knowledge::COMMAND_KNOWLEDGE;
 use super::panel::{Panel, PanelResult};
 use super::theme::Theme;
+use crate::history_store::HistoryStore;
+use crate::intelligence::FileContext;
 
 /// A directory entry in the file browser.
 #[derive(Debug, Clone)]
@@ -91,6 +94,23 @@ impl FileEditModeState {
             suggestions,
             suggestion_index: None,
         }
+    }
+
+    /// Adds external suggestions (e.g., from intelligence) to the front.
+    fn add_suggestions(&mut self, external: Vec<String>) {
+        // Merge: external first (more relevant), then existing
+        let mut merged = Vec::new();
+        for sugg in external {
+            if !merged.contains(&sugg) {
+                merged.push(sugg);
+            }
+        }
+        for sugg in &self.suggestions {
+            if !merged.contains(sugg) {
+                merged.push(sugg.clone());
+            }
+        }
+        self.suggestions = merged;
     }
 
     /// Cycles through suggestions in the given direction.
@@ -313,6 +333,8 @@ pub struct FileBrowserPanel {
     edit_mode: Option<FileEditModeState>,
     /// Theme for rendering.
     theme: &'static Theme,
+    /// Reference to the history store for intelligent suggestions.
+    history_store: Option<Arc<Mutex<HistoryStore>>>,
 }
 
 impl FileBrowserPanel {
@@ -327,9 +349,15 @@ impl FileBrowserPanel {
             show_hidden: false,
             edit_mode: None,
             theme,
+            history_store: None,
         };
         let _ = panel.refresh();
         panel
+    }
+
+    /// Sets the history store for intelligent suggestions.
+    pub fn set_history_store(&mut self, store: Arc<Mutex<HistoryStore>>) {
+        self.history_store = Some(store);
     }
 
     /// Enters edit mode for the selected file.
@@ -337,7 +365,35 @@ impl FileBrowserPanel {
         if let Some(entry) = self.selected_entry().cloned() {
             if !entry.is_dir {
                 debug!(file = %entry.name, "Entering file edit mode");
-                self.edit_mode = Some(FileEditModeState::new(entry.name, entry.path));
+                let mut edit_state = FileEditModeState::new(entry.name.clone(), entry.path.clone());
+
+                // Try to get intelligent suggestions
+                if let Some(store) = &self.history_store {
+                    if let Ok(store) = store.lock() {
+                        if store.has_intelligence() {
+                            let file_context = FileContext::new(&entry.name, entry.is_dir);
+                            let intelligent_suggestions = store.intelligent_suggest(
+                                &[], // No preceding tokens yet
+                                "",  // No partial text
+                                Some(self.current_dir.clone()),
+                                Some(file_context),
+                                None, // No last command context
+                            );
+
+                            // Convert Suggestion objects to strings
+                            let suggestions: Vec<String> = intelligent_suggestions
+                                .into_iter()
+                                .map(|s| s.text)
+                                .collect();
+
+                            if !suggestions.is_empty() {
+                                edit_state.add_suggestions(suggestions);
+                            }
+                        }
+                    }
+                }
+
+                self.edit_mode = Some(edit_state);
             }
         }
     }

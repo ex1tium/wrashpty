@@ -6,10 +6,17 @@
 //! - Quote style cycling
 //! - Undo/redo stack
 //! - Pluggable suggestion providers
+//! - Intelligent suggestions from learned patterns
+
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use super::command_knowledge::COMMAND_KNOWLEDGE;
 use super::theme::Theme;
 use ratatui_core::style::{Modifier, Style};
+
+use crate::history_store::HistoryStore;
+use crate::intelligence::FileContext;
 
 // ============================================================================
 // Token Types and Classification
@@ -126,7 +133,7 @@ pub fn superscript_digit(n: usize) -> &'static str {
         "¹", "²", "³", "⁴", "⁵", "⁶", "⁷", "⁸", "⁹", "¹⁰",
         "¹¹", "¹²", "¹³", "¹⁴", "¹⁵", "¹⁶", "¹⁷", "¹⁸", "¹⁹", "²⁰",
     ];
-    if n >= 1 && n <= 20 {
+    if (1..=20).contains(&n) {
         SUPERSCRIPTS[n - 1]
     } else {
         "·"
@@ -348,7 +355,7 @@ pub struct ConfirmState {
 ///
 /// This is the core editing state used by both history and file browsers.
 /// Features can be enabled/disabled via `EditConfig`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CommandEditState {
     // --- Core State ---
     /// The original command (for revert and change detection).
@@ -387,6 +394,37 @@ pub struct CommandEditState {
     // --- Context ---
     /// Optional context for suggestions (e.g., filename for file browser).
     context: Option<String>,
+
+    // --- Intelligence Context ---
+    /// History store for intelligent suggestions.
+    history_store: Option<Arc<Mutex<HistoryStore>>>,
+    /// Current working directory for context-aware suggestions.
+    cwd: Option<PathBuf>,
+    /// File context for file-type specific suggestions.
+    file_context: Option<FileContext>,
+    /// Last executed command for session-based suggestions.
+    last_command: Option<String>,
+}
+
+impl std::fmt::Debug for CommandEditState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CommandEditState")
+            .field("original", &self.original)
+            .field("tokens", &self.tokens)
+            .field("selected", &self.selected)
+            .field("edit_buffer", &self.edit_buffer)
+            .field("config", &self.config)
+            .field("suggestions", &self.suggestions)
+            .field("suggestion_index", &self.suggestion_index)
+            .field("pending_confirm", &self.pending_confirm)
+            .field("skip_danger_check", &self.skip_danger_check)
+            .field("context", &self.context)
+            .field("history_store", &self.history_store.as_ref().map(|_| "<HistoryStore>"))
+            .field("cwd", &self.cwd)
+            .field("file_context", &self.file_context)
+            .field("last_command", &self.last_command)
+            .finish()
+    }
 }
 
 impl CommandEditState {
@@ -416,6 +454,10 @@ impl CommandEditState {
             pending_confirm: None,
             skip_danger_check: false,
             context: None,
+            history_store: None,
+            cwd: None,
+            file_context: None,
+            last_command: None,
         }
     }
 
@@ -439,6 +481,44 @@ impl CommandEditState {
         state.context = Some(filename.to_string());
         state.update_suggestions();
         state
+    }
+
+    // ========================================================================
+    // Intelligence Context Setters
+    // ========================================================================
+
+    /// Sets the history store for intelligent suggestions.
+    pub fn set_history_store(&mut self, store: Arc<Mutex<HistoryStore>>) {
+        self.history_store = Some(store);
+    }
+
+    /// Sets the current working directory for context-aware suggestions.
+    pub fn set_cwd(&mut self, cwd: PathBuf) {
+        self.cwd = Some(cwd);
+    }
+
+    /// Sets the file context for file-type specific suggestions.
+    pub fn set_file_context(&mut self, file_context: FileContext) {
+        self.file_context = Some(file_context);
+    }
+
+    /// Sets the last executed command for session-based suggestions.
+    pub fn set_last_command(&mut self, last_command: String) {
+        self.last_command = Some(last_command);
+    }
+
+    /// Configures all intelligence context at once.
+    pub fn set_intelligence_context(
+        &mut self,
+        history_store: Arc<Mutex<HistoryStore>>,
+        cwd: Option<PathBuf>,
+        file_context: Option<FileContext>,
+        last_command: Option<String>,
+    ) {
+        self.history_store = Some(history_store);
+        self.cwd = cwd;
+        self.file_context = file_context;
+        self.last_command = last_command;
     }
 
     // ========================================================================
@@ -717,6 +797,10 @@ impl CommandEditState {
     /// When on a locked token, suggestions are preserved (not cleared) so
     /// the suggestion rows remain visible for context. Users can't cycle
     /// suggestions on locked tokens, but they can still see what was suggested.
+    ///
+    /// Suggestions are gathered from multiple sources:
+    /// 1. Static command knowledge (COMMAND_KNOWLEDGE)
+    /// 2. Intelligent learned patterns (if history_store is configured)
     pub fn update_suggestions(&mut self) {
         if self.is_selected_locked() {
             // Don't clear suggestions on locked tokens - preserve them for display
@@ -732,6 +816,7 @@ impl CommandEditState {
         // Check for pipe context
         let has_pipe_before = preceding.iter().any(|t| *t == "|" || t.ends_with('|'));
 
+        // 1. Get static suggestions from command knowledge
         if has_pipe_before {
             // After pipe: suggest pipeable commands
             self.suggestions = COMMAND_KNOWLEDGE
@@ -761,6 +846,52 @@ impl CommandEditState {
                 .iter()
                 .map(|s| s.to_string())
                 .collect();
+        }
+
+        // 2. Get intelligent suggestions from learned patterns
+        // Use token_mode=true to get individual token suggestions, not full commands
+        if let Some(ref store) = self.history_store {
+            if let Ok(store) = store.lock() {
+                if store.has_intelligence() {
+                    // Get tokens up to selected position
+                    let tokens = &self.tokens[..self.selected];
+                    let partial = &self.edit_buffer;
+
+                    // Use token_mode=true for token-by-token editing
+                    // This returns individual token suggestions from learned sequences,
+                    // flag values, etc. - not full command completions from templates/fuzzy
+                    let intelligent_suggestions = store.intelligent_suggest_with_mode(
+                        tokens,
+                        partial,
+                        self.cwd.clone(),
+                        self.file_context.clone(),
+                        self.last_command.clone(),
+                        true, // token_mode: only get individual token suggestions
+                    );
+
+                    // Convert Suggestion objects to strings and add to front
+                    if !intelligent_suggestions.is_empty() {
+                        let intel_strings: Vec<String> = intelligent_suggestions
+                            .into_iter()
+                            .map(|s| s.text)
+                            .collect();
+
+                        // Merge: intelligent first, then existing static
+                        let mut merged = Vec::new();
+                        for sugg in intel_strings {
+                            if !merged.contains(&sugg) {
+                                merged.push(sugg);
+                            }
+                        }
+                        for sugg in &self.suggestions {
+                            if !merged.contains(sugg) {
+                                merged.push(sugg.clone());
+                            }
+                        }
+                        self.suggestions = merged;
+                    }
+                }
+            }
         }
 
         self.suggestion_index = None;

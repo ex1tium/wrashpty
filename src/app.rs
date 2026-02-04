@@ -454,6 +454,17 @@ impl App {
     ///
     /// Returns an error if any critical operation fails.
     pub fn run(&mut self) -> Result<i32> {
+        // Start intelligence session with unique session ID
+        // session_token contains ASCII hex characters, so convert directly to string
+        let session_id = std::str::from_utf8(&self.session_token)
+            .unwrap_or("unknown")
+            .to_string();
+        if let Ok(mut store) = self.history_store.lock() {
+            store.start_intelligence_session(&session_id);
+            // Initial sync with history
+            store.sync_intelligence();
+        }
+
         loop {
             // Process pending signals
             self.handle_signals()?;
@@ -819,7 +830,13 @@ impl App {
                 }
 
                 // Store command and transition to Injecting
-                self.pending_command = Some(line);
+                self.pending_command = Some(line.clone());
+
+                // Record command for intelligence learning
+                if let Ok(mut store) = self.history_store.lock() {
+                    store.record_command_submission(&line);
+                }
+
                 self.inject_pending_command()?;
             }
             EditorResult::ClearLine => {
@@ -1066,13 +1083,13 @@ impl App {
             out.flush()?;
         }
 
-        let result = self.panel_input_loop_inner(panel, cols, panel_height);
+        
 
         // Note: We don't disable raw mode here as wrashpty needs it for PTY handling
         // The TerminalGuard manages the overall raw mode state
         // Cursor will be shown when _cursor_guard is dropped
 
-        result
+        self.panel_input_loop_inner(panel, cols, panel_height)
     }
 
     /// Inner implementation of panel input loop.
@@ -1421,12 +1438,15 @@ impl App {
             self.last_command_duration = Some(start.elapsed());
 
             // Update history metadata with exit status, duration, and cwd
+            // Also learn from the command completion for intelligence
             if let Ok(mut store) = self.history_store.lock() {
                 let exit_status = Some(self.last_exit_code);
                 let cwd = Some(self.current_cwd.clone());
                 if let Err(e) = store.update_last_command(exit_status, self.last_command_duration, cwd) {
                     warn!("Failed to update history metadata: {}", e);
                 }
+                // Learn from the command completion
+                store.learn_command_completion(exit_status);
             }
         }
 
@@ -1654,6 +1674,12 @@ impl App {
     /// Transitions to Terminating mode.
     fn transition_to_terminating(&mut self) {
         info!(from = ?self.mode, to = ?Mode::Terminating, "Mode transition");
+
+        // End intelligence session
+        if let Ok(mut store) = self.history_store.lock() {
+            store.end_intelligence_session();
+        }
+
         self.mode = Mode::Terminating;
     }
 
@@ -1857,6 +1883,11 @@ impl App {
 impl Drop for App {
     fn drop(&mut self) {
         info!("App cleanup");
+
+        // End intelligence session (idempotent, safe to call even if already ended)
+        if let Ok(mut store) = self.history_store.lock() {
+            store.end_intelligence_session();
+        }
 
         // Attempt to remove the generated bashrc file
         if let Err(e) = std::fs::remove_file(&self.bashrc_path) {

@@ -50,6 +50,9 @@ ratatui-widgets = "0.3"
 # Regex for Makefile/config parsing
 regex = "1.10"
 
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+
 # JSON parsing for package.json
 serde_json = "1.0"
 

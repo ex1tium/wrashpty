@@ -57,7 +57,7 @@ impl TabbedPanel {
         }
     }
 
-    /// Sets the history store for the history browser panel.
+    /// Sets the history store for panels that need it.
     pub fn set_history_store(&mut self, store: Arc<Mutex<HistoryStore>>) {
         // Store reference for settings persistence
         self.history_store = Some(Arc::clone(&store));
@@ -76,7 +76,14 @@ impl TabbedPanel {
         // Pass store to history browser panel
         if let Some(panel) = self.tabs.get_mut(TAB_HISTORY_BROWSER) {
             if let Some(hist_panel) = panel.as_any_mut().downcast_mut::<HistoryBrowserPanel>() {
-                hist_panel.set_history_store(store);
+                hist_panel.set_history_store(Arc::clone(&store));
+            }
+        }
+
+        // Pass store to file browser panel for intelligent suggestions
+        if let Some(panel) = self.tabs.get_mut(TAB_FILE_BROWSER) {
+            if let Some(file_panel) = panel.as_any_mut().downcast_mut::<FileBrowserPanel>() {
+                file_panel.set_history_store(store);
             }
         }
     }
