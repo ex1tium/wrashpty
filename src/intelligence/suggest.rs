@@ -1,22 +1,23 @@
 //! Main suggestion engine.
 //!
 //! Aggregates suggestions from all sources and ranks them.
+//!
+//! The primary source is the learned command hierarchy, which provides
+//! position-aware token suggestions. Supplementary sources include:
+//! - User patterns (highest priority, user-defined)
+//! - Flag values (for flag-value positions)
+//! - Pipe commands (for post-pipe positions)
 
 use rusqlite::Connection;
 use tracing::debug;
 
-use super::fuzzy;
 use super::patterns;
 use super::scoring::{self, ContextMatch};
-use super::sessions;
-use super::templates;
 use super::types::{
     PositionType, Suggestion, SuggestionContext, SuggestionMetadata, SuggestionSource,
 };
 use super::user_patterns;
 use super::variants;
-
-use crate::chrome::command_knowledge::COMMAND_KNOWLEDGE;
 
 /// Main entry point for getting suggestions.
 pub fn suggest(conn: &Connection, context: &SuggestionContext, limit: usize) -> Vec<Suggestion> {
@@ -108,55 +109,32 @@ fn boost_successful(suggestions: &mut [Suggestion], threshold: f64, boost: f64) 
 
 /// Gathers suggestions from all sources.
 ///
-/// When `context.token_mode` is true, only token-level sources are used
-/// (learned sequences, flag values, etc.) to return individual tokens.
-/// When false, all sources including full-command sources (templates, fuzzy)
-/// are used for traditional command-line completion.
+/// The primary source is the learned command hierarchy, which provides
+/// position-aware token suggestions. This unified approach eliminates
+/// the need for separate token_mode handling - all token suggestions
+/// come from the same learned source.
 fn gather_suggestions(conn: &Connection, context: &SuggestionContext) -> Vec<Suggestion> {
     let mut suggestions = Vec::new();
 
     // 1. User patterns (highest priority) - always include, they're user-defined
     suggestions.extend(suggest_user_patterns(conn, context));
 
-    // 2. Session transitions (if last command available)
-    // Skip in token mode - these return full commands
-    if !context.token_mode {
-        if let Some(ref last_cmd) = context.last_command {
-            suggestions.extend(sessions::suggest_next(conn, last_cmd));
-        }
-    }
+    // 2. Primary source: learned command hierarchy
+    // This provides position-aware token suggestions for all positions
+    suggestions.extend(suggest_from_hierarchy(conn, context));
 
-    // 3. Position-specific suggestions - these return individual tokens
+    // 3. Supplementary sources for specific contexts
     match &context.position {
-        PositionType::Command => {
-            suggestions.extend(suggest_commands(conn, context));
-        }
-        PositionType::Subcommand => {
-            suggestions.extend(suggest_subcommands(conn, context));
-        }
         PositionType::FlagValue { flag } => {
+            // Add specialized flag value suggestions
             suggestions.extend(suggest_flag_values(conn, context, flag));
         }
         PositionType::AfterPipe => {
+            // Add learned pipe chain suggestions
             suggestions.extend(suggest_pipe_commands(conn, context));
         }
-        PositionType::Argument | PositionType::AfterRedirect => {
-            suggestions.extend(suggest_arguments(conn, context));
-        }
+        _ => {}
     }
-
-    // 4. Templates - skip in token mode (returns full commands)
-    if !context.token_mode {
-        suggestions.extend(suggest_from_templates(conn, context));
-    }
-
-    // 5. Fuzzy search - skip in token mode (returns full commands)
-    if !context.token_mode && !context.partial.is_empty() && suggestions.len() < 5 {
-        suggestions.extend(suggest_fuzzy(conn, context));
-    }
-
-    // 6. Static knowledge (fallback) - always include, these are individual tokens
-    suggestions.extend(suggest_static(context));
 
     suggestions
 }
@@ -166,83 +144,63 @@ fn suggest_user_patterns(conn: &Connection, context: &SuggestionContext) -> Vec<
     user_patterns::suggest_from_patterns(conn, context).unwrap_or_default()
 }
 
-/// Suggests commands for position 0.
-fn suggest_commands(conn: &Connection, _context: &SuggestionContext) -> Vec<Suggestion> {
+/// Primary suggestion source: learned command hierarchy.
+///
+/// Queries the command hierarchy for tokens at the current position,
+/// using parent token and base command for context-aware suggestions.
+fn suggest_from_hierarchy(conn: &Connection, context: &SuggestionContext) -> Vec<Suggestion> {
     let mut suggestions = Vec::new();
 
-    // Query base commands (first tokens) aggregated by frequency
-    let learned = patterns::suggest_base_commands(conn, 20);
-    for (text, freq, success, last_seen) in learned {
-        let success_rate = if freq > 0 {
-            Some(success as f64 / freq as f64)
-        } else {
-            None
-        };
+    let position = context.preceding_tokens.len();
 
-        let score = scoring::compute_score(
-            freq,
-            last_seen,
-            success_rate,
-            ContextMatch::Generic,
-            SuggestionSource::LearnedSequence,
-        );
+    // Get parent token (last preceding token)
+    let parent_token = context
+        .preceding_tokens
+        .last()
+        .map(|t| t.text.as_str());
 
-        suggestions.push(Suggestion {
-            text,
-            source: SuggestionSource::LearnedSequence,
-            score,
-            metadata: SuggestionMetadata {
-                frequency: freq,
-                success_rate,
-                last_seen: Some(last_seen),
-                ..Default::default()
-            },
-        });
-    }
-
-    suggestions
-}
-
-/// Suggests subcommands.
-fn suggest_subcommands(conn: &Connection, context: &SuggestionContext) -> Vec<Suggestion> {
-    let mut suggestions = Vec::new();
-
-    // Get base command
-    let base_cmd = context
+    // Get base command (first token)
+    let base_command = context
         .preceding_tokens
         .first()
-        .map(|t| t.text.as_str())
-        .unwrap_or("");
+        .map(|t| t.text.as_str());
 
-    if base_cmd.is_empty() {
-        return suggestions;
-    }
+    // Query hierarchy for tokens at this position
+    let learned = patterns::suggest_from_hierarchy(conn, position, parent_token, base_command, 30);
 
-    // From learned sequences
-    let learned = patterns::suggest_from_sequences(conn, base_cmd, 0, Some(base_cmd), 20);
-    for (text, freq, success, last_seen) in learned {
+    for (text, freq, success, last_seen, role) in learned {
         let success_rate = if freq > 0 {
             Some(success as f64 / freq as f64)
         } else {
             None
         };
 
+        // Context match depends on how specific the query was
+        let context_match = if position == 0 {
+            ContextMatch::Generic
+        } else if base_command.is_some() && parent_token.is_some() {
+            ContextMatch::Exact
+        } else {
+            ContextMatch::BaseCommand
+        };
+
         let score = scoring::compute_score(
             freq,
             last_seen,
             success_rate,
-            ContextMatch::BaseCommand,
-            SuggestionSource::LearnedSequence,
+            context_match,
+            SuggestionSource::LearnedHierarchy,
         );
 
         suggestions.push(Suggestion {
             text,
-            source: SuggestionSource::LearnedSequence,
+            source: SuggestionSource::LearnedHierarchy,
             score,
             metadata: SuggestionMetadata {
                 frequency: freq,
                 success_rate,
                 last_seen: Some(last_seen),
+                role,
                 ..Default::default()
             },
         });
@@ -251,7 +209,7 @@ fn suggest_subcommands(conn: &Connection, context: &SuggestionContext) -> Vec<Su
     suggestions
 }
 
-/// Suggests flag values.
+/// Suggests flag values (supplementary source for flag-value positions).
 fn suggest_flag_values(conn: &Connection, context: &SuggestionContext, flag: &str) -> Vec<Suggestion> {
     let mut suggestions = Vec::new();
 
@@ -298,18 +256,17 @@ fn suggest_flag_values(conn: &Connection, context: &SuggestionContext, flag: &st
     suggestions
 }
 
-/// Suggests commands after a pipe.
+/// Suggests commands after a pipe (supplementary source for pipe positions).
 fn suggest_pipe_commands(conn: &Connection, context: &SuggestionContext) -> Vec<Suggestion> {
     let mut suggestions = Vec::new();
 
     // Get pre-pipe base command (first token before the pipe)
-    // We want the first token of the segment before the pipe, not the last
     let base_cmd = context
         .preceding_tokens
         .iter()
         .take_while(|t| t.text != "|" && !t.text.ends_with('|'))
         .map(|t| t.text.as_str())
-        .next()  // Get the first token (base command) of the pre-pipe segment
+        .next()
         .unwrap_or("");
 
     // From learned pipe chains
@@ -338,129 +295,6 @@ fn suggest_pipe_commands(conn: &Connection, context: &SuggestionContext) -> Vec<
     suggestions
 }
 
-/// Suggests generic arguments.
-fn suggest_arguments(conn: &Connection, context: &SuggestionContext) -> Vec<Suggestion> {
-    let mut suggestions = Vec::new();
-
-    // Get context token (the one before current position)
-    let context_token = context
-        .preceding_tokens
-        .last()
-        .map(|t| t.text.as_str())
-        .unwrap_or("");
-
-    let position = context.preceding_tokens.len();
-
-    let base_cmd = context
-        .preceding_tokens
-        .first()
-        .map(|t| t.text.as_str());
-
-    // From learned sequences
-    let learned = patterns::suggest_from_sequences(conn, context_token, position, base_cmd, 20);
-    for (text, freq, success, last_seen) in learned {
-        let success_rate = if freq > 0 {
-            Some(success as f64 / freq as f64)
-        } else {
-            None
-        };
-
-        let score = scoring::compute_score(
-            freq,
-            last_seen,
-            success_rate,
-            ContextMatch::Exact,
-            SuggestionSource::LearnedSequence,
-        );
-
-        suggestions.push(Suggestion {
-            text,
-            source: SuggestionSource::LearnedSequence,
-            score,
-            metadata: SuggestionMetadata {
-                frequency: freq,
-                success_rate,
-                last_seen: Some(last_seen),
-                ..Default::default()
-            },
-        });
-    }
-
-    suggestions
-}
-
-/// Suggests from templates.
-fn suggest_from_templates(conn: &Connection, context: &SuggestionContext) -> Vec<Suggestion> {
-    let completions = templates::suggest_templates(conn, context);
-
-    completions
-        .into_iter()
-        .map(|c| Suggestion {
-            text: c.preview.clone(),
-            source: SuggestionSource::Template,
-            score: c.confidence * SuggestionSource::Template.bonus(),
-            metadata: SuggestionMetadata {
-                frequency: c.template.frequency,
-                template_preview: Some(c.preview),
-                ..Default::default()
-            },
-        })
-        .collect()
-}
-
-/// Suggests using fuzzy search.
-fn suggest_fuzzy(conn: &Connection, context: &SuggestionContext) -> Vec<Suggestion> {
-    let matches = fuzzy::fuzzy_search(conn, &context.partial, 10).unwrap_or_default();
-
-    matches
-        .into_iter()
-        .map(|m| Suggestion {
-            text: m.command,
-            source: SuggestionSource::FuzzySearch,
-            score: m.bm25_score * SuggestionSource::FuzzySearch.bonus(),
-            metadata: SuggestionMetadata {
-                fuzzy_score: Some(m.bm25_score),
-                ..Default::default()
-            },
-        })
-        .collect()
-}
-
-/// Suggests from static knowledge.
-fn suggest_static(context: &SuggestionContext) -> Vec<Suggestion> {
-    let preceding: Vec<&str> = context
-        .preceding_tokens
-        .iter()
-        .map(|t| t.text.as_str())
-        .collect();
-
-    // Check for pipe context
-    let has_pipe = preceding.iter().any(|t| *t == "|" || t.ends_with('|'));
-
-    let static_suggestions = if has_pipe {
-        COMMAND_KNOWLEDGE.pipeable_commands()
-    } else if let Some(ref file_ctx) = context.file_context {
-        COMMAND_KNOWLEDGE.commands_for_filetype(&file_ctx.filename)
-    } else {
-        COMMAND_KNOWLEDGE.suggestions_for_position(&preceding)
-    };
-
-    static_suggestions
-        .into_iter()
-        .enumerate()
-        .map(|(i, text)| {
-            // Give static suggestions a base score that decreases with position
-            let base_score = 0.5 / (1.0 + i as f64 * 0.1);
-            Suggestion {
-                text: text.to_string(),
-                source: SuggestionSource::StaticKnowledge,
-                score: base_score * SuggestionSource::StaticKnowledge.bonus(),
-                metadata: SuggestionMetadata::default(),
-            }
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -478,14 +312,21 @@ mod tests {
         let conn = setup_test_db();
         let context = SuggestionContext::default();
 
+        // Bootstrap the database with some commands
+        crate::intelligence::bootstrap::bootstrap_if_empty(&conn).unwrap();
+
         let suggestions = suggest(&conn, &context, 10);
-        // Should return static suggestions for commands
+        // Should return suggestions from bootstrapped hierarchy
         assert!(!suggestions.is_empty());
     }
 
     #[test]
     fn test_suggest_with_preceding() {
         let conn = setup_test_db();
+
+        // Bootstrap the database
+        crate::intelligence::bootstrap::bootstrap_if_empty(&conn).unwrap();
+
         let context = SuggestionContext {
             preceding_tokens: vec![AnalyzedToken::new(
                 "git",
@@ -497,15 +338,18 @@ mod tests {
         };
 
         let suggestions = suggest(&conn, &context, 10);
-        // Should return git subcommands from static knowledge
+        // Should return git subcommands from bootstrapped hierarchy
         assert!(!suggestions.is_empty());
+        // Verify we get git subcommands
+        let texts: Vec<&str> = suggestions.iter().map(|s| s.text.as_str()).collect();
+        assert!(texts.contains(&"commit") || texts.contains(&"push") || texts.contains(&"pull"));
     }
 
     #[test]
     fn test_gather_suggestions_deduplicates() {
         let suggestions = vec![
-            Suggestion::new("git", SuggestionSource::LearnedSequence, 2.0),
-            Suggestion::new("git", SuggestionSource::StaticKnowledge, 1.0),
+            Suggestion::new("git", SuggestionSource::LearnedHierarchy, 2.0),
+            Suggestion::new("git", SuggestionSource::LearnedSequence, 1.0),
         ];
 
         let ranked = scoring::rank_suggestions(suggestions);
@@ -606,23 +450,14 @@ mod tests {
     }
 
     #[test]
-    fn test_token_mode_excludes_full_commands() {
+    fn test_hierarchy_returns_tokens_not_full_commands() {
         let conn = setup_test_db();
 
-        // Create a template that would normally return a full command
-        let now = chrono::Utc::now().timestamp();
-        conn.execute(
-            "INSERT INTO ci_tokens (text, token_type, first_seen, last_seen) VALUES ('git', 'Command', ?1, ?1)",
-            [now],
-        ).unwrap();
-        conn.execute(
-            "INSERT INTO ci_templates (template, template_hash, base_command_id, placeholder_count, placeholders, frequency, last_seen, example_command)
-             VALUES ('git remote add <URL>', 'hash1', 1, 1, '[]', 10, ?1, 'git remote add git@github.com:user/repo.git')",
-            [now],
-        ).unwrap();
+        // Bootstrap to get initial data
+        crate::intelligence::bootstrap::bootstrap_if_empty(&conn).unwrap();
 
-        // Create a context with token_mode = false (default)
-        let context_full = SuggestionContext {
+        // Context: git remote add (position 3)
+        let context = SuggestionContext {
             preceding_tokens: vec![
                 AnalyzedToken::new("git", crate::chrome::command_edit::TokenType::Command, 0),
                 AnalyzedToken::new("remote", crate::chrome::command_edit::TokenType::Subcommand, 1),
@@ -630,39 +465,83 @@ mod tests {
             ],
             partial: String::new(),
             position: PositionType::Argument,
-            token_mode: false, // Full command mode
             ..Default::default()
         };
 
-        // Create a context with token_mode = true
-        let context_token = SuggestionContext {
-            preceding_tokens: vec![
-                AnalyzedToken::new("git", crate::chrome::command_edit::TokenType::Command, 0),
-                AnalyzedToken::new("remote", crate::chrome::command_edit::TokenType::Subcommand, 1),
-                AnalyzedToken::new("add", crate::chrome::command_edit::TokenType::Argument, 2),
-            ],
-            partial: String::new(),
-            position: PositionType::Argument,
-            token_mode: true, // Token-only mode
-            ..Default::default()
-        };
+        let suggestions = gather_suggestions(&conn, &context);
 
-        let suggestions_full = gather_suggestions(&conn, &context_full);
-        let suggestions_token = gather_suggestions(&conn, &context_token);
-
-        // In full mode, we might get template suggestions
-        // In token mode, we should NOT get template suggestions
-        let full_has_template = suggestions_full.iter().any(|s| s.source == SuggestionSource::Template);
-        let token_has_template = suggestions_token.iter().any(|s| s.source == SuggestionSource::Template);
-
-        // Full mode may or may not have templates (depends on matching)
-        // But token mode should NEVER have templates
-        assert!(!token_has_template, "Token mode should not include template suggestions");
-
-        // Verify the test is meaningful by checking full mode could have templates
-        // (This depends on template matching, so we just verify the logic works)
-        if full_has_template {
-            assert!(true, "Full mode correctly includes templates when matching");
+        // All suggestions should be individual tokens, not full commands
+        for suggestion in &suggestions {
+            // A full command would contain spaces
+            assert!(
+                !suggestion.text.contains(' '),
+                "Suggestion '{}' should be a single token, not a full command",
+                suggestion.text
+            );
         }
+    }
+
+    #[test]
+    fn test_hierarchy_provides_position_aware_suggestions() {
+        let conn = setup_test_db();
+        let now = chrono::Utc::now().timestamp();
+
+        // Create tokens
+        conn.execute(
+            "INSERT INTO ci_tokens (id, text, token_type, first_seen, last_seen) VALUES (1, 'git', 'Command', ?1, ?1)",
+            [now],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO ci_tokens (id, text, token_type, first_seen, last_seen) VALUES (2, 'remote', 'Subcommand', ?1, ?1)",
+            [now],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO ci_tokens (id, text, token_type, first_seen, last_seen) VALUES (3, 'add', 'Subcommand', ?1, ?1)",
+            [now],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO ci_tokens (id, text, token_type, first_seen, last_seen) VALUES (4, 'origin', 'Argument', ?1, ?1)",
+            [now],
+        ).unwrap();
+
+        // Create hierarchy: git -> remote -> add -> origin
+        conn.execute(
+            "INSERT INTO ci_command_hierarchy (token_id, position, parent_token_id, base_command_id, frequency, success_count, last_seen, role)
+             VALUES (1, 0, NULL, 1, 100, 90, ?1, 'command')",
+            [now],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO ci_command_hierarchy (token_id, position, parent_token_id, base_command_id, frequency, success_count, last_seen, role)
+             VALUES (2, 1, 1, 1, 50, 45, ?1, 'subcommand')",
+            [now],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO ci_command_hierarchy (token_id, position, parent_token_id, base_command_id, frequency, success_count, last_seen, role)
+             VALUES (3, 2, 2, 1, 30, 28, ?1, 'subcommand')",
+            [now],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO ci_command_hierarchy (token_id, position, parent_token_id, base_command_id, frequency, success_count, last_seen, role)
+             VALUES (4, 3, 3, 1, 20, 18, ?1, 'argument')",
+            [now],
+        ).unwrap();
+
+        // Query position 3 (after git remote add)
+        let context = SuggestionContext {
+            preceding_tokens: vec![
+                AnalyzedToken::new("git", crate::chrome::command_edit::TokenType::Command, 0),
+                AnalyzedToken::new("remote", crate::chrome::command_edit::TokenType::Subcommand, 1),
+                AnalyzedToken::new("add", crate::chrome::command_edit::TokenType::Argument, 2),
+            ],
+            partial: String::new(),
+            position: PositionType::Argument,
+            ..Default::default()
+        };
+
+        let suggestions = suggest(&conn, &context, 10);
+
+        // Should get 'origin' as a suggestion
+        let texts: Vec<&str> = suggestions.iter().map(|s| s.text.as_str()).collect();
+        assert!(texts.contains(&"origin"), "Expected 'origin' in suggestions, got: {:?}", texts);
     }
 }

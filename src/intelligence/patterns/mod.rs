@@ -7,6 +7,7 @@
 //! - N-grams (2-gram and 3-gram patterns)
 
 pub mod flags;
+pub mod hierarchy;
 pub mod pipes;
 pub mod sequences;
 
@@ -86,6 +87,9 @@ pub fn learn_command(
     sequences::learn_ngrams(conn, &tokens, &token_ids, now)?;
     pipes::learn_pipe_chains(conn, token_cache, &tokens, base_command_id, now)?;
     flags::learn_flag_values(conn, &tokens, &token_ids, base_command_id, now)?;
+
+    // Learn command hierarchy (unified position-aware learning)
+    hierarchy::learn_hierarchy(conn, &tokens, &token_ids, is_success, now)?;
 
     // Extract templates from the command
     if let Err(e) = templates::extract_template(conn, command) {
@@ -203,6 +207,20 @@ pub fn suggest_base_commands(
     limit: usize,
 ) -> Vec<(String, u32, u32, i64)> {
     sequences::query_base_commands(conn, limit).unwrap_or_default()
+}
+
+/// Queries command hierarchy for suggestions at a given position.
+///
+/// Returns tuples of (token_text, frequency, success_count, last_seen, role).
+pub fn suggest_from_hierarchy(
+    conn: &Connection,
+    position: usize,
+    parent_token: Option<&str>,
+    base_command: Option<&str>,
+    limit: usize,
+) -> Vec<hierarchy::HierarchyResult> {
+    hierarchy::query_hierarchy(conn, position, parent_token, base_command, limit)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

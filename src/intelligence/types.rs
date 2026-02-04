@@ -48,8 +48,8 @@ impl Suggestion {
 /// Source of a suggestion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SuggestionSource {
-    /// From static COMMAND_KNOWLEDGE.
-    StaticKnowledge,
+    /// From learned command hierarchy (primary source).
+    LearnedHierarchy,
 
     /// From learned token sequences.
     LearnedSequence,
@@ -60,10 +60,10 @@ pub enum SuggestionSource {
     /// From learned flag values.
     LearnedFlagValue,
 
-    /// From session transition patterns.
+    /// From session transition patterns (command-to-command workflow).
     SessionTransition,
 
-    /// From template completion.
+    /// From template completion (full command templates).
     Template,
 
     /// From FTS5 fuzzy search.
@@ -85,20 +85,16 @@ impl SuggestionSource {
         match self {
             Self::UserPattern | Self::UserAlias => 2.0,
             Self::SessionTransition => 1.5,
-            Self::LearnedSequence | Self::LearnedPipe | Self::LearnedFlagValue | Self::Template => {
-                1.2
-            }
-            Self::StaticKnowledge
-            | Self::FuzzySearch
-            | Self::HistoricalFrequency => 1.0,
+            Self::LearnedHierarchy | Self::LearnedSequence | Self::LearnedPipe | Self::LearnedFlagValue => 1.2,
+            Self::Template | Self::FuzzySearch | Self::HistoricalFrequency => 1.0,
         }
     }
 
     /// Returns a human-readable label for display.
     pub fn label(&self) -> &'static str {
         match self {
-            Self::StaticKnowledge => "static",
-            Self::LearnedSequence => "learned",
+            Self::LearnedHierarchy => "learned",
+            Self::LearnedSequence => "seq",
             Self::LearnedPipe => "pipe",
             Self::LearnedFlagValue => "flag",
             Self::SessionTransition => "session",
@@ -131,6 +127,9 @@ pub struct SuggestionMetadata {
 
     /// User-provided description.
     pub description: Option<String>,
+
+    /// Token role from hierarchy (e.g., "subcommand", "flag", "argument").
+    pub role: Option<String>,
 }
 
 // ============================================================================
@@ -160,15 +159,6 @@ pub struct SuggestionContext {
 
     /// Last executed command (for "next" suggestions).
     pub last_command: Option<String>,
-
-    /// Token mode: when true, only return individual token suggestions.
-    ///
-    /// When false (default), the engine may return full command completions
-    /// (from templates, fuzzy search, etc.) suitable for command-line autocomplete.
-    ///
-    /// When true, the engine only returns individual token suggestions suitable
-    /// for token-by-token editing (from learned sequences, flag values, etc.).
-    pub token_mode: bool,
 }
 
 /// Position type in a command for specialized suggestions.
@@ -757,29 +747,6 @@ pub fn build_context(
     session: Option<SessionContext>,
     last_command: Option<String>,
 ) -> SuggestionContext {
-    build_context_with_mode(tokens, partial, cwd, file_context, session, last_command, false)
-}
-
-/// Builds a SuggestionContext with token mode support.
-///
-/// # Arguments
-///
-/// * `tokens` - The tokens preceding the current edit position
-/// * `partial` - The partial text being typed
-/// * `cwd` - Current working directory
-/// * `file_context` - File context if in file browser
-/// * `session` - Current session context
-/// * `last_command` - Last executed command for transition suggestions
-/// * `token_mode` - When true, only return individual token suggestions
-pub fn build_context_with_mode(
-    tokens: &[CommandToken],
-    partial: &str,
-    cwd: Option<PathBuf>,
-    file_context: Option<FileContext>,
-    session: Option<SessionContext>,
-    last_command: Option<String>,
-    token_mode: bool,
-) -> SuggestionContext {
     // Convert CommandTokens to AnalyzedTokens
     let preceding_tokens: Vec<AnalyzedToken> = tokens
         .iter()
@@ -802,7 +769,6 @@ pub fn build_context_with_mode(
         file_context,
         session,
         last_command,
-        token_mode,
     }
 }
 

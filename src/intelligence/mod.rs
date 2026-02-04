@@ -30,6 +30,7 @@
 //! let suggestions = ci.suggest(&context, 10);
 //! ```
 
+pub mod bootstrap;
 pub mod error;
 pub mod schema;
 pub mod sync;
@@ -85,6 +86,9 @@ impl CommandIntelligence {
     pub fn new(conn: Connection) -> Result<Self, CIError> {
         // Create schema if needed
         schema::create_schema(&conn)?;
+
+        // Bootstrap command hierarchy if empty (first run)
+        bootstrap::bootstrap_if_empty(&conn)?;
 
         // Load last sync ID
         let last_sync_id = sync::get_last_sync_id(&conn)?;
