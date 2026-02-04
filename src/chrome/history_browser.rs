@@ -560,7 +560,7 @@ impl HistoryBrowserPanel {
                 if edit_state.edit_buffer != token_text {
                     edit_state.edit_buffer = token_text.to_string();
                     Some(PanelResult::Continue)
-                } else if edit_state.has_changes() {
+                } else if edit_state.is_changed() {
                     edit_state.revert();
                     Some(PanelResult::Continue)
                 } else {

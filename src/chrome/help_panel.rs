@@ -163,6 +163,10 @@ impl Panel for HelpPanel {
             lines.push(ListItem::new(Line::from("")));
         }
 
+        // Clamp scroll_offset to prevent scrolling past content
+        let max_offset = self.total_lines.saturating_sub(visible_height);
+        self.scroll_offset = self.scroll_offset.min(max_offset);
+
         // Apply scroll offset
         let visible_lines: Vec<ListItem> = lines
             .into_iter()
