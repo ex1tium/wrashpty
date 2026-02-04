@@ -150,7 +150,7 @@ impl TabbedPanel {
 
 impl Panel for TabbedPanel {
     fn preferred_height(&self) -> u16 {
-        // Active panel height + 3 for tab bar and outer border
+        // Active panel height + 4 for tab bar and outer border
         self.tabs
             .get(self.active_tab)
             .map(|p| p.preferred_height() + 4)

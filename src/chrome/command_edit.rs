@@ -192,6 +192,7 @@ pub fn quote_for_shell(text: &str) -> String {
 /// Result of dangerous command check.
 #[derive(Debug, Clone)]
 pub struct DangerWarning {
+    /// Human-readable description of why this command is dangerous.
     pub message: &'static str,
 }
 
@@ -394,7 +395,11 @@ impl CommandEditState {
     // ========================================================================
 
     /// Creates a new edit state from a list of tokens.
-    pub fn new(tokens: Vec<CommandToken>, config: EditConfig) -> Self {
+    pub fn new(mut tokens: Vec<CommandToken>, config: EditConfig) -> Self {
+        // Guard against empty tokens to avoid panics in methods like insert_token_after
+        if tokens.is_empty() {
+            tokens.push(CommandToken::new(String::new(), TokenType::Command));
+        }
         let original = tokens.iter().map(|t| t.text.as_str()).collect::<Vec<_>>().join(" ");
         let edit_buffer = tokens.first().map(|t| t.text.clone()).unwrap_or_default();
         let original_tokens = tokens.clone();
@@ -700,8 +705,9 @@ impl CommandEditState {
         if self.suggestions.is_empty() {
             return None;
         }
-        let idx = self.suggestion_index.unwrap_or(0);
         let len = self.suggestions.len();
+        // Treat None as one-before-start so (len - 1 + 1) % len = 0
+        let idx = self.suggestion_index.unwrap_or(len - 1);
         let next_idx = (idx + 1) % len;
         self.suggestions.get(next_idx).map(|s| s.as_str())
     }
@@ -782,7 +788,7 @@ impl CommandEditState {
     // ========================================================================
 
     /// Returns true if there are any changes from the original.
-    pub fn has_changes(&self) -> bool {
+    pub fn is_changed(&self) -> bool {
         let current: String = self.tokens.iter().enumerate().map(|(i, t)| {
             if i == self.selected && !t.locked {
                 self.edit_buffer.clone()
@@ -856,7 +862,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_tokenize_simple() {
+    fn test_tokenize_command_simple_classifies_tokens() {
         let tokens = tokenize_command("ls -la /tmp");
         assert_eq!(tokens.len(), 3);
         assert_eq!(tokens[0].text, "ls");
@@ -868,14 +874,14 @@ mod tests {
     }
 
     #[test]
-    fn test_tokenize_quoted() {
+    fn test_tokenize_command_quoted_preserves_quotes() {
         let tokens = tokenize_command("echo \"hello world\"");
         assert_eq!(tokens.len(), 2);
         assert_eq!(tokens[1].text, "\"hello world\"");
     }
 
     #[test]
-    fn test_tokenize_git_command() {
+    fn test_tokenize_command_git_checkout_flags_identified() {
         let tokens = tokenize_command("git checkout -b feature");
         assert_eq!(tokens.len(), 4);
         assert_eq!(tokens[0].token_type, TokenType::Command);
@@ -1037,13 +1043,13 @@ mod tests {
     }
 
     #[test]
-    fn test_has_changes() {
+    fn test_is_changed_detects_modifications() {
         let mut state = CommandEditState::from_command("echo hello");
-        assert!(!state.has_changes());
+        assert!(!state.is_changed());
 
         state.select(1);
         state.edit_buffer = "world".to_string();
-        assert!(state.has_changes());
+        assert!(state.is_changed());
     }
 
     #[test]
@@ -1054,7 +1060,7 @@ mod tests {
         state.save_current_edit();
 
         state.revert();
-        assert!(!state.has_changes());
+        assert!(!state.is_changed());
         assert_eq!(state.tokens[1].text, "hello");
     }
 
