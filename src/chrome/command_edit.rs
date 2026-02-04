@@ -11,7 +11,6 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use super::command_knowledge::COMMAND_KNOWLEDGE;
 use super::theme::Theme;
 use ratatui_core::style::{Modifier, Style};
 
@@ -798,98 +797,37 @@ impl CommandEditState {
     /// the suggestion rows remain visible for context. Users can't cycle
     /// suggestions on locked tokens, but they can still see what was suggested.
     ///
-    /// Suggestions are gathered from multiple sources:
-    /// 1. Static command knowledge (COMMAND_KNOWLEDGE)
-    /// 2. Intelligent learned patterns (if history_store is configured)
+    /// Suggestions are gathered from the learned command hierarchy, which includes
+    /// bootstrapped knowledge for common commands. The hierarchy learns from user
+    /// command history and provides position-aware token suggestions.
     pub fn update_suggestions(&mut self) {
         if self.is_selected_locked() {
             // Don't clear suggestions on locked tokens - preserve them for display
             return;
         }
 
-        // Get preceding tokens for context
-        let preceding: Vec<&str> = self.tokens[..self.selected]
-            .iter()
-            .map(|t| t.text.as_str())
-            .collect();
+        self.suggestions.clear();
 
-        // Check for pipe context
-        let has_pipe_before = preceding.iter().any(|t| *t == "|" || t.ends_with('|'));
-
-        // 1. Get static suggestions from command knowledge
-        if has_pipe_before {
-            // After pipe: suggest pipeable commands
-            self.suggestions = COMMAND_KNOWLEDGE
-                .pipeable_commands()
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
-        } else if self.selected == 0 {
-            // First position: suggest based on context or general commands
-            if let Some(ref filename) = self.context {
-                self.suggestions = COMMAND_KNOWLEDGE
-                    .commands_for_filetype(filename)
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect();
-            } else {
-                self.suggestions = COMMAND_KNOWLEDGE
-                    .suggestions_for_position(&[])
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect();
-            }
-        } else {
-            // Other positions: use command knowledge
-            self.suggestions = COMMAND_KNOWLEDGE
-                .suggestions_for_position(&preceding)
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
-        }
-
-        // 2. Get intelligent suggestions from learned patterns
-        // Use token_mode=true to get individual token suggestions, not full commands
+        // Primary source: intelligent suggestions from learned hierarchy
+        // The hierarchy includes bootstrapped data, so it handles all cases
         if let Some(ref store) = self.history_store {
             if let Ok(store) = store.lock() {
                 if store.has_intelligence() {
-                    // Get tokens up to selected position
                     let tokens = &self.tokens[..self.selected];
                     let partial = &self.edit_buffer;
 
-                    // Use token_mode=true for token-by-token editing
-                    // This returns individual token suggestions from learned sequences,
-                    // flag values, etc. - not full command completions from templates/fuzzy
-                    let intelligent_suggestions = store.intelligent_suggest_with_mode(
+                    let intelligent_suggestions = store.intelligent_suggest(
                         tokens,
                         partial,
                         self.cwd.clone(),
                         self.file_context.clone(),
                         self.last_command.clone(),
-                        true, // token_mode: only get individual token suggestions
                     );
 
-                    // Convert Suggestion objects to strings and add to front
-                    if !intelligent_suggestions.is_empty() {
-                        let intel_strings: Vec<String> = intelligent_suggestions
-                            .into_iter()
-                            .map(|s| s.text)
-                            .collect();
-
-                        // Merge: intelligent first, then existing static
-                        let mut merged = Vec::new();
-                        for sugg in intel_strings {
-                            if !merged.contains(&sugg) {
-                                merged.push(sugg);
-                            }
-                        }
-                        for sugg in &self.suggestions {
-                            if !merged.contains(sugg) {
-                                merged.push(sugg.clone());
-                            }
-                        }
-                        self.suggestions = merged;
-                    }
+                    self.suggestions = intelligent_suggestions
+                        .into_iter()
+                        .map(|s| s.text)
+                        .collect();
                 }
             }
         }
@@ -1030,67 +968,92 @@ mod tests {
     }
 
     #[test]
-    fn test_for_file_populates_suggestions() {
+    fn test_for_file_starts_with_empty_suggestions_without_intelligence() {
+        // Without intelligence configured, for_file creates state but suggestions are empty
+        // Suggestions require a HistoryStore with intelligence enabled
         let state = CommandEditState::for_file("test.rs", "/path/to/test.rs");
-        // Should have suggestions for Rust files
-        assert!(!state.suggestions.is_empty(), "Suggestions should be populated for .rs files");
-        assert!(state.suggestions.iter().any(|s| s.contains("cargo")), "Should suggest cargo commands for .rs files");
+
+        // State is correctly initialized
+        assert_eq!(state.tokens.len(), 2);
+        assert_eq!(state.tokens[0].text, "");
+        assert_eq!(state.tokens[1].text, "/path/to/test.rs");
+
+        // Without intelligence, suggestions are empty (no static fallback)
+        assert!(state.suggestions.is_empty(), "Without intelligence, suggestions should be empty");
     }
 
     #[test]
     fn test_next_prev_suggestion() {
-        let state = CommandEditState::for_file("test.rs", "/path/to/test.rs");
+        let mut state = CommandEditState::for_file("test.rs", "/path/to/test.rs");
+        // Manually populate suggestions to test cycling mechanics
+        state.suggestions = vec!["cat".to_string(), "less".to_string(), "vim".to_string()];
+
         // Should return suggestions for display
         assert!(state.next_suggestion().is_some(), "next_suggestion should return Some when suggestions exist");
         assert!(state.prev_suggestion().is_some(), "prev_suggestion should return Some when suggestions exist");
+
+        // Verify cycling works correctly
+        assert_eq!(state.next_suggestion(), Some("cat"));
+        assert_eq!(state.prev_suggestion(), Some("vim"));
     }
 
     #[test]
     fn test_suggestions_preserved_on_locked_token() {
         let mut state = CommandEditState::for_file("test.rs", "/path/to/test.rs");
-        // Initially on command token (index 0), suggestions should exist
-        assert!(!state.suggestions.is_empty(), "Suggestions should exist initially");
+        // Manually populate suggestions to test preservation behavior
+        state.suggestions = vec!["cat".to_string(), "less".to_string(), "vim".to_string()];
         let initial_count = state.suggestions.len();
 
         // Move to locked token (filename)
         state.next();
         state.update_suggestions();
 
-        // Suggestions should be preserved, not cleared
+        // Suggestions should be preserved, not cleared (key behavior being tested)
         assert_eq!(state.suggestions.len(), initial_count, "Suggestions should be preserved when on locked token");
         assert!(state.next_suggestion().is_some(), "next_suggestion should still work on locked token");
     }
 
     #[test]
-    fn test_history_browser_suggestions() {
-        // Simulate history browser: "git remote add origin url"
+    fn test_history_browser_suggestions_cycling() {
+        // Test suggestion cycling in history browser context
         let mut state = CommandEditState::from_command("git remote add origin git@github.com:user/repo.git");
 
-        // from_command doesn't call update_suggestions, so we need to call it (like history browser does)
-        state.update_suggestions();
-
-        // Initially at token 0 (git), suggestions should be populated
-        assert!(!state.suggestions.is_empty(), "Suggestions should exist for git command");
-
-        // Move to token 1 (remote)
-        state.select(1);
-        state.update_suggestions();
-
-        // After moving, suggestions should be for git subcommands
-        assert!(!state.suggestions.is_empty(), "Suggestions should exist for git subcommand position");
-        assert!(state.suggestions.len() > 1, "Should have multiple suggestions: {:?}", state.suggestions);
+        // Manually populate suggestions to test cycling mechanics
+        state.suggestions = vec![
+            "status".to_string(),
+            "push".to_string(),
+            "pull".to_string(),
+            "commit".to_string(),
+        ];
 
         // Both prev and next should return values
         let prev = state.prev_suggestion();
         let next = state.next_suggestion();
 
-        assert!(prev.is_some(), "prev_suggestion should return Some, got None. Suggestions: {:?}", state.suggestions);
-        assert!(next.is_some(), "next_suggestion should return Some, got None. Suggestions: {:?}, suggestion_index: {:?}", state.suggestions, state.suggestion_index);
+        assert!(prev.is_some(), "prev_suggestion should return Some when suggestions exist");
+        assert!(next.is_some(), "next_suggestion should return Some when suggestions exist");
 
-        // They should be different (not same item)
-        if state.suggestions.len() > 1 {
-            assert_ne!(prev, next, "prev and next should show different suggestions");
-        }
+        // They should be different (cycling through list)
+        assert_ne!(prev, next, "prev and next should show different suggestions");
+
+        // Test cycling updates edit_buffer
+        state.cycle_suggestion(1);
+        assert!(!state.edit_buffer.is_empty(), "edit_buffer should update after cycling");
+    }
+
+    #[test]
+    fn test_update_suggestions_clears_without_intelligence() {
+        // Without intelligence configured, update_suggestions clears suggestions
+        let mut state = CommandEditState::from_command("git status");
+
+        // Manually populate some suggestions
+        state.suggestions = vec!["push".to_string(), "pull".to_string()];
+
+        // Call update_suggestions without history_store set
+        state.update_suggestions();
+
+        // Without intelligence, suggestions are cleared
+        assert!(state.suggestions.is_empty(), "Without intelligence, update_suggestions should clear suggestions");
     }
 
     #[test]
@@ -1103,14 +1066,12 @@ mod tests {
         assert_eq!(state.tokens[1].text, "/path/to/test.txt");
         assert!(state.tokens[1].locked);
 
-        // User cycles through suggestions to select "cat"
-        assert!(!state.suggestions.is_empty(), "Should have suggestions");
-        state.cycle_suggestion(1); // Cycle to first suggestion
-        assert!(!state.edit_buffer.is_empty(), "Edit buffer should have suggestion after cycling");
+        // Manually populate suggestions to test cycling behavior
+        state.suggestions = vec!["cat".to_string(), "less".to_string(), "vim".to_string()];
 
-        // Simulate finding "cat" in suggestions (it should be there for a .txt file)
-        // For testing, manually set it
-        state.edit_buffer = "cat".to_string();
+        // User cycles through suggestions to select "cat"
+        state.cycle_suggestion(1); // Cycle to first suggestion
+        assert_eq!(state.edit_buffer, "cat", "Edit buffer should have 'cat' after cycling");
 
         // User presses Enter - build_command should create the full command
         let command = state.build_command();

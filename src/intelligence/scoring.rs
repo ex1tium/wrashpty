@@ -253,7 +253,7 @@ mod tests {
         let score1 = compute_score(100, now, Some(1.0), ContextMatch::Exact, SuggestionSource::LearnedSequence);
 
         // Low frequency, old, failed
-        let score2 = compute_score(1, now - 365 * 86400, Some(0.0), ContextMatch::Generic, SuggestionSource::StaticKnowledge);
+        let score2 = compute_score(1, now - 365 * 86400, Some(0.0), ContextMatch::Generic, SuggestionSource::LearnedHierarchy);
 
         assert!(score1 > score2);
     }
@@ -263,7 +263,7 @@ mod tests {
         let suggestions = vec![
             Suggestion::new("git push", SuggestionSource::LearnedSequence, 2.0),
             Suggestion::new("git pull", SuggestionSource::LearnedSequence, 3.0),
-            Suggestion::new("git push", SuggestionSource::StaticKnowledge, 1.0), // Duplicate with lower score
+            Suggestion::new("git push", SuggestionSource::LearnedHierarchy, 1.0), // Duplicate with lower score
         ];
 
         let ranked = rank_suggestions(suggestions);
@@ -289,9 +289,9 @@ mod tests {
     #[test]
     fn test_normalize_scores() {
         let mut suggestions = vec![
-            Suggestion::new("a", SuggestionSource::StaticKnowledge, 10.0),
-            Suggestion::new("b", SuggestionSource::StaticKnowledge, 5.0),
-            Suggestion::new("c", SuggestionSource::StaticKnowledge, 2.5),
+            Suggestion::new("a", SuggestionSource::LearnedHierarchy, 10.0),
+            Suggestion::new("b", SuggestionSource::LearnedHierarchy, 5.0),
+            Suggestion::new("c", SuggestionSource::LearnedHierarchy, 2.5),
         ];
 
         normalize_scores(&mut suggestions);
