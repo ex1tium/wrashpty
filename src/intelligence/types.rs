@@ -777,7 +777,7 @@ pub fn build_context(
 }
 
 /// Determines the position type based on preceding tokens.
-fn determine_position_type(tokens: &[CommandToken], partial: &str) -> PositionType {
+fn determine_position_type(tokens: &[CommandToken], _partial: &str) -> PositionType {
     if tokens.is_empty() {
         return PositionType::Command;
     }
@@ -800,7 +800,8 @@ fn determine_position_type(tokens: &[CommandToken], partial: &str) -> PositionTy
     // After flag (potential flag value)
     if last_token.token_type == TokenType::Flag {
         // Check if this flag typically takes a value (use canonical implementation)
-        if tokenizer::flag_expects_value(&last_token.text, base_command) && partial.is_empty() {
+        // Allow non-empty partials so flag-value suggestions continue while typing
+        if tokenizer::flag_expects_value(&last_token.text, base_command) {
             return PositionType::FlagValue {
                 flag: last_token.text.clone(),
             };

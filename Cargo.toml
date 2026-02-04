@@ -16,6 +16,9 @@ nix = { version = "0.27", features = ["term", "signal", "poll", "fs"] }
 signal-hook = "0.3"
 libc = "0.2"
 
+# Process timeout handling
+wait-timeout = "0.2"
+
 # Cryptographic session tokens
 getrandom = "0.2"
 

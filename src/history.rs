@@ -4,7 +4,7 @@
 //! and navigation in the reedline editor.
 
 use std::collections::VecDeque;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 
@@ -236,7 +236,6 @@ fn get_last_history_line(path: &PathBuf) -> anyhow::Result<Option<String>> {
 ///
 /// The number of duplicate entries removed.
 pub fn dedupe_bash_history() -> anyhow::Result<usize> {
-    use std::fs;
     use std::io::{BufRead, BufReader, Write};
 
     let history_path = get_history_path()?;
@@ -274,11 +273,39 @@ pub fn dedupe_bash_history() -> anyhow::Result<usize> {
     }
 
     if removed > 0 {
-        // Write back deduplicated history
-        let mut file = fs::File::create(&history_path)?;
-        for line in &deduped {
-            writeln!(file, "{}", line)?;
+        // Write to a temporary file first for atomic replacement
+        let temp_path = history_path.with_extension("tmp");
+
+        // Get original file permissions if it exists
+        let permissions = fs::metadata(&history_path).ok().map(|m| m.permissions());
+
+        // Write deduplicated history to temp file
+        {
+            let mut file = fs::File::create(&temp_path)
+                .with_context(|| format!("Failed to create temp file {}", temp_path.display()))?;
+
+            for line in &deduped {
+                writeln!(file, "{}", line)
+                    .with_context(|| format!("Failed to write to temp file {}", temp_path.display()))?;
+            }
+
+            // Flush and sync to ensure all data is written to disk
+            file.flush()
+                .with_context(|| format!("Failed to flush temp file {}", temp_path.display()))?;
+            file.sync_all()
+                .with_context(|| format!("Failed to sync temp file {}", temp_path.display()))?;
         }
+
+        // Preserve original permissions if we captured them
+        if let Some(perms) = permissions {
+            fs::set_permissions(&temp_path, perms)
+                .with_context(|| format!("Failed to set permissions on temp file {}", temp_path.display()))?;
+        }
+
+        // Atomically rename temp file to history file
+        fs::rename(&temp_path, &history_path)
+            .with_context(|| format!("Failed to rename {} to {}", temp_path.display(), history_path.display()))?;
+
         info!(removed, "Deduplicated bash_history");
     }
 
