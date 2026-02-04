@@ -15,6 +15,12 @@ use rusqlite::Connection;
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
+use crate::intelligence::{
+    CommandIntelligence, Suggestion, build_context_with_mode,
+    FileContext,
+};
+use crate::chrome::command_edit::CommandToken;
+
 /// Errors that can occur when interacting with the history store.
 #[derive(Debug, Error)]
 pub enum HistoryStoreError {
@@ -116,6 +122,10 @@ pub struct HistoryStore {
     last_command_id: Option<HistoryItemId>,
     /// The reedline history instance (for getting last command ID).
     reedline_history: Option<SqliteBackedHistory>,
+    /// Command Intelligence engine for learned suggestions.
+    intelligence: Option<CommandIntelligence>,
+    /// Last command executed (for learning on completion).
+    last_command_text: Option<String>,
 }
 
 impl HistoryStore {
@@ -167,15 +177,31 @@ impl HistoryStore {
         }
 
         let mut store = Self {
-            db_path,
+            db_path: db_path.clone(),
             last_command_id: None,
             reedline_history: Some(reedline_history),
+            intelligence: None,
+            last_command_text: None,
         };
 
         // Create settings table if it doesn't exist
         if let Err(e) = store.create_settings_table() {
             warn!("Failed to create settings table: {}", e);
         }
+
+        // Initialize Command Intelligence lazily (separate connection)
+        match CommandIntelligence::from_path(&db_path) {
+            Ok(ci) => {
+                store.intelligence = Some(ci);
+                info!("Command Intelligence initialized");
+            }
+            Err(e) => {
+                warn!("Failed to initialize Command Intelligence: {}", e);
+            }
+        }
+
+        // Load intelligence settings (restore user preference)
+        store.load_intelligence_settings();
 
         // Migrate from bash_history on first run
         if is_first_run {
@@ -637,6 +663,181 @@ impl HistoryStore {
 
         // Return just the tokens, limited
         Ok(tokens.into_iter().take(limit).map(|(t, _)| t).collect())
+    }
+
+    // ========================================================================
+    // Command Intelligence Integration
+    // ========================================================================
+
+    /// Starts an intelligence session.
+    ///
+    /// Should be called when the terminal opens.
+    pub fn start_intelligence_session(&mut self, session_id: &str) {
+        if let Some(ref mut ci) = self.intelligence {
+            if let Err(e) = ci.start_session(session_id) {
+                warn!("Failed to start intelligence session: {}", e);
+            }
+        }
+    }
+
+    /// Ends the intelligence session.
+    ///
+    /// Should be called when the terminal closes.
+    pub fn end_intelligence_session(&mut self) {
+        if let Some(ref mut ci) = self.intelligence {
+            if let Err(e) = ci.end_session() {
+                warn!("Failed to end intelligence session: {}", e);
+            }
+        }
+    }
+
+    /// Syncs intelligence with history.
+    ///
+    /// Should be called periodically to learn from new history entries.
+    pub fn sync_intelligence(&mut self) {
+        if let Some(ref mut ci) = self.intelligence {
+            match ci.sync() {
+                Ok(stats) => {
+                    if stats.commands_processed > 0 {
+                        debug!(
+                            commands = stats.commands_processed,
+                            tokens = stats.tokens_extracted,
+                            "Intelligence synced"
+                        );
+                    }
+                }
+                Err(e) => {
+                    debug!("Intelligence sync skipped: {}", e);
+                }
+            }
+        }
+    }
+
+    /// Records a command submission for later learning.
+    ///
+    /// Should be called when the user submits a command.
+    pub fn record_command_submission(&mut self, command: &str) {
+        self.last_command_text = Some(command.to_string());
+    }
+
+    /// Learns from command completion.
+    ///
+    /// Should be called when a command finishes executing with its exit status.
+    pub fn learn_command_completion(&mut self, exit_status: Option<i32>) {
+        let command = match self.last_command_text.take() {
+            Some(cmd) => cmd,
+            None => return,
+        };
+
+        if let Some(ref mut ci) = self.intelligence {
+            if let Err(e) = ci.learn_command(&command, exit_status) {
+                debug!("Failed to learn from command: {}", e);
+            }
+        }
+    }
+
+    /// Gets intelligent suggestions for the given context.
+    ///
+    /// Returns suggestions from the intelligence engine, falling back to
+    /// empty results on error.
+    ///
+    /// # Arguments
+    ///
+    /// * `tokens` - The tokens preceding the current edit position
+    /// * `partial` - The partial text being typed
+    /// * `cwd` - Current working directory
+    /// * `file_context` - File context if in file browser
+    /// * `last_command` - Last executed command for transition suggestions
+    pub fn intelligent_suggest(
+        &self,
+        tokens: &[CommandToken],
+        partial: &str,
+        cwd: Option<PathBuf>,
+        file_context: Option<FileContext>,
+        last_command: Option<String>,
+    ) -> Vec<Suggestion> {
+        self.intelligent_suggest_with_mode(tokens, partial, cwd, file_context, last_command, false)
+    }
+
+    /// Gets intelligent suggestions with token mode support.
+    ///
+    /// # Arguments
+    ///
+    /// * `tokens` - The tokens preceding the current edit position
+    /// * `partial` - The partial text being typed
+    /// * `cwd` - Current working directory
+    /// * `file_context` - File context if in file browser
+    /// * `last_command` - Last executed command for transition suggestions
+    /// * `token_mode` - When true, only return individual token suggestions
+    ///   (from learned sequences, flag values, etc.). When false, may return
+    ///   full command completions (from templates, fuzzy search).
+    pub fn intelligent_suggest_with_mode(
+        &self,
+        tokens: &[CommandToken],
+        partial: &str,
+        cwd: Option<PathBuf>,
+        file_context: Option<FileContext>,
+        last_command: Option<String>,
+        token_mode: bool,
+    ) -> Vec<Suggestion> {
+        let Some(ref ci) = self.intelligence else {
+            return Vec::new();
+        };
+
+        // Build the suggestion context with token mode
+        let session = ci.current_session().cloned();
+        let context = build_context_with_mode(
+            tokens, partial, cwd, file_context, session, last_command, token_mode
+        );
+
+        ci.suggest(&context, 20)
+    }
+
+    /// Expands an alias if it exists.
+    pub fn expand_alias(&self, text: &str) -> Option<String> {
+        self.intelligence.as_ref().and_then(|ci| ci.expand_alias(text))
+    }
+
+    /// Returns whether intelligence is available and enabled.
+    pub fn has_intelligence(&self) -> bool {
+        self.intelligence.as_ref().map(|ci| ci.is_enabled()).unwrap_or(false)
+    }
+
+    /// Enables or disables intelligence.
+    ///
+    /// The setting is persisted to the database.
+    pub fn set_intelligence_enabled(&mut self, enabled: bool) {
+        if let Some(ref mut ci) = self.intelligence {
+            ci.set_enabled(enabled);
+        }
+
+        // Persist the setting
+        let value = if enabled { "true" } else { "false" };
+        if let Err(e) = self.set_setting("intelligence.enabled", value) {
+            warn!("Failed to persist intelligence.enabled setting: {}", e);
+        }
+    }
+
+    /// Loads intelligence enabled state from settings.
+    ///
+    /// Should be called after initialization to restore user preference.
+    /// Intelligence defaults to disabled unless explicitly set to "true".
+    pub fn load_intelligence_settings(&mut self) {
+        if let Ok(Some(value)) = self.get_setting("intelligence.enabled") {
+            // Explicit opt-in: only enable if exactly "true"
+            let enabled = value == "true";
+            if !enabled && value != "false" {
+                // Log invalid values but don't enable
+                debug!(
+                    setting_value = %value,
+                    "Invalid intelligence.enabled setting value, defaulting to disabled"
+                );
+            }
+            if let Some(ref mut ci) = self.intelligence {
+                ci.set_enabled(enabled);
+            }
+        }
+        // If setting is missing, intelligence remains in its default state (disabled)
     }
 }
 

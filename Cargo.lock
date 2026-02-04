@@ -2159,6 +2159,7 @@ dependencies = [
  "regex",
  "rexpect",
  "rusqlite",
+ "serde",
  "serde_json",
  "serial_test",
  "signal-hook",

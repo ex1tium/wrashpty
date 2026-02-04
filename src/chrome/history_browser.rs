@@ -170,7 +170,19 @@ impl HistoryBrowserPanel {
     fn enter_edit_mode(&mut self) {
         if let Some(cmd) = self.selected_command() {
             debug!(command = %cmd, "Entering edit mode");
-            self.edit_mode = Some(CommandEditState::from_command(cmd));
+            let mut edit_state = CommandEditState::from_command(cmd);
+
+            // Configure intelligence context if available
+            if let Some(ref store) = self.history_store {
+                edit_state.set_intelligence_context(
+                    Arc::clone(store),
+                    self.current_cwd.clone(),
+                    None, // No file context in history browser
+                    None, // Last command could be tracked separately
+                );
+            }
+
+            self.edit_mode = Some(edit_state);
             self.update_suggestions_with_history();
         }
     }
@@ -185,22 +197,30 @@ impl HistoryBrowserPanel {
         self.edit_mode.is_some()
     }
 
-    /// Updates suggestions with history data after navigation.
+    /// Updates suggestions with intelligent or history-based data after navigation.
+    ///
+    /// The CommandEditState now handles intelligent suggestions internally when
+    /// history_store is configured. This method provides a fallback to simple
+    /// history-based token suggestions when intelligence is disabled.
     fn update_suggestions_with_history(&mut self) {
         let Some(edit_state) = &mut self.edit_mode else { return };
 
-        // First update from command knowledge
+        // update_suggestions() handles both static and intelligent suggestions
+        // (if history_store was configured via set_intelligence_context)
         edit_state.update_suggestions();
 
-        // Then add history-based suggestions
+        // Fallback: add simple history-based suggestions if intelligence is not available
+        // This provides at least some history-aware completions even without full intelligence
         if let Some(store) = &self.history_store {
             if let Ok(store) = store.lock() {
-                let preceding: Vec<&str> = edit_state.tokens[..edit_state.selected]
-                    .iter()
-                    .map(|t| t.text.as_str())
-                    .collect();
-                if let Ok(history_suggestions) = store.tokens_at_position(&preceding, 20) {
-                    edit_state.add_suggestions(history_suggestions);
+                if !store.has_intelligence() {
+                    let preceding: Vec<&str> = edit_state.tokens[..edit_state.selected]
+                        .iter()
+                        .map(|t| t.text.as_str())
+                        .collect();
+                    if let Ok(history_suggestions) = store.tokens_at_position(&preceding, 20) {
+                        edit_state.add_suggestions(history_suggestions);
+                    }
                 }
             }
         }
@@ -325,12 +345,10 @@ impl HistoryBrowserPanel {
                 } else {
                     edit_state.edit_buffer.clone()
                 }
+            } else if token.text.is_empty() {
+                "_".to_string()
             } else {
-                if token.text.is_empty() {
-                    "_".to_string()
-                } else {
-                    token.text.clone()
-                }
+                token.text.clone()
             };
             spans.push(Span::styled(display_text, token_style));
 
