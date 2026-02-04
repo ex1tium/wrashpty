@@ -137,8 +137,8 @@ pub fn superscript_digit(n: usize) -> &'static str {
 // Quote Handling
 // ============================================================================
 
-/// Parses quote style from a token, returning inner text and style.
-pub fn parse_quotes(text: &str) -> (String, QuoteStyle) {
+/// Splits a token into its inner text and detected quote style.
+pub fn split_quotes(text: &str) -> (String, QuoteStyle) {
     if text.len() >= 2 {
         if text.starts_with('\'') && text.ends_with('\'') {
             return (text[1..text.len() - 1].to_string(), QuoteStyle::Single);
@@ -156,6 +156,32 @@ pub fn apply_quotes(text: &str, style: QuoteStyle) -> String {
         QuoteStyle::None => text.to_string(),
         QuoteStyle::Single => format!("'{}'", text),
         QuoteStyle::Double => format!("\"{}\"", text),
+    }
+}
+
+/// POSIX-quotes a string if it contains shell metacharacters or spaces.
+/// Returns the string unchanged if no quoting is needed.
+pub fn quote_for_shell(text: &str) -> String {
+    if text.is_empty() {
+        return "''".to_string();
+    }
+
+    // Check if quoting is needed
+    let needs_quoting = text.chars().any(|c| {
+        matches!(c, ' ' | '\t' | '\n' | '"' | '\'' | '\\' | '$' | '`' | '!' | '*' | '?' | '[' | ']' | '(' | ')' | '{' | '}' | '<' | '>' | '|' | '&' | ';' | '#' | '~')
+    });
+
+    if !needs_quoting {
+        return text.to_string();
+    }
+
+    // Use single quotes, escaping any embedded single quotes
+    // In POSIX shell: 'foo'\''bar' produces foo'bar
+    if text.contains('\'') {
+        let escaped = text.replace('\'', "'\\''");
+        format!("'{}'", escaped)
+    } else {
+        format!("'{}'", text)
     }
 }
 
@@ -503,12 +529,19 @@ impl CommandEditState {
     }
 
     /// Builds the final command from the edited tokens.
+    /// Locked tokens (e.g., file paths) are POSIX-quoted if they contain spaces or special chars.
     pub fn build_command(&mut self) -> String {
         self.save_current_edit();
         self.tokens
             .iter()
             .filter(|t| !t.text.is_empty())
-            .map(|t| t.text.as_str())
+            .map(|t| {
+                if t.locked {
+                    quote_for_shell(&t.text)
+                } else {
+                    t.text.clone()
+                }
+            })
             .collect::<Vec<_>>()
             .join(" ")
     }
@@ -614,7 +647,7 @@ impl CommandEditState {
             return;
         }
         self.save_undo();
-        let (inner, current_style) = parse_quotes(&self.edit_buffer);
+        let (inner, current_style) = split_quotes(&self.edit_buffer);
         let new_style = match current_style {
             QuoteStyle::None => QuoteStyle::Single,
             QuoteStyle::Single => QuoteStyle::Double,
@@ -1048,10 +1081,10 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_quotes() {
-        assert_eq!(parse_quotes("hello"), ("hello".to_string(), QuoteStyle::None));
-        assert_eq!(parse_quotes("'hello'"), ("hello".to_string(), QuoteStyle::Single));
-        assert_eq!(parse_quotes("\"hello\""), ("hello".to_string(), QuoteStyle::Double));
+    fn test_split_quotes() {
+        assert_eq!(split_quotes("hello"), ("hello".to_string(), QuoteStyle::None));
+        assert_eq!(split_quotes("'hello'"), ("hello".to_string(), QuoteStyle::Single));
+        assert_eq!(split_quotes("\"hello\""), ("hello".to_string(), QuoteStyle::Double));
     }
 
     #[test]
