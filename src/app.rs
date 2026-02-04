@@ -325,6 +325,9 @@ pub struct App {
     /// Whether we're waiting for wipe confirmation (after `:wipe` was entered).
     pending_wipe_confirmation: bool,
 
+    /// Whether we're waiting for dedupe confirmation (after `:dedupe` was entered).
+    pending_dedupe_confirmation: bool,
+
     /// Timestamp when injection started (for timeout).
     injection_start: Option<Instant>,
 
@@ -429,6 +432,7 @@ impl App {
             history_store,
             pending_command: None,
             pending_wipe_confirmation: false,
+            pending_dedupe_confirmation: false,
             injection_start: None,
             current_cwd,
             git_branch: None,
@@ -823,6 +827,53 @@ impl App {
                     self.pending_wipe_confirmation = false;
                 }
 
+                // History dedupe command - sets pending confirmation flag
+                if trimmed == ":dedupe" {
+                    self.pending_dedupe_confirmation = true;
+                    self.chrome.notify(
+                        "Type 'dedupe' to confirm removing duplicate history entries",
+                        NotificationStyle::Warning,
+                        Duration::from_secs(10),
+                    );
+                    return Ok(());
+                }
+
+                // Handle dedupe confirmation (only if :dedupe was entered first)
+                if trimmed == "dedupe" && self.pending_dedupe_confirmation {
+                    self.pending_dedupe_confirmation = false;
+                    self.chrome.clear_notifications();
+                    if let Ok(store) = self.history_store.lock() {
+                        match store.dedupe_all() {
+                            Ok((sqlite_removed, bash_removed)) => {
+                                let msg = format!(
+                                    "Removed {} duplicates (SQLite: {}, bash_history: {})",
+                                    sqlite_removed + bash_removed,
+                                    sqlite_removed,
+                                    bash_removed
+                                );
+                                self.chrome.notify(
+                                    msg,
+                                    NotificationStyle::Success,
+                                    Duration::from_secs(5),
+                                );
+                            }
+                            Err(e) => {
+                                self.chrome.notify(
+                                    format!("Failed to dedupe history: {}", e),
+                                    NotificationStyle::Error,
+                                    Duration::from_secs(5),
+                                );
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+
+                // Clear pending dedupe confirmation if user enters anything else
+                if self.pending_dedupe_confirmation && trimmed != "dedupe" {
+                    self.pending_dedupe_confirmation = false;
+                }
+
                 // Skip empty commands
                 if trimmed.is_empty() {
                     debug!("Empty command, staying in Edit mode");
@@ -832,9 +883,11 @@ impl App {
                 // Store command and transition to Injecting
                 self.pending_command = Some(line.clone());
 
-                // Record command for intelligence learning
+                // Record command for intelligence learning and sync to bash_history
+                // (reedline already saved to SQLite, but we need bash_history for other sessions)
                 if let Ok(mut store) = self.history_store.lock() {
                     store.record_command_submission(&line);
+                    store.sync_to_bash_history(&line);
                 }
 
                 self.inject_pending_command()?;
@@ -1226,6 +1279,14 @@ impl App {
                 // Use the same restore flow as Dismiss - this properly clears the panel
                 // and restores terminal state. Then inject the command.
                 self.restore_after_panel()?;
+
+                // Save to history (both SQLite and bash_history) since panel bypasses reedline
+                if let Ok(mut store) = self.history_store.lock() {
+                    if let Err(e) = store.save_command(&cmd, Some(&self.current_cwd)) {
+                        warn!("Failed to save panel command to history: {}", e);
+                    }
+                }
+
                 self.pending_command = Some(cmd);
                 self.inject_pending_command()?;
             }

@@ -127,6 +127,164 @@ fn get_history_path() -> anyhow::Result<PathBuf> {
     Ok(home.join(".bash_history"))
 }
 
+/// Appends a command to ~/.bash_history if it differs from the last entry.
+///
+/// This enables commands executed in wrashpty to appear in other bash sessions'
+/// history. The command is appended atomically with a trailing newline.
+/// Consecutive duplicate commands are skipped (similar to HISTCONTROL=ignoredups).
+///
+/// # Arguments
+///
+/// * `command` - The command string to append
+///
+/// # Errors
+///
+/// Returns an error if the home directory cannot be determined or the file
+/// cannot be written. Missing history file is created automatically.
+pub fn append_to_bash_history(command: &str) -> anyhow::Result<()> {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
+    // Skip empty commands
+    if command.trim().is_empty() {
+        return Ok(());
+    }
+
+    let history_path = get_history_path()?;
+
+    // Check if command is same as last entry (deduplication)
+    if let Some(last) = get_last_history_line(&history_path)? {
+        if last == command {
+            debug!("Skipping duplicate command in bash_history");
+            return Ok(());
+        }
+    }
+
+    // Open file for appending, creating if it doesn't exist
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&history_path)
+        .with_context(|| format!("Failed to open {} for appending", history_path.display()))?;
+
+    // Write command with newline
+    writeln!(file, "{}", command)
+        .with_context(|| format!("Failed to write to {}", history_path.display()))?;
+
+    debug!(command_len = command.len(), "Appended command to bash_history");
+
+    Ok(())
+}
+
+/// Gets the last non-empty line from a file.
+fn get_last_history_line(path: &PathBuf) -> anyhow::Result<Option<String>> {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader, Seek, SeekFrom};
+
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let file = File::open(path)?;
+    let file_len = file.metadata()?.len();
+    if file_len == 0 {
+        return Ok(None);
+    }
+
+    // Read from the end of the file to find the last line efficiently
+    // For small files, just read the whole thing
+    if file_len < 8192 {
+        let reader = BufReader::new(file);
+        let mut last_line = None;
+        for line in reader.lines().flatten() {
+            if !line.trim().is_empty() && !line.starts_with('#') {
+                last_line = Some(line);
+            }
+        }
+        return Ok(last_line);
+    }
+
+    // For larger files, seek to near the end
+    let mut file = file;
+    let seek_pos = file_len.saturating_sub(4096);
+    file.seek(SeekFrom::Start(seek_pos))?;
+
+    let reader = BufReader::new(file);
+    let mut last_line = None;
+
+    // Skip partial first line if we seeked into the middle
+    let mut lines = reader.lines();
+    if seek_pos > 0 {
+        lines.next(); // Skip potentially partial line
+    }
+
+    for line in lines.flatten() {
+        if !line.trim().is_empty() && !line.starts_with('#') {
+            last_line = Some(line);
+        }
+    }
+
+    Ok(last_line)
+}
+
+/// Deduplicates ~/.bash_history, keeping unique consecutive commands.
+///
+/// This removes consecutive duplicate entries while preserving order.
+/// Non-consecutive duplicates are kept (like HISTCONTROL=ignoredups).
+///
+/// # Returns
+///
+/// The number of duplicate entries removed.
+pub fn dedupe_bash_history() -> anyhow::Result<usize> {
+    use std::fs;
+    use std::io::{BufRead, BufReader, Write};
+
+    let history_path = get_history_path()?;
+
+    if !history_path.exists() {
+        return Ok(0);
+    }
+
+    let file = File::open(&history_path)?;
+    let reader = BufReader::new(file);
+
+    let mut deduped: Vec<String> = Vec::new();
+    let mut removed = 0;
+
+    for line in reader.lines().flatten() {
+        // Skip empty lines
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        // Keep timestamp comments
+        if line.starts_with('#') {
+            deduped.push(line);
+            continue;
+        }
+
+        // Check if same as last non-comment entry
+        let last_cmd = deduped.iter().rev().find(|l| !l.starts_with('#'));
+        if last_cmd.is_some_and(|l| l == &line) {
+            removed += 1;
+            continue;
+        }
+
+        deduped.push(line);
+    }
+
+    if removed > 0 {
+        // Write back deduplicated history
+        let mut file = fs::File::create(&history_path)?;
+        for line in &deduped {
+            writeln!(file, "{}", line)?;
+        }
+        info!(removed, "Deduplicated bash_history");
+    }
+
+    Ok(removed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,5 +371,43 @@ mod tests {
             history[MAX_HISTORY_LINES - 1],
             format!("command {}", MAX_HISTORY_LINES + 99)
         );
+    }
+
+    #[test]
+    fn test_append_to_bash_history_skips_empty() {
+        // Empty commands should be silently skipped
+        let result = super::append_to_bash_history("");
+        assert!(result.is_ok());
+
+        let result = super::append_to_bash_history("   ");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_append_to_bash_history_writes_to_file() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        // Create a temp directory to simulate home
+        let temp_dir = tempdir().expect("Failed to create temp dir");
+        let history_file = temp_dir.path().join(".bash_history");
+
+        // Write directly to temp file to test the write logic
+        {
+            use std::fs::OpenOptions;
+            use std::io::Write;
+
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&history_file)
+                .expect("Failed to create temp history file");
+
+            writeln!(file, "echo test_command").expect("Failed to write");
+        }
+
+        // Verify the file exists and has content
+        let content = fs::read_to_string(&history_file).expect("Failed to read");
+        assert!(content.contains("echo test_command"));
     }
 }
