@@ -15,7 +15,7 @@ use ratatui_widgets::list::{List, ListItem};
 use ratatui_widgets::paragraph::Paragraph;
 use tracing::debug;
 
-use super::command_knowledge::COMMAND_KNOWLEDGE;
+use super::command_edit::{superscript_digit, token_type_style, CommandEditState};
 use super::panel::{Panel, PanelResult};
 use super::theme::Theme;
 
@@ -36,267 +36,6 @@ pub struct DirEntry {
     pub mode: u32,
 }
 
-/// Section being edited in file edit mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FileEditSection {
-    /// Command and subcommands before the filename.
-    Prefix,
-    /// The filename itself (non-editable, visual only).
-    Filename,
-    /// Additional arguments after the filename.
-    Suffix,
-}
-
-/// State for file edit mode.
-#[derive(Debug, Clone)]
-struct FileEditModeState {
-    /// The filename being operated on.
-    filename: String,
-    /// Full path to the file.
-    filepath: PathBuf,
-    /// Tokens before the filename (command, subcommands).
-    prefix_tokens: Vec<String>,
-    /// Tokens after the filename (additional arguments).
-    suffix_tokens: Vec<String>,
-    /// Currently selected section.
-    selected_section: FileEditSection,
-    /// Index within the current section's tokens.
-    selected_index: usize,
-    /// Current edit buffer.
-    edit_buffer: String,
-    /// Available suggestions for the current position.
-    suggestions: Vec<String>,
-    /// Index into suggestions (None = using custom value).
-    suggestion_index: Option<usize>,
-}
-
-impl FileEditModeState {
-    /// Creates a new file edit mode state.
-    fn new(filename: String, filepath: PathBuf) -> Self {
-        // Get file type recommendations as initial suggestions
-        let suggestions: Vec<String> = COMMAND_KNOWLEDGE
-            .commands_for_filetype(&filename)
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-
-        Self {
-            filename,
-            filepath,
-            prefix_tokens: Vec::new(),
-            suffix_tokens: Vec::new(),
-            selected_section: FileEditSection::Prefix,
-            selected_index: 0,
-            edit_buffer: String::new(),
-            suggestions,
-            suggestion_index: None,
-        }
-    }
-
-    /// Cycles through suggestions in the given direction.
-    fn cycle_suggestion(&mut self, direction: i32) {
-        if self.suggestions.is_empty() {
-            return;
-        }
-
-        let new_index = match self.suggestion_index {
-            None => {
-                if direction > 0 { 0 } else { self.suggestions.len() - 1 }
-            }
-            Some(idx) => {
-                let len = self.suggestions.len();
-                if direction > 0 {
-                    (idx + 1) % len
-                } else {
-                    (idx + len - 1) % len
-                }
-            }
-        };
-
-        self.suggestion_index = Some(new_index);
-        self.edit_buffer = self.suggestions[new_index].clone();
-    }
-
-    /// Returns the previous suggestion for display.
-    fn prev_suggestion(&self) -> Option<&str> {
-        if self.suggestions.is_empty() {
-            return None;
-        }
-        let idx = self.suggestion_index.unwrap_or(0);
-        let len = self.suggestions.len();
-        let prev_idx = if idx == 0 { len - 1 } else { idx - 1 };
-        self.suggestions.get(prev_idx).map(|s| s.as_str())
-    }
-
-    /// Returns the next suggestion for display.
-    fn next_suggestion(&self) -> Option<&str> {
-        if self.suggestions.is_empty() {
-            return None;
-        }
-        let idx = self.suggestion_index.unwrap_or(0);
-        let len = self.suggestions.len();
-        let next_idx = (idx + 1) % len;
-        self.suggestions.get(next_idx).map(|s| s.as_str())
-    }
-
-    /// Commits the current edit buffer to the appropriate token list.
-    fn commit_edit(&mut self) {
-        if self.edit_buffer.is_empty() {
-            return;
-        }
-
-        match self.selected_section {
-            FileEditSection::Prefix => {
-                if self.selected_index < self.prefix_tokens.len() {
-                    self.prefix_tokens[self.selected_index] = self.edit_buffer.clone();
-                } else {
-                    self.prefix_tokens.push(self.edit_buffer.clone());
-                }
-            }
-            FileEditSection::Suffix => {
-                if self.selected_index < self.suffix_tokens.len() {
-                    self.suffix_tokens[self.selected_index] = self.edit_buffer.clone();
-                } else {
-                    self.suffix_tokens.push(self.edit_buffer.clone());
-                }
-            }
-            FileEditSection::Filename => {}
-        }
-    }
-
-    /// Moves to the next section.
-    fn next_section(&mut self) {
-        self.commit_edit();
-        self.selected_section = match self.selected_section {
-            FileEditSection::Prefix => FileEditSection::Suffix,
-            FileEditSection::Filename => FileEditSection::Suffix,
-            FileEditSection::Suffix => FileEditSection::Prefix,
-        };
-        self.selected_index = 0;
-        self.edit_buffer.clear();
-        self.suggestion_index = None;
-    }
-
-    /// Moves to the previous section.
-    fn prev_section(&mut self) {
-        self.commit_edit();
-        self.selected_section = match self.selected_section {
-            FileEditSection::Prefix => FileEditSection::Suffix,
-            FileEditSection::Filename => FileEditSection::Prefix,
-            FileEditSection::Suffix => FileEditSection::Prefix,
-        };
-        self.selected_index = 0;
-        self.edit_buffer.clear();
-        self.suggestion_index = None;
-    }
-
-    /// Builds the complete command from all parts.
-    fn build_command(&mut self) -> String {
-        self.commit_edit();
-        let mut parts = Vec::new();
-        parts.extend(self.prefix_tokens.iter().cloned());
-        // Shell-quote the filepath to handle spaces and special characters
-        parts.push(shell_quote(&self.filepath.to_string_lossy()));
-        parts.extend(self.suffix_tokens.iter().cloned());
-        parts.join(" ")
-    }
-
-    /// Deletes the current token.
-    fn delete_token(&mut self) {
-        match self.selected_section {
-            FileEditSection::Prefix => {
-                if self.selected_index < self.prefix_tokens.len() {
-                    self.prefix_tokens.remove(self.selected_index);
-                    if self.selected_index >= self.prefix_tokens.len() && self.selected_index > 0 {
-                        self.selected_index -= 1;
-                    }
-                }
-            }
-            FileEditSection::Suffix => {
-                if self.selected_index < self.suffix_tokens.len() {
-                    self.suffix_tokens.remove(self.selected_index);
-                    if self.selected_index >= self.suffix_tokens.len() && self.selected_index > 0 {
-                        self.selected_index -= 1;
-                    }
-                }
-            }
-            FileEditSection::Filename => {}
-        }
-        self.edit_buffer.clear();
-    }
-
-    /// Inserts a new token after the current position.
-    fn insert_token_after(&mut self) {
-        self.commit_edit();
-        match self.selected_section {
-            FileEditSection::Prefix => {
-                self.prefix_tokens.insert(self.selected_index + 1, String::new());
-                self.selected_index += 1;
-            }
-            FileEditSection::Suffix => {
-                let idx = if self.suffix_tokens.is_empty() {
-                    0
-                } else {
-                    (self.selected_index + 1).min(self.suffix_tokens.len())
-                };
-                self.suffix_tokens.insert(idx, String::new());
-                self.selected_index = idx;
-            }
-            FileEditSection::Filename => {
-                // Insert into suffix when on filename
-                self.suffix_tokens.insert(0, String::new());
-                self.selected_section = FileEditSection::Suffix;
-                self.selected_index = 0;
-            }
-        }
-        self.edit_buffer.clear();
-        self.suggestion_index = None;
-    }
-
-    /// Updates suggestions based on current context.
-    ///
-    /// In suffix section, if the current token or preceding tokens contain a pipe,
-    /// suggest pipeable commands instead of file-type commands.
-    fn update_suggestions(&mut self) {
-        if self.selected_section == FileEditSection::Suffix {
-            // Check if current edit buffer starts after a pipe, or if any suffix token is just "|"
-            let has_pipe_before = self.suffix_tokens.iter()
-                .take(self.selected_index)
-                .any(|t| t == "|" || t.ends_with('|'));
-
-            // Also check if we're immediately after typing a pipe
-            let editing_after_pipe = if self.selected_index > 0 {
-                self.suffix_tokens.get(self.selected_index.saturating_sub(1))
-                    .map(|t| t == "|")
-                    .unwrap_or(false)
-            } else {
-                false
-            };
-
-            if has_pipe_before || editing_after_pipe {
-                self.suggestions = COMMAND_KNOWLEDGE
-                    .pipeable_commands()
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect();
-                return;
-            }
-        }
-
-        // Default: use file-type suggestions for prefix section
-        if self.selected_section == FileEditSection::Prefix {
-            self.suggestions = COMMAND_KNOWLEDGE
-                .commands_for_filetype(&self.filename)
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
-        } else {
-            // For suffix without pipe, clear suggestions or provide generic ones
-            self.suggestions.clear();
-        }
-    }
-}
-
 /// File browser panel.
 pub struct FileBrowserPanel {
     /// Current directory being browsed.
@@ -310,7 +49,9 @@ pub struct FileBrowserPanel {
     /// Whether to show hidden files.
     show_hidden: bool,
     /// Edit mode state (None when not in edit mode).
-    edit_mode: Option<FileEditModeState>,
+    edit_mode: Option<CommandEditState>,
+    /// Filename being edited (stored separately for suggestions).
+    edit_filename: Option<String>,
     /// Theme for rendering.
     theme: &'static Theme,
 }
@@ -326,6 +67,7 @@ impl FileBrowserPanel {
             scroll_offset: 0,
             show_hidden: false,
             edit_mode: None,
+            edit_filename: None,
             theme,
         };
         let _ = panel.refresh();
@@ -337,7 +79,10 @@ impl FileBrowserPanel {
         if let Some(entry) = self.selected_entry().cloned() {
             if !entry.is_dir {
                 debug!(file = %entry.name, "Entering file edit mode");
-                self.edit_mode = Some(FileEditModeState::new(entry.name, entry.path));
+                let filepath = shell_quote(&entry.path.to_string_lossy());
+                let state = CommandEditState::for_file(&entry.name, &filepath);
+                self.edit_filename = Some(entry.name);
+                self.edit_mode = Some(state);
             }
         }
     }
@@ -345,6 +90,7 @@ impl FileBrowserPanel {
     /// Exits edit mode.
     fn exit_edit_mode(&mut self) {
         self.edit_mode = None;
+        self.edit_filename = None;
     }
 
     /// Returns true if in edit mode.
@@ -456,17 +202,319 @@ impl FileBrowserPanel {
     fn selected_entry(&self) -> Option<&DirEntry> {
         self.entries.get(self.selection)
     }
+
+    /// Renders the edit mode UI (matches history browser pattern).
+    fn render_edit_mode(&self, buffer: &mut Buffer, area: Rect) {
+        let Some(edit_state) = &self.edit_mode else { return };
+
+        // Layout with three-row depth UI - matches history browser
+        let chunks = Layout::vertical([
+            Constraint::Length(1), // 0: Title
+            Constraint::Length(1), // 1: Separator
+            Constraint::Length(1), // 2: Previous suggestion row (dim)
+            Constraint::Length(1), // 3: Current token strip (highlighted)
+            Constraint::Length(1), // 4: Next suggestion row (dim)
+            Constraint::Length(1), // 5: Spacer
+            Constraint::Length(1), // 6: Edit input line
+            Constraint::Length(1), // 7: Spacer before result
+            Constraint::Length(1), // 8: Result preview
+            Constraint::Min(1),    // 9: Flexible spacer
+            Constraint::Length(1), // 10: Border
+            Constraint::Length(1), // 11: Keybind hints
+        ])
+        .split(area);
+
+        // Title with filename and suggestion count (only show count for editable tokens)
+        let filename = self.edit_filename.as_deref().unwrap_or("file");
+        let mut title_spans = vec![
+            Span::styled(" Edit Command for: ", Style::default().fg(self.theme.header_fg)),
+            Span::styled(filename, Style::default().fg(self.theme.text_highlight).add_modifier(Modifier::BOLD)),
+        ];
+        if !edit_state.is_selected_locked() && !edit_state.suggestions.is_empty() {
+            title_spans.push(Span::styled(
+                format!(" [{} suggestions]", edit_state.suggestions.len()),
+                Style::default().fg(self.theme.text_secondary),
+            ));
+        }
+        let title = Line::from(title_spans);
+        Paragraph::new(title).render(chunks[0], buffer);
+
+        // Separator
+        let border_style = Style::default().fg(self.theme.panel_border);
+        for x in chunks[1].x..chunks[1].x + chunks[1].width {
+            if let Some(cell) = buffer.cell_mut((x, chunks[1].y)) {
+                cell.set_char('─');
+                cell.set_style(border_style);
+            }
+        }
+
+        // Calculate alignment offset for suggestions
+        let mut selected_x_offset: usize = 3;
+        for (i, token) in edit_state.tokens.iter().enumerate() {
+            if i == edit_state.selected {
+                break;
+            }
+            selected_x_offset += 1 + 1 + token.text.len() + 1 + 3;
+        }
+        selected_x_offset += 1 + 1;
+
+        // Previous suggestion row (only show for editable tokens)
+        if !edit_state.is_selected_locked() {
+            if let Some(prev_sugg) = edit_state.prev_suggestion() {
+                let padding = " ".repeat(selected_x_offset);
+                let prev_line = Line::from(vec![
+                    Span::styled(padding, Style::default()),
+                    Span::styled(prev_sugg, Style::default().fg(self.theme.text_secondary)),
+                ]);
+                Paragraph::new(prev_line).render(chunks[2], buffer);
+            }
+        }
+
+        // Current token strip with brackets and superscript numbers
+        let mut spans = Vec::new();
+        spans.push(Span::styled("   ", Style::default()));
+
+        let bracket_style = Style::default().fg(self.theme.text_secondary);
+        let bracket_selected_style = Style::default().fg(self.theme.header_fg);
+
+        for (i, token) in edit_state.tokens.iter().enumerate() {
+            let is_selected = i == edit_state.selected;
+            let slot_num = i + 1;
+
+            // Superscript number
+            let num_style = if is_selected {
+                Style::default().fg(self.theme.text_highlight).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(self.theme.text_secondary)
+            };
+            spans.push(Span::styled(superscript_digit(slot_num), num_style));
+
+            // Opening bracket
+            let bstyle = if is_selected { bracket_selected_style } else { bracket_style };
+            spans.push(Span::styled("⟦", bstyle));
+
+            // Token text with type-aware styling
+            let base_style = token_type_style(token.token_type, self.theme);
+            let token_style = if is_selected {
+                base_style.add_modifier(Modifier::BOLD)
+            } else {
+                base_style
+            };
+
+            // Show edit buffer for selected token, original text for others
+            let display_text = if is_selected {
+                if edit_state.edit_buffer.is_empty() {
+                    "_".to_string()
+                } else {
+                    edit_state.edit_buffer.clone()
+                }
+            } else {
+                if token.text.is_empty() {
+                    "_".to_string()
+                } else {
+                    token.text.clone()
+                }
+            };
+            spans.push(Span::styled(display_text, token_style));
+
+            // Closing bracket
+            spans.push(Span::styled("⟧", bstyle));
+
+            // Spacing between tokens
+            spans.push(Span::raw("   "));
+        }
+
+        let token_line = Line::from(spans);
+        Paragraph::new(token_line).render(chunks[3], buffer);
+
+        // Next suggestion row (only show for editable tokens)
+        if !edit_state.is_selected_locked() {
+            if let Some(next_sugg) = edit_state.next_suggestion() {
+                let padding = " ".repeat(selected_x_offset);
+                let next_line = Line::from(vec![
+                    Span::styled(padding, Style::default()),
+                    Span::styled(next_sugg, Style::default().fg(self.theme.text_secondary)),
+                ]);
+                Paragraph::new(next_line).render(chunks[4], buffer);
+            }
+        }
+
+        // Edit input line with type hint
+        let type_hint = edit_state.type_hint();
+        let cycling_indicator = if edit_state.suggestion_index.is_some() {
+            format!(" [{}/{}]",
+                edit_state.suggestion_index.unwrap_or(0) + 1,
+                edit_state.suggestions.len())
+        } else {
+            String::new()
+        };
+        let edit_label = format!("   {} {} > ", superscript_digit(edit_state.selected + 1), type_hint);
+        let edit_line = Line::from(vec![
+            Span::styled(edit_label, Style::default().fg(self.theme.git_fg)),
+            Span::styled(&edit_state.edit_buffer, Style::default().fg(self.theme.text_primary).add_modifier(Modifier::BOLD)),
+            Span::styled("█", Style::default().fg(self.theme.header_fg)),
+            Span::styled(cycling_indicator, Style::default().fg(self.theme.text_secondary)),
+        ]);
+        Paragraph::new(edit_line).render(chunks[6], buffer);
+
+        // Result preview
+        let result_preview: String = edit_state.tokens.iter().enumerate().map(|(i, t)| {
+            if i == edit_state.selected {
+                edit_state.edit_buffer.clone()
+            } else {
+                t.text.clone()
+            }
+        }).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ");
+
+        let preview_line = Line::from(vec![
+            Span::styled("  Result: ", Style::default().fg(self.theme.text_secondary)),
+            Span::styled(&result_preview, Style::default().fg(self.theme.text_primary)),
+        ]);
+        Paragraph::new(preview_line).render(chunks[8], buffer);
+
+        // Border
+        for x in chunks[10].x..chunks[10].x + chunks[10].width {
+            if let Some(cell) = buffer.cell_mut((x, chunks[10].y)) {
+                cell.set_char('─');
+                cell.set_style(border_style);
+            }
+        }
+
+        // Keybind hints - matching history browser
+        let key_style = Style::default().fg(self.theme.text_highlight);
+        let label_style = Style::default().fg(self.theme.text_secondary);
+        let hints = Line::from(vec![
+            Span::styled("←→", key_style),
+            Span::styled(" Nav", label_style),
+            Span::raw("  "),
+            Span::styled("↑↓", key_style),
+            Span::styled(" Cycle", label_style),
+            Span::raw("  "),
+            Span::styled("^A/I", key_style),
+            Span::styled(" Ins", label_style),
+            Span::raw("  "),
+            Span::styled("^D", key_style),
+            Span::styled(" Del", label_style),
+            Span::raw("  "),
+            Span::styled("Enter", key_style),
+            Span::styled(" Run", label_style),
+            Span::raw("  "),
+            Span::styled("Esc", key_style),
+            Span::styled(" Back", label_style),
+        ]);
+        Paragraph::new(hints).render(chunks[11], buffer);
+    }
+
+    /// Handles input in edit mode - matches history browser pattern.
+    fn handle_edit_input(&mut self, key: KeyEvent) -> Option<PanelResult> {
+        let edit_state = self.edit_mode.as_mut()?;
+
+        // Handle Ctrl+key commands
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('z') | KeyCode::Char('u') => {
+                    edit_state.undo();
+                    return Some(PanelResult::Continue);
+                }
+                KeyCode::Char('d') => {
+                    edit_state.delete_token();
+                    edit_state.update_suggestions();
+                    return Some(PanelResult::Continue);
+                }
+                KeyCode::Char('a') => {
+                    edit_state.insert_token_after();
+                    edit_state.update_suggestions();
+                    return Some(PanelResult::Continue);
+                }
+                KeyCode::Char('i') => {
+                    edit_state.insert_token_before();
+                    edit_state.update_suggestions();
+                    return Some(PanelResult::Continue);
+                }
+                _ => {}
+            }
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                self.exit_edit_mode();
+                Some(PanelResult::Continue)
+            }
+            KeyCode::Enter => {
+                let command = edit_state.build_command();
+                debug!(
+                    command = %command,
+                    edit_buffer = %edit_state.edit_buffer,
+                    tokens = ?edit_state.tokens.iter().map(|t| &t.text).collect::<Vec<_>>(),
+                    "File browser executing command"
+                );
+                self.exit_edit_mode();
+                Some(PanelResult::Execute(command))
+            }
+            KeyCode::Left => {
+                edit_state.prev();
+                edit_state.update_suggestions();
+                Some(PanelResult::Continue)
+            }
+            KeyCode::Right => {
+                edit_state.next();
+                edit_state.update_suggestions();
+                Some(PanelResult::Continue)
+            }
+            KeyCode::Tab => {
+                edit_state.next();
+                edit_state.update_suggestions();
+                Some(PanelResult::Continue)
+            }
+            KeyCode::BackTab => {
+                edit_state.prev();
+                edit_state.update_suggestions();
+                Some(PanelResult::Continue)
+            }
+            KeyCode::Home => {
+                edit_state.select(0);
+                edit_state.update_suggestions();
+                Some(PanelResult::Continue)
+            }
+            KeyCode::End => {
+                let last = edit_state.token_count().saturating_sub(1);
+                edit_state.select(last);
+                edit_state.update_suggestions();
+                Some(PanelResult::Continue)
+            }
+            KeyCode::Up => {
+                edit_state.cycle_suggestion(-1);
+                Some(PanelResult::Continue)
+            }
+            KeyCode::Down => {
+                edit_state.cycle_suggestion(1);
+                Some(PanelResult::Continue)
+            }
+            KeyCode::Char('|') => {
+                // Handle pipe: commit current, add pipe token, move to next
+                edit_state.type_char('|');
+                // Save current and insert new token after
+                if !edit_state.is_selected_locked() {
+                    edit_state.insert_token_after();
+                    edit_state.update_suggestions();
+                }
+                Some(PanelResult::Continue)
+            }
+            KeyCode::Char(c) => {
+                edit_state.type_char(c);
+                Some(PanelResult::Continue)
+            }
+            KeyCode::Backspace => {
+                edit_state.backspace();
+                Some(PanelResult::Continue)
+            }
+            _ => Some(PanelResult::Continue),
+        }
+    }
 }
 
-// Note: Default is removed since FileBrowserPanel now requires a theme parameter
-
 /// Shell-quotes a string to safely handle spaces and special characters.
-///
-/// Uses single quotes with proper escaping for embedded single quotes.
-/// Example: "file name.txt" -> "'file name.txt'"
-/// Example: "it's here" -> "'it'\\''s here'"
 fn shell_quote(s: &str) -> String {
-    // If the string contains no special characters, return as-is
     let needs_quoting = s.chars().any(|c| {
         matches!(c, ' ' | '\t' | '\n' | '"' | '\'' | '\\' | '$' | '`' | '!' | '*' | '?' | '[' | ']' | '{' | '}' | '(' | ')' | '<' | '>' | '|' | '&' | ';' | '#' | '~')
     });
@@ -475,7 +523,6 @@ fn shell_quote(s: &str) -> String {
         return s.to_string();
     }
 
-    // Single-quote the string, escaping embedded single quotes
     let escaped = s.replace('\'', "'\\''");
     format!("'{}'", escaped)
 }
@@ -502,7 +549,7 @@ fn format_permissions(mode: u32) -> String {
     format!("{:03o}", mode & 0o777)
 }
 
-/// Formats a date in compact form (Today, Yesterday, or Mon DD).
+/// Formats a date in compact form.
 fn format_date_compact(time: Option<SystemTime>) -> String {
     let Some(time) = time else {
         return "-".to_string();
@@ -522,10 +569,8 @@ fn format_date_compact(time: Option<SystemTime>) -> String {
     } else if days < 7 {
         format!("{}d", days)
     } else if days < 365 {
-        // Format as "Mon DD" using rough month calculation
         let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
                       "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-        // Rough approximation - get day of year and convert
         let day_of_year = (days % 365) as usize;
         let month_idx = (day_of_year / 30).min(11);
         let day = (day_of_year % 30) + 1;
@@ -535,311 +580,10 @@ fn format_date_compact(time: Option<SystemTime>) -> String {
     }
 }
 
-impl FileBrowserPanel {
-    /// Renders the file edit mode UI.
-    fn render_file_edit_mode(&self, buffer: &mut Buffer, area: Rect, state: &FileEditModeState) {
-        // Layout: 12 rows (with spacer before Result for consistency with history browser)
-        let chunks = Layout::vertical([
-            Constraint::Length(1), // 0: Title with filename
-            Constraint::Length(1), // 1: Separator
-            Constraint::Length(1), // 2: Previous suggestion (dim)
-            Constraint::Length(1), // 3: Command preview row
-            Constraint::Length(1), // 4: Next suggestion (dim)
-            Constraint::Length(1), // 5: Spacer after suggestions
-            Constraint::Length(1), // 6: Edit input
-            Constraint::Length(1), // 7: Spacer before Result
-            Constraint::Length(1), // 8: Result preview
-            Constraint::Min(1),    // 9: Flexible spacer
-            Constraint::Length(1), // 10: Border
-            Constraint::Length(1), // 11: Keybindings
-        ])
-        .split(area);
-
-        // Title with filename
-        let title = Line::from(vec![
-            Span::styled(" Edit Command for: ", Style::default().fg(self.theme.header_fg)),
-            Span::styled(&state.filename, Style::default().fg(self.theme.text_highlight).add_modifier(Modifier::BOLD)),
-            if !state.suggestions.is_empty() {
-                Span::styled(format!(" [{} suggestions]", state.suggestions.len()), Style::default().fg(self.theme.text_secondary))
-            } else {
-                Span::raw("")
-            },
-        ]);
-        Paragraph::new(title).render(chunks[0], buffer);
-
-        // Separator
-        let border_style = Style::default().fg(self.theme.panel_border);
-        for x in chunks[1].x..chunks[1].x + chunks[1].width {
-            if let Some(cell) = buffer.cell_mut((x, chunks[1].y)) {
-                cell.set_char('─');
-                cell.set_style(border_style);
-            }
-        }
-
-        // Calculate prefix display string and its length for alignment
-        let prefix_display = if state.prefix_tokens.is_empty() && state.selected_section == FileEditSection::Prefix {
-            if state.edit_buffer.is_empty() {
-                "[command]".to_string()
-            } else {
-                format!("⟦{}⟧", state.edit_buffer)
-            }
-        } else {
-            let tokens: Vec<&str> = state.prefix_tokens.iter().map(|s| s.as_str()).collect();
-            if tokens.is_empty() {
-                "[command]".to_string()
-            } else {
-                tokens.join(" ")
-            }
-        };
-
-        // Calculate suggestion alignment offset based on selected section
-        let suggestion_offset = match state.selected_section {
-            FileEditSection::Prefix => 3, // Initial "   " padding
-            FileEditSection::Filename => 3 + prefix_display.len() + 1, // After prefix + space
-            FileEditSection::Suffix => {
-                // Start after filename
-                let mut offset = 3 + prefix_display.len() + 1 + state.filename.len() + 1;
-                // Add width of suffix tokens before the selected position
-                for (i, token) in state.suffix_tokens.iter().enumerate() {
-                    if i < state.selected_index {
-                        offset += token.len() + 1; // token + space
-                    }
-                }
-                // Add opening bracket for the edit slot
-                offset += 1; // "⟦"
-                offset
-            }
-        };
-        let suggestion_padding = " ".repeat(suggestion_offset);
-
-        // Previous suggestion (dim)
-        if let Some(prev_sugg) = state.prev_suggestion() {
-            let prev_line = Line::from(vec![
-                Span::styled(&suggestion_padding, Style::default()),
-                Span::styled(prev_sugg, Style::default().fg(self.theme.text_secondary)),
-            ]);
-            Paragraph::new(prev_line).render(chunks[2], buffer);
-        }
-
-        // Command preview row with three parts
-        let mut spans = Vec::new();
-        spans.push(Span::styled("   ", Style::default()));
-
-        // Prefix section
-        let prefix_style = if state.selected_section == FileEditSection::Prefix {
-            Style::default().fg(self.theme.semantic_success).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(self.theme.semantic_success)
-        };
-        spans.push(Span::styled(format!("{} ", prefix_display), prefix_style));
-
-        // Filename (non-editable)
-        let filename_style = Style::default().fg(self.theme.text_highlight);
-        spans.push(Span::styled(format!("{} ", state.filename), filename_style));
-
-        // Suffix section - show individual tokens with edit slot
-        let suffix_style = Style::default().fg(self.theme.git_fg);
-        let suffix_selected_style = Style::default().fg(self.theme.git_fg).add_modifier(Modifier::BOLD);
-
-        if state.selected_section == FileEditSection::Suffix {
-            // Show suffix tokens individually with edit slot at selected_index
-            if state.suffix_tokens.is_empty() && state.edit_buffer.is_empty() {
-                spans.push(Span::styled("[args]", suffix_style));
-            } else {
-                for (i, token) in state.suffix_tokens.iter().enumerate() {
-                    if i == state.selected_index {
-                        // This token is being edited
-                        spans.push(Span::styled(format!("⟦{}⟧ ", state.edit_buffer), suffix_selected_style));
-                    } else {
-                        spans.push(Span::styled(format!("{} ", token), suffix_style));
-                    }
-                }
-                // If selected_index is at or beyond tokens, show edit slot for new token
-                if state.selected_index >= state.suffix_tokens.len() {
-                    if state.edit_buffer.is_empty() {
-                        spans.push(Span::styled("⟦_⟧", suffix_selected_style));
-                    } else {
-                        spans.push(Span::styled(format!("⟦{}⟧", state.edit_buffer), suffix_selected_style));
-                    }
-                }
-            }
-        } else {
-            // Not in suffix section - just show tokens or placeholder
-            if state.suffix_tokens.is_empty() {
-                spans.push(Span::styled("[args]", suffix_style));
-            } else {
-                let tokens: Vec<&str> = state.suffix_tokens.iter().map(|s| s.as_str()).collect();
-                spans.push(Span::styled(tokens.join(" "), suffix_style));
-            }
-        }
-
-        let command_line = Line::from(spans);
-        Paragraph::new(command_line).render(chunks[3], buffer);
-
-        // Next suggestion (dim)
-        if let Some(next_sugg) = state.next_suggestion() {
-            let next_line = Line::from(vec![
-                Span::styled(&suggestion_padding, Style::default()),
-                Span::styled(next_sugg, Style::default().fg(self.theme.text_secondary)),
-            ]);
-            Paragraph::new(next_line).render(chunks[4], buffer);
-        }
-
-        // Edit input line
-        let section_label = match state.selected_section {
-            FileEditSection::Prefix => "prefix",
-            FileEditSection::Filename => "file",
-            FileEditSection::Suffix => "suffix",
-        };
-        let cycling_indicator = if state.suggestion_index.is_some() {
-            format!(" [{}/{}]",
-                state.suggestion_index.unwrap_or(0) + 1,
-                state.suggestions.len())
-        } else {
-            String::new()
-        };
-        let edit_line = Line::from(vec![
-            Span::styled(format!("   {} > ", section_label), Style::default().fg(self.theme.header_fg)),
-            Span::styled(&state.edit_buffer, Style::default().fg(self.theme.text_primary).add_modifier(Modifier::BOLD)),
-            Span::styled("█", Style::default().fg(self.theme.header_fg)),
-            Span::styled(cycling_indicator, Style::default().fg(self.theme.text_secondary)),
-        ]);
-        Paragraph::new(edit_line).render(chunks[6], buffer);
-
-        // Result preview - build the full command
-        let mut parts = Vec::new();
-        if !state.prefix_tokens.is_empty() {
-            parts.extend(state.prefix_tokens.iter().cloned());
-        } else if !state.edit_buffer.is_empty() && state.selected_section == FileEditSection::Prefix {
-            parts.push(state.edit_buffer.clone());
-        }
-        // Use shell_quote for consistency with build_command
-        parts.push(shell_quote(&state.filepath.to_string_lossy()));
-        if !state.suffix_tokens.is_empty() {
-            parts.extend(state.suffix_tokens.iter().cloned());
-        } else if !state.edit_buffer.is_empty() && state.selected_section == FileEditSection::Suffix {
-            parts.push(state.edit_buffer.clone());
-        }
-        let result_preview = parts.join(" ");
-
-        let preview_line = Line::from(vec![
-            Span::styled("  Result: ", Style::default().fg(self.theme.text_secondary)),
-            Span::styled(&result_preview, Style::default().fg(self.theme.text_primary)),
-        ]);
-        Paragraph::new(preview_line).render(chunks[8], buffer);
-
-        // Border
-        for x in chunks[10].x..chunks[10].x + chunks[10].width {
-            if let Some(cell) = buffer.cell_mut((x, chunks[10].y)) {
-                cell.set_char('─');
-                cell.set_style(border_style);
-            }
-        }
-
-        // Keybindings
-        let key_style = Style::default().fg(self.theme.text_highlight);
-        let label_style = Style::default().fg(self.theme.text_secondary);
-        let hints = Line::from(vec![
-            Span::styled("↑↓", key_style),
-            Span::styled(" Cycle", label_style),
-            Span::raw("  "),
-            Span::styled("Tab", key_style),
-            Span::styled(" Section", label_style),
-            Span::raw("  "),
-            Span::styled("^A", key_style),
-            Span::styled(" Add", label_style),
-            Span::raw("  "),
-            Span::styled("^D", key_style),
-            Span::styled(" Del", label_style),
-            Span::raw("  "),
-            Span::styled("Enter", key_style),
-            Span::styled(" Run", label_style),
-            Span::raw("  "),
-            Span::styled("Esc", key_style),
-            Span::styled(" Back", label_style),
-        ]);
-        Paragraph::new(hints).render(chunks[11], buffer);
-    }
-
-    /// Handles input in file edit mode.
-    fn handle_file_edit_input(&mut self, key: KeyEvent) -> Option<PanelResult> {
-        let state = self.edit_mode.as_mut()?;
-
-        // Handle Ctrl+key commands
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
-            match key.code {
-                KeyCode::Char('a') => {
-                    state.insert_token_after();
-                    return Some(PanelResult::Continue);
-                }
-                KeyCode::Char('d') => {
-                    state.delete_token();
-                    return Some(PanelResult::Continue);
-                }
-                _ => {}
-            }
-        }
-
-        match key.code {
-            KeyCode::Esc => {
-                self.exit_edit_mode();
-                Some(PanelResult::Continue)
-            }
-            KeyCode::Enter => {
-                let command = state.build_command();
-                self.exit_edit_mode();
-                Some(PanelResult::Execute(command))
-            }
-            KeyCode::Tab => {
-                state.next_section();
-                state.update_suggestions();
-                Some(PanelResult::Continue)
-            }
-            KeyCode::BackTab => {
-                state.prev_section();
-                state.update_suggestions();
-                Some(PanelResult::Continue)
-            }
-            KeyCode::Up => {
-                state.cycle_suggestion(-1);
-                Some(PanelResult::Continue)
-            }
-            KeyCode::Down => {
-                state.cycle_suggestion(1);
-                Some(PanelResult::Continue)
-            }
-            KeyCode::Char('|') if state.selected_section == FileEditSection::Suffix => {
-                // Pipe in suffix: commit current token, add pipe, start new token with pipeable suggestions
-                if !state.edit_buffer.is_empty() {
-                    state.commit_edit();
-                }
-                // Add the pipe as its own token
-                state.suffix_tokens.push("|".to_string());
-                state.selected_index = state.suffix_tokens.len();
-                state.edit_buffer.clear();
-                state.suggestion_index = None;
-                state.update_suggestions();
-                Some(PanelResult::Continue)
-            }
-            KeyCode::Char(c) => {
-                state.edit_buffer.push(c);
-                state.suggestion_index = None;
-                Some(PanelResult::Continue)
-            }
-            KeyCode::Backspace => {
-                state.edit_buffer.pop();
-                state.suggestion_index = None;
-                Some(PanelResult::Continue)
-            }
-            _ => Some(PanelResult::Continue),
-        }
-    }
-}
-
 impl Panel for FileBrowserPanel {
     fn preferred_height(&self) -> u16 {
         if self.edit_mode.is_some() {
-            13 // 12 rows including spacer before Result
+            15 // Matches history browser edit mode
         } else {
             12
         }
@@ -855,8 +599,8 @@ impl Panel for FileBrowserPanel {
         }
 
         // If in edit mode, render the edit UI
-        if let Some(ref state) = self.edit_mode {
-            self.render_file_edit_mode(buffer, area, &state.clone());
+        if self.in_edit_mode() {
+            self.render_edit_mode(buffer, area);
             return;
         }
 
@@ -927,7 +671,6 @@ impl Panel for FileBrowserPanel {
                     Style::default().fg(self.theme.file_color)
                 };
 
-                // Format metadata columns
                 let perms_str = format_permissions(entry.mode);
                 let date_str = format_date_compact(entry.modified);
                 let size_str = if entry.is_dir {
@@ -936,11 +679,8 @@ impl Panel for FileBrowserPanel {
                     format!("{:>5}", format_size(entry.size))
                 };
 
-                // Calculate available width for name (total - metadata columns)
-                // Format: icon(2) + name + perms(4) + date(6) + size(6) + spacing(6)
                 let metadata_width = 22_usize;
                 let available_for_name = (area.width as usize).saturating_sub(metadata_width);
-                // Use char-aware truncation to avoid panic on UTF-8 multibyte boundaries
                 let name_chars: usize = entry.name.chars().count();
                 let display_name = if name_chars > available_for_name && available_for_name > 0 {
                     let truncated: String = entry.name
@@ -1009,7 +749,7 @@ impl Panel for FileBrowserPanel {
     fn handle_input(&mut self, key: KeyEvent) -> PanelResult {
         // If in edit mode, delegate to edit handler
         if self.in_edit_mode() {
-            if let Some(result) = self.handle_file_edit_input(key) {
+            if let Some(result) = self.handle_edit_input(key) {
                 return result;
             }
         }
@@ -1018,7 +758,6 @@ impl Panel for FileBrowserPanel {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Char('e') => {
-                    // Enter edit mode for the selected file
                     self.enter_edit_mode();
                     return PanelResult::Continue;
                 }
@@ -1038,7 +777,6 @@ impl Panel for FileBrowserPanel {
                         let _ = self.navigate_to(&entry.path);
                         PanelResult::Continue
                     } else {
-                        // Insert the file path
                         PanelResult::InsertText(entry.path.to_string_lossy().to_string())
                     }
                 } else {
