@@ -341,11 +341,11 @@ fn query_by_position(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::intelligence::schema;
+    use crate::intelligence::db_schema;
 
     fn setup_test_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        schema::create_schema(&conn).unwrap();
+        db_schema::create_schema(&conn).unwrap();
         conn
     }
 

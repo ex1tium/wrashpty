@@ -125,6 +125,40 @@ fn create_tables(conn: &Connection) -> Result<(), CIError> {
     // Suggestion cache
     create_cache_table(conn)?;
 
+    // Command schemas (extracted from --help)
+    create_command_schema_tables(conn)?;
+
+    Ok(())
+}
+
+/// Creates command schema storage tables.
+fn create_command_schema_tables(conn: &Connection) -> Result<(), CIError> {
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS ci_command_schemas (
+            id INTEGER PRIMARY KEY,
+            command TEXT NOT NULL,
+            subcommand TEXT,
+            schema_json TEXT NOT NULL,
+            source TEXT NOT NULL,
+            confidence REAL DEFAULT 1.0,
+            extracted_at INTEGER NOT NULL,
+            last_validated INTEGER,
+            UNIQUE(command, subcommand)
+        )",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_schema_command ON ci_command_schemas(command)",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_schema_source ON ci_command_schemas(source)",
+        [],
+    )?;
+
+    debug!("Created command schema tables");
     Ok(())
 }
 
