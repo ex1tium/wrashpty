@@ -7,7 +7,7 @@ use std::path::Path;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui_core::buffer::Buffer;
 use ratatui_core::layout::{Constraint, Layout, Rect};
-use ratatui_core::style::{Color, Modifier, Style};
+use ratatui_core::style::{Modifier, Style};
 use ratatui_core::text::{Line, Span};
 use ratatui_core::widgets::Widget;
 use ratatui_widgets::list::{List, ListItem};
@@ -16,6 +16,7 @@ use regex::Regex;
 use tracing::debug;
 
 use super::panel::{Panel, PanelResult};
+use super::theme::Theme;
 
 /// Source of a command in the palette.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,18 +51,6 @@ impl CommandSource {
         }
     }
 
-    /// Returns the color for this command source.
-    fn color(&self) -> Color {
-        match self {
-            CommandSource::History => Color::Gray,
-            CommandSource::Makefile => Color::Yellow,
-            CommandSource::PackageJson => Color::Green,
-            CommandSource::CargoToml => Color::Red,
-            CommandSource::JustFile => Color::Magenta,
-            CommandSource::Script => Color::Cyan,
-            CommandSource::UserDefined => Color::Blue,
-        }
-    }
 }
 
 /// An item in the command palette.
@@ -91,17 +80,20 @@ pub struct CommandPalettePanel {
     scroll_offset: usize,
     /// Current filter text.
     filter: String,
+    /// Theme for rendering.
+    theme: &'static Theme,
 }
 
 impl CommandPalettePanel {
     /// Creates a new empty command palette.
-    pub fn new() -> Self {
+    pub fn new(theme: &'static Theme) -> Self {
         Self {
             items: Vec::new(),
             filtered: Vec::new(),
             selection: 0,
             scroll_offset: 0,
             filter: String::new(),
+            theme,
         }
     }
 
@@ -361,11 +353,7 @@ impl CommandPalettePanel {
     }
 }
 
-impl Default for CommandPalettePanel {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// Note: Default is removed since CommandPalettePanel now requires a theme parameter
 
 impl Panel for CommandPalettePanel {
     fn preferred_height(&self) -> u16 {
@@ -386,12 +374,12 @@ impl Panel for CommandPalettePanel {
 
         // Render filter input
         let filter_text = if self.filter.is_empty() {
-            Span::styled("Type to filter...", Style::default().fg(Color::DarkGray))
+            Span::styled("Type to filter...", Style::default().fg(self.theme.text_secondary))
         } else {
-            Span::raw(&self.filter)
+            Span::styled(&self.filter, Style::default().fg(self.theme.text_primary))
         };
         let filter_line = Line::from(vec![
-            Span::styled("> ", Style::default().fg(Color::Yellow)),
+            Span::styled("> ", Style::default().fg(self.theme.text_highlight)),
             filter_text,
         ]);
         Paragraph::new(filter_line).render(chunks[0], buffer);
@@ -402,32 +390,32 @@ impl Panel for CommandPalettePanel {
                 Line::from(""),
                 Line::from(Span::styled(
                     "No commands detected in this directory.",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(self.theme.text_secondary),
                 )),
                 Line::from(""),
                 Line::from(Span::styled(
                     "This panel auto-discovers commands from:",
-                    Style::default().fg(Color::Gray),
+                    Style::default().fg(self.theme.text_primary),
                 )),
                 Line::from(Span::styled(
                     "  - Makefile targets",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(self.theme.text_secondary),
                 )),
                 Line::from(Span::styled(
                     "  - package.json scripts (npm)",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(self.theme.text_secondary),
                 )),
                 Line::from(Span::styled(
                     "  - Cargo.toml (cargo commands)",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(self.theme.text_secondary),
                 )),
                 Line::from(Span::styled(
                     "  - justfile recipes",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(self.theme.text_secondary),
                 )),
                 Line::from(Span::styled(
                     "  - Scripts in ./scripts/, ./bin/",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(self.theme.text_secondary),
                 )),
             ];
             Paragraph::new(help_lines).render(chunks[1], buffer);
@@ -450,15 +438,16 @@ impl Panel for CommandPalettePanel {
                 let actual_idx = self.scroll_offset + display_idx;
                 let is_selected = actual_idx == self.selection;
 
-                let icon_style = Style::default().fg(item.source.color());
+                // Use theme-based colors for source icons (amber tints)
+                let icon_style = Style::default().fg(self.theme.text_secondary);
                 let name_style = if is_selected {
                     Style::default()
-                        .fg(Color::Yellow)
+                        .fg(self.theme.selection_fg)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::White)
+                    Style::default().fg(self.theme.text_primary)
                 };
-                let desc_style = Style::default().fg(Color::DarkGray);
+                let desc_style = Style::default().fg(self.theme.text_secondary);
 
                 let line = Line::from(vec![
                     Span::styled(format!("[{}] ", item.source.icon()), icon_style),
@@ -467,7 +456,7 @@ impl Panel for CommandPalettePanel {
                 ]);
 
                 if is_selected {
-                    ListItem::new(line).style(Style::default().bg(Color::DarkGray))
+                    ListItem::new(line).style(Style::default().bg(self.theme.selection_bg))
                 } else {
                     ListItem::new(line)
                 }
@@ -522,10 +511,11 @@ impl Panel for CommandPalettePanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::theme::AMBER_THEME;
 
     #[test]
     fn test_command_palette_new() {
-        let panel = CommandPalettePanel::new();
+        let panel = CommandPalettePanel::new(&AMBER_THEME);
         assert!(panel.items.is_empty());
         assert!(panel.filtered.is_empty());
         assert_eq!(panel.selection, 0);
@@ -540,7 +530,7 @@ mod tests {
 
     #[test]
     fn test_apply_filter_empty() {
-        let mut panel = CommandPalettePanel::new();
+        let mut panel = CommandPalettePanel::new(&AMBER_THEME);
         panel.items.push(CommandItem {
             name: "test".to_string(),
             description: "Test command".to_string(),
@@ -554,7 +544,7 @@ mod tests {
 
     #[test]
     fn test_apply_filter_match() {
-        let mut panel = CommandPalettePanel::new();
+        let mut panel = CommandPalettePanel::new(&AMBER_THEME);
         panel.items.push(CommandItem {
             name: "build".to_string(),
             description: "Build project".to_string(),

@@ -15,7 +15,7 @@ use std::collections::VecDeque;
 
 use anyhow::{Context, Result};
 use reedline::{
-    ColumnarMenu, History, KeyCode, KeyModifiers, MenuBuilder, Prompt,
+    ColumnarMenu, EditCommand, History, KeyCode, KeyModifiers, MenuBuilder, Prompt,
     Reedline, ReedlineEvent, ReedlineMenu, Signal, default_emacs_keybindings,
 };
 use tracing::{debug, info, warn};
@@ -235,6 +235,21 @@ impl Editor {
                 Ok(EditorResult::Exit)
             }
             Err(e) => Err(e).context("Reedline read_line failed"),
+        }
+    }
+
+    /// Pre-fills the editor buffer with the given text.
+    ///
+    /// Call this before `read_line` to pre-populate the input with text.
+    /// The cursor will be positioned at the end of the inserted text.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The text to insert into the buffer
+    pub fn prefill_buffer(&mut self, text: &str) {
+        if !text.is_empty() {
+            self.reedline.run_edit_commands(&[EditCommand::InsertString(text.to_string())]);
+            debug!(text = %text, "Pre-filled editor buffer");
         }
     }
 

@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui_core::buffer::Buffer;
 use ratatui_core::layout::{Constraint, Layout, Rect};
-use ratatui_core::style::{Color, Modifier, Style};
+use ratatui_core::style::{Modifier, Style};
 use ratatui_core::text::{Line, Span};
 use ratatui_core::widgets::Widget;
 use ratatui_widgets::tabs::Tabs;
@@ -17,6 +17,7 @@ use super::file_browser::FileBrowserPanel;
 use super::help_panel::HelpPanel;
 use super::history_browser::HistoryBrowserPanel;
 use super::panel::{Panel, PanelResult};
+use super::theme::Theme;
 use crate::history_store::HistoryStore;
 
 // Tab indices for type-based access
@@ -34,22 +35,25 @@ pub struct TabbedPanel {
     active_tab: usize,
     /// Reference to history store for settings persistence.
     history_store: Option<Arc<Mutex<HistoryStore>>>,
+    /// Theme for rendering.
+    theme: &'static Theme,
 }
 
 impl TabbedPanel {
     /// Creates a new tabbed panel with all panel types.
-    pub fn new() -> Self {
+    pub fn new(theme: &'static Theme) -> Self {
         let tabs: Vec<Box<dyn Panel>> = vec![
-            Box::new(HistoryBrowserPanel::new()),
-            Box::new(FileBrowserPanel::new()),
-            Box::new(CommandPalettePanel::new()),
-            Box::new(HelpPanel::new()),
+            Box::new(HistoryBrowserPanel::new(theme)),
+            Box::new(FileBrowserPanel::new(theme)),
+            Box::new(CommandPalettePanel::new(theme)),
+            Box::new(HelpPanel::new(theme)),
         ];
 
         Self {
             tabs,
             active_tab: 0,
             history_store: None,
+            theme,
         }
     }
 
@@ -142,11 +146,7 @@ impl TabbedPanel {
     }
 }
 
-impl Default for TabbedPanel {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// Note: Default is removed since TabbedPanel now requires a theme parameter
 
 impl Panel for TabbedPanel {
     fn preferred_height(&self) -> u16 {
@@ -169,7 +169,7 @@ impl Panel for TabbedPanel {
         // Create layout: tab bar at top (2 lines for visibility), content below
         let chunks = Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).split(area);
 
-        // Render tab bar with better visibility
+        // Render tab bar with theme colors
         let titles: Vec<Line> = self
             .tabs
             .iter()
@@ -177,11 +177,13 @@ impl Panel for TabbedPanel {
             .map(|(i, tab)| {
                 let style = if i == self.active_tab {
                     Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Cyan)
+                        .fg(self.theme.tab_active_fg)
+                        .bg(self.theme.tab_active_bg)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::White).bg(Color::DarkGray)
+                    Style::default()
+                        .fg(self.theme.tab_inactive_fg)
+                        .bg(self.theme.tab_inactive_bg)
                 };
                 Line::from(Span::styled(format!(" {} ", tab.title()), style))
             })
@@ -189,11 +191,11 @@ impl Panel for TabbedPanel {
 
         let tabs_widget = Tabs::new(titles)
             .select(self.active_tab)
-            .style(Style::default().fg(Color::White))
+            .style(Style::default().fg(self.theme.text_primary))
             .highlight_style(
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
+                    .fg(self.theme.tab_active_fg)
+                    .bg(self.theme.tab_active_bg)
                     .add_modifier(Modifier::BOLD),
             )
             .divider(Span::styled(" ", Style::default()));
@@ -206,7 +208,7 @@ impl Panel for TabbedPanel {
             for x in sep_area.x..sep_area.x + sep_area.width {
                 if let Some(cell) = buffer.cell_mut((x, sep_area.y)) {
                     cell.set_char('─');
-                    cell.set_style(Style::default().fg(Color::DarkGray));
+                    cell.set_style(Style::default().fg(self.theme.panel_border));
                 }
             }
             // Add hint for tab switching at the right side
@@ -217,7 +219,7 @@ impl Panel for TabbedPanel {
                 if x < sep_area.x + sep_area.width {
                     if let Some(cell) = buffer.cell_mut((x, sep_area.y)) {
                         cell.set_char(ch);
-                        cell.set_style(Style::default().fg(Color::DarkGray));
+                        cell.set_style(Style::default().fg(self.theme.text_secondary));
                     }
                 }
             }
@@ -261,17 +263,18 @@ impl Panel for TabbedPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::theme::AMBER_THEME;
 
     #[test]
     fn test_tabbed_panel_new() {
-        let panel = TabbedPanel::new();
+        let panel = TabbedPanel::new(&AMBER_THEME);
         assert_eq!(panel.tab_count(), 4);
         assert_eq!(panel.active_tab(), 0);
     }
 
     #[test]
     fn test_tabbed_panel_next_tab() {
-        let mut panel = TabbedPanel::new();
+        let mut panel = TabbedPanel::new(&AMBER_THEME);
         assert_eq!(panel.active_tab(), 0);
         panel.next_tab();
         assert_eq!(panel.active_tab(), 1);
@@ -286,7 +289,7 @@ mod tests {
 
     #[test]
     fn test_tabbed_panel_prev_tab() {
-        let mut panel = TabbedPanel::new();
+        let mut panel = TabbedPanel::new(&AMBER_THEME);
         // Should wrap to last
         panel.prev_tab();
         assert_eq!(panel.active_tab(), 3);
