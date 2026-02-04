@@ -363,7 +363,6 @@ fn import_within_transaction(
 /// Clears all learned patterns.
 fn clear_learned_patterns(conn: &Connection) -> Result<(), CIError> {
     conn.execute("DELETE FROM ci_sequences", [])?;
-    conn.execute("DELETE FROM ci_ngrams", [])?;
     conn.execute("DELETE FROM ci_pipe_chains", [])?;
     conn.execute("DELETE FROM ci_flag_values", [])?;
     conn.execute("DELETE FROM ci_templates", [])?;

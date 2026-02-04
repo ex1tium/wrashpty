@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::chrome::command_edit::TokenType;
+use crate::intelligence::tokenizer;
 
 // ============================================================================
 // Suggestion Types
@@ -66,10 +67,10 @@ pub enum SuggestionSource {
     /// From template completion (full command templates).
     Template,
 
-    /// From FTS5 fuzzy search.
+    /// From FTS5 fuzzy search (reserved for future use).
     FuzzySearch,
 
-    /// From historical frequency.
+    /// From historical frequency (reserved for future use).
     HistoricalFrequency,
 
     /// User-defined pattern.
@@ -696,6 +697,9 @@ pub struct SyncStats {
     /// Number of flag values learned.
     pub flag_values_learned: usize,
 
+    /// Number of hierarchy entries learned.
+    pub hierarchy_learned: usize,
+
     /// Number of entries skipped due to errors.
     pub entries_skipped: usize,
 
@@ -790,10 +794,13 @@ fn determine_position_type(tokens: &[CommandToken], partial: &str) -> PositionTy
         return PositionType::AfterRedirect;
     }
 
+    // Get base command for context-aware flag checking
+    let base_command = tokens.first().map(|t| t.text.as_str());
+
     // After flag (potential flag value)
     if last_token.token_type == TokenType::Flag {
-        // Check if this flag typically takes a value
-        if flag_expects_value(&last_token.text) && partial.is_empty() {
+        // Check if this flag typically takes a value (use canonical implementation)
+        if tokenizer::flag_expects_value(&last_token.text, base_command) && partial.is_empty() {
             return PositionType::FlagValue {
                 flag: last_token.text.clone(),
             };
@@ -803,43 +810,11 @@ fn determine_position_type(tokens: &[CommandToken], partial: &str) -> PositionTy
     // First position after command (subcommand)
     if tokens.len() == 1 {
         let cmd = &tokens[0].text;
-        if is_compound_command(cmd) {
+        // Use canonical implementation from tokenizer
+        if tokenizer::is_compound_command(cmd) {
             return PositionType::Subcommand;
         }
     }
 
     PositionType::Argument
-}
-
-/// Returns true if the command has subcommands.
-fn is_compound_command(cmd: &str) -> bool {
-    matches!(
-        cmd,
-        "git" | "docker" | "kubectl" | "cargo" | "npm" | "yarn"
-        | "systemctl" | "journalctl" | "apt" | "brew" | "pacman"
-        | "podman" | "dnf" | "yum" | "pip" | "pipx"
-    )
-}
-
-/// Returns true if a flag typically expects a value.
-fn flag_expects_value(flag: &str) -> bool {
-    // Flags that commonly take values
-    let value_flags = [
-        "-m", "--message",
-        "-f", "--file",
-        "-o", "--output",
-        "-i", "--input",
-        "-c", "--config",
-        "-d", "--directory",
-        "-p", "--port",
-        "-u", "--user",
-        "-n", "--name",
-        "-t", "--tag",
-        "--format",
-        "--filter",
-        "--branch",
-        "--remote",
-    ];
-
-    value_flags.contains(&flag)
 }

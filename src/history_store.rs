@@ -914,6 +914,18 @@ impl HistoryStore {
         }
     }
 
+    /// Resets the intelligence database, deleting all learned patterns.
+    ///
+    /// This drops and recreates all `ci_*` tables, giving a clean slate.
+    /// Returns an error if intelligence is not available.
+    pub fn reset_intelligence(&mut self) -> Result<(), HistoryStoreError> {
+        if let Some(ref mut ci) = self.intelligence {
+            ci.reset().map_err(|e| HistoryStoreError::internal(format!("Intelligence reset failed: {}", e)))
+        } else {
+            Err(HistoryStoreError::internal("Intelligence not available"))
+        }
+    }
+
     /// Loads intelligence enabled state from settings.
     ///
     /// Should be called after initialization to restore user preference.

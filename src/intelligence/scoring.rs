@@ -197,20 +197,6 @@ pub fn filter_by_prefix(suggestions: Vec<Suggestion>, prefix: &str) -> Vec<Sugge
         .collect()
 }
 
-/// Boosts suggestions that match the partial input exactly.
-pub fn boost_exact_prefix(suggestions: &mut [Suggestion], prefix: &str, boost: f64) {
-    if prefix.is_empty() {
-        return;
-    }
-
-    let prefix_lower = prefix.to_lowercase();
-    for suggestion in suggestions {
-        if suggestion.text.to_lowercase().starts_with(&prefix_lower) {
-            suggestion.score *= boost;
-        }
-    }
-}
-
 /// Penalizes suggestions with low success rates.
 pub fn penalize_failures(suggestions: &mut [Suggestion], threshold: f64, penalty: f64) {
     for suggestion in suggestions {
@@ -222,20 +208,20 @@ pub fn penalize_failures(suggestions: &mut [Suggestion], threshold: f64, penalty
     }
 }
 
-/// Normalizes scores to 0.0 - 1.0 range.
-pub fn normalize_scores(suggestions: &mut [Suggestion]) {
-    if suggestions.is_empty() {
-        return;
-    }
+#[cfg(test)]
+mod test_helpers {
+    use super::*;
 
-    let max_score = suggestions
-        .iter()
-        .map(|s| s.score)
-        .fold(0.0f64, |a, b| a.max(b));
-
-    if max_score > 0.0 {
-        for suggestion in suggestions {
-            suggestion.score /= max_score;
+    /// Normalizes scores to 0.0 - 1.0 range (test helper).
+    pub fn normalize_scores(suggestions: &mut [Suggestion]) {
+        if suggestions.is_empty() {
+            return;
+        }
+        let max_score = suggestions.iter().map(|s| s.score).fold(0.0f64, |a, b| a.max(b));
+        if max_score > 0.0 {
+            for suggestion in suggestions {
+                suggestion.score /= max_score;
+            }
         }
     }
 }
@@ -243,7 +229,6 @@ pub fn normalize_scores(suggestions: &mut [Suggestion]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     #[test]
     fn test_compute_score() {
@@ -294,7 +279,7 @@ mod tests {
             Suggestion::new("c", SuggestionSource::LearnedHierarchy, 2.5),
         ];
 
-        normalize_scores(&mut suggestions);
+        super::test_helpers::normalize_scores(&mut suggestions);
 
         assert!((suggestions[0].score - 1.0).abs() < 0.001);
         assert!((suggestions[1].score - 0.5).abs() < 0.001);

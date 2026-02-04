@@ -1,11 +1,30 @@
 //! Incremental synchronization from reedline history.
+//!
+//! This module reads new entries from reedline's `history` table and
+//! processes them into the intelligence tables. It delegates all pattern
+//! learning to the `patterns` module submodules:
+//!
+//! - `patterns::get_or_create_token` - Unified token management
+//! - `sequences::learn_sequences` - Token sequence learning
+//! - `pipes::learn_pipe_chains` - Pipe chain learning
+//! - `flags::learn_flag_values` - Flag value learning
+//! - `hierarchy::learn_hierarchy` - Command hierarchy learning (primary)
+//!
+//! # Sync Strategy
+//!
+//! The sync is incremental, tracking `last_sync_id` to avoid reprocessing.
+//! When failures occur, the sync advances only to the last successful entry,
+//! allowing failed entries to be retried on the next sync.
+
+use std::collections::HashMap;
 
 use rusqlite::Connection;
 use tracing::{debug, info, warn};
 
 use super::error::CIError;
+use super::patterns::{self, flags, hierarchy, pipes, sequences};
 use super::templates;
-use super::tokenizer::{analyze_command, compute_command_hash, token_type_to_string};
+use super::tokenizer::{analyze_command, compute_command_hash};
 use super::types::SyncStats;
 use super::variants;
 
@@ -22,6 +41,7 @@ use super::variants;
 pub fn sync_from_reedline(conn: &Connection, last_sync_id: i64) -> Result<(SyncStats, i64), CIError> {
     let start = std::time::Instant::now();
     let mut stats = SyncStats::default();
+    let mut token_cache: HashMap<String, i64> = HashMap::new();
 
     // Query new history entries since last sync
     let mut stmt = conn.prepare(
@@ -74,7 +94,7 @@ pub fn sync_from_reedline(conn: &Connection, last_sync_id: i64) -> Result<(SyncS
 
     let transaction_result = (|| -> Result<(), CIError> {
         for entry in &entries {
-            match process_entry(conn, entry, &mut stats) {
+            match process_entry(conn, &mut token_cache, entry, &mut stats) {
                 Ok(()) => {
                     stats.commands_processed += 1;
                     // Only advance to this ID if all previous entries succeeded
@@ -127,6 +147,7 @@ pub fn sync_from_reedline(conn: &Connection, last_sync_id: i64) -> Result<(SyncS
             sequences = stats.sequences_learned,
             pipes = stats.pipe_chains_learned,
             flags = stats.flag_values_learned,
+            hierarchy = stats.hierarchy_learned,
             duration_ms = stats.duration_ms,
             "Sync completed"
         );
@@ -137,6 +158,7 @@ pub fn sync_from_reedline(conn: &Connection, last_sync_id: i64) -> Result<(SyncS
             read_errors = read_errors,
             tokens = stats.tokens_extracted,
             sequences = stats.sequences_learned,
+            hierarchy = stats.hierarchy_learned,
             duration_ms = stats.duration_ms,
             failed_ids = ?failed_ids,
             "Sync completed with failures - will retry on next sync"
@@ -156,7 +178,12 @@ struct HistoryEntry {
 }
 
 /// Processes a single history entry.
-fn process_entry(conn: &Connection, entry: &HistoryEntry, stats: &mut SyncStats) -> Result<(), CIError> {
+fn process_entry(
+    conn: &Connection,
+    token_cache: &mut HashMap<String, i64>,
+    entry: &HistoryEntry,
+    stats: &mut SyncStats,
+) -> Result<(), CIError> {
     let command = entry.command_line.trim();
     if command.is_empty() {
         return Ok(());
@@ -168,12 +195,12 @@ fn process_entry(conn: &Connection, entry: &HistoryEntry, stats: &mut SyncStats)
         return Ok(());
     }
 
-    // Get or create token IDs
+    // Get or create token IDs using the unified patterns function
     let mut token_ids = Vec::new();
     let now = entry.timestamp;
 
     for token in &tokens {
-        let token_id = get_or_create_token(conn, &token.text, token.token_type, now)?;
+        let token_id = patterns::get_or_create_token(conn, token_cache, &token.text, token.token_type, now)?;
         token_ids.push(token_id);
         stats.tokens_extracted += 1;
     }
@@ -202,10 +229,27 @@ fn process_entry(conn: &Connection, entry: &HistoryEntry, stats: &mut SyncStats)
         ],
     )?;
 
-    // Learn patterns from this command
-    learn_sequences(conn, &tokens, &token_ids, base_command_id, entry.exit_status, now, stats)?;
-    learn_pipe_chains(conn, &tokens, &token_ids, base_command_id, now, stats)?;
-    learn_flag_values(conn, &tokens, &token_ids, base_command_id, now, stats)?;
+    // Learn patterns from this command using unified patterns modules
+    let is_success = entry.exit_status.map(|s| s == 0).unwrap_or(false);
+
+    // Learn sequences (pairwise token transitions)
+    sequences::learn_sequences(conn, &tokens, &token_ids, base_command_id, is_success, now)?;
+    stats.sequences_learned += tokens.len().saturating_sub(1);
+
+    // Learn pipe chains
+    pipes::learn_pipe_chains(conn, token_cache, &tokens, base_command_id, now)?;
+    // Count pipe chains: number of pipe transitions in the command
+    let pipe_segments = super::tokenizer::split_at_pipes(&tokens);
+    stats.pipe_chains_learned += pipe_segments.len().saturating_sub(1);
+
+    // Learn flag values
+    flags::learn_flag_values(conn, &tokens, &token_ids, base_command_id, now)?;
+    // Count flag-value pairs learned
+    stats.flag_values_learned += count_flag_value_pairs(&tokens);
+
+    // Learn command hierarchy (critical for suggestions)
+    hierarchy::learn_hierarchy(conn, &tokens, &token_ids, is_success, now)?;
+    stats.hierarchy_learned += tokens.len();
 
     // Extract templates from the command
     if let Err(e) = templates::extract_template(conn, command) {
@@ -217,273 +261,6 @@ fn process_entry(conn: &Connection, entry: &HistoryEntry, stats: &mut SyncStats)
         if let Err(e) = variants::record_execution(conn, command, exit_status) {
             debug!("Variant recording failed for '{}': {}", command, e);
         }
-    }
-
-    Ok(())
-}
-
-/// Gets or creates a token in the vocabulary.
-fn get_or_create_token(
-    conn: &Connection,
-    text: &str,
-    token_type: crate::chrome::command_edit::TokenType,
-    timestamp: i64,
-) -> Result<i64, CIError> {
-    let type_str = token_type_to_string(token_type);
-
-    // Try to get existing token
-    let existing: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM ci_tokens WHERE text = ?1",
-            [text],
-            |row| row.get(0),
-        )
-        .ok();
-
-    if let Some(id) = existing {
-        // Update frequency and last_seen
-        conn.execute(
-            "UPDATE ci_tokens SET frequency = frequency + 1, last_seen = ?1 WHERE id = ?2",
-            rusqlite::params![timestamp, id],
-        )?;
-        return Ok(id);
-    }
-
-    // Create new token
-    conn.execute(
-        "INSERT INTO ci_tokens (text, token_type, frequency, first_seen, last_seen)
-         VALUES (?1, ?2, 1, ?3, ?3)",
-        rusqlite::params![text, type_str, timestamp],
-    )?;
-
-    Ok(conn.last_insert_rowid())
-}
-
-/// Learns token sequences from a command.
-fn learn_sequences(
-    conn: &Connection,
-    tokens: &[super::types::AnalyzedToken],
-    token_ids: &[i64],
-    base_command_id: Option<i64>,
-    exit_status: Option<i32>,
-    timestamp: i64,
-    stats: &mut SyncStats,
-) -> Result<(), CIError> {
-    if tokens.len() < 2 {
-        return Ok(());
-    }
-
-    let is_success = exit_status.map(|s| s == 0).unwrap_or(false);
-
-    // Learn pairwise sequences
-    for i in 0..tokens.len() - 1 {
-        let context_id = token_ids[i];
-        let next_id = token_ids[i + 1];
-
-        // Insert or update sequence
-        let updated = conn.execute(
-            "INSERT INTO ci_sequences
-             (context_token_id, context_position, base_command_id, next_token_id, frequency, success_count, last_seen)
-             VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6)
-             ON CONFLICT(context_token_id, context_position, base_command_id, next_token_id)
-             DO UPDATE SET
-                 frequency = frequency + 1,
-                 success_count = success_count + ?5,
-                 last_seen = ?6",
-            rusqlite::params![
-                context_id,
-                i,
-                base_command_id,
-                next_id,
-                if is_success { 1 } else { 0 },
-                timestamp,
-            ],
-        )?;
-
-        if updated > 0 {
-            stats.sequences_learned += 1;
-        }
-    }
-
-    // Learn 2-grams and 3-grams
-    learn_ngrams(conn, tokens, token_ids, timestamp)?;
-
-    Ok(())
-}
-
-/// Learns n-gram patterns from a command.
-fn learn_ngrams(
-    conn: &Connection,
-    tokens: &[super::types::AnalyzedToken],
-    token_ids: &[i64],
-    timestamp: i64,
-) -> Result<(), CIError> {
-    use super::tokenizer::compute_token_hash;
-
-    // 2-grams: pairs of tokens predicting the next
-    if tokens.len() >= 3 {
-        for i in 0..tokens.len() - 2 {
-            let context_tokens: Vec<&str> = tokens[i..i + 2].iter().map(|t| t.text.as_str()).collect();
-            let pattern_hash = compute_token_hash(&context_tokens);
-            let context_ids = serde_json::to_string(&token_ids[i..i + 2])?;
-            let next_id = token_ids[i + 2];
-
-            conn.execute(
-                "INSERT INTO ci_ngrams (n, pattern_hash, token_ids, next_token_id, frequency, last_seen)
-                 VALUES (2, ?1, ?2, ?3, 1, ?4)
-                 ON CONFLICT(pattern_hash)
-                 DO UPDATE SET frequency = frequency + 1, last_seen = ?4",
-                rusqlite::params![pattern_hash, context_ids, next_id, timestamp],
-            )?;
-        }
-    }
-
-    // 3-grams: triplets of tokens predicting the next
-    if tokens.len() >= 4 {
-        for i in 0..tokens.len() - 3 {
-            let context_tokens: Vec<&str> = tokens[i..i + 3].iter().map(|t| t.text.as_str()).collect();
-            let pattern_hash = compute_token_hash(&context_tokens);
-            let context_ids = serde_json::to_string(&token_ids[i..i + 3])?;
-            let next_id = token_ids[i + 3];
-
-            conn.execute(
-                "INSERT INTO ci_ngrams (n, pattern_hash, token_ids, next_token_id, frequency, last_seen)
-                 VALUES (3, ?1, ?2, ?3, 1, ?4)
-                 ON CONFLICT(pattern_hash)
-                 DO UPDATE SET frequency = frequency + 1, last_seen = ?4",
-                rusqlite::params![pattern_hash, context_ids, next_id, timestamp],
-            )?;
-        }
-    }
-
-    Ok(())
-}
-
-/// Learns pipe chain patterns from a command.
-fn learn_pipe_chains(
-    conn: &Connection,
-    tokens: &[super::types::AnalyzedToken],
-    _token_ids: &[i64],
-    base_command_id: Option<i64>,
-    timestamp: i64,
-    stats: &mut SyncStats,
-) -> Result<(), CIError> {
-    use super::tokenizer::{compute_command_hash, split_at_pipes};
-
-    let segments = split_at_pipes(tokens);
-    if segments.len() < 2 {
-        return Ok(());
-    }
-
-    // For each pipe transition
-    for i in 0..segments.len() - 1 {
-        let pre_pipe = &segments[i];
-        let post_pipe = &segments[i + 1];
-
-        if pre_pipe.is_empty() || post_pipe.is_empty() {
-            continue;
-        }
-
-        // Hash of pre-pipe segment
-        let pre_pipe_text: String = pre_pipe.iter().map(|t| t.text.as_str()).collect::<Vec<_>>().join(" ");
-        let pre_pipe_hash = compute_command_hash(&pre_pipe_text);
-
-        // First token after pipe is the pipe command
-        let pipe_command = &post_pipe[0].text;
-        let pipe_command_id = get_or_create_token(
-            conn,
-            pipe_command,
-            post_pipe[0].token_type,
-            timestamp,
-        )?;
-
-        // Full post-pipe chain
-        let full_chain: String = post_pipe.iter().map(|t| t.text.as_str()).collect::<Vec<_>>().join(" ");
-
-        conn.execute(
-            "INSERT INTO ci_pipe_chains
-             (pre_pipe_base_cmd_id, pre_pipe_hash, pipe_command_id, full_chain, chain_length, frequency, last_seen)
-             VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)
-             ON CONFLICT(pre_pipe_hash, pipe_command_id)
-             DO UPDATE SET frequency = frequency + 1, last_seen = ?6",
-            rusqlite::params![
-                base_command_id,
-                pre_pipe_hash,
-                pipe_command_id,
-                full_chain,
-                post_pipe.len(),
-                timestamp,
-            ],
-        )?;
-
-        stats.pipe_chains_learned += 1;
-    }
-
-    Ok(())
-}
-
-/// Learns flag-value associations from a command.
-fn learn_flag_values(
-    conn: &Connection,
-    tokens: &[super::types::AnalyzedToken],
-    token_ids: &[i64],
-    base_command_id: Option<i64>,
-    timestamp: i64,
-    stats: &mut SyncStats,
-) -> Result<(), CIError> {
-    use super::tokenizer::detect_value_type;
-    use crate::chrome::command_edit::TokenType;
-
-    let Some(base_id) = base_command_id else {
-        return Ok(());
-    };
-
-    // Find subcommand if present
-    let subcommand_id = if tokens.len() > 1 && tokens[1].token_type == TokenType::Subcommand {
-        Some(token_ids[1])
-    } else {
-        None
-    };
-
-    // Look for flag -> value pairs
-    for i in 0..tokens.len() - 1 {
-        if tokens[i].token_type != TokenType::Flag {
-            continue;
-        }
-
-        let next = &tokens[i + 1];
-
-        // Skip if next token is also a flag (boolean flag)
-        if next.token_type == TokenType::Flag {
-            continue;
-        }
-
-        // Skip pipes and redirects
-        if next.text == "|" || next.text == ">" || next.text == ">>" || next.text == "<" {
-            continue;
-        }
-
-        let flag_text = &tokens[i].text;
-        let value_text = &next.text;
-        let value_type = detect_value_type(value_text);
-
-        conn.execute(
-            "INSERT INTO ci_flag_values
-             (base_command_id, subcommand_id, flag_text, value_text, value_type, frequency, last_seen)
-             VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6)
-             ON CONFLICT(base_command_id, subcommand_id, flag_text, value_text)
-             DO UPDATE SET frequency = frequency + 1, last_seen = ?6",
-            rusqlite::params![
-                base_id,
-                subcommand_id,
-                flag_text,
-                value_text,
-                value_type,
-                timestamp,
-            ],
-        )?;
-
-        stats.flag_values_learned += 1;
     }
 
     Ok(())
@@ -509,6 +286,30 @@ pub fn get_last_sync_id(conn: &Connection) -> Result<i64, CIError> {
         .ok();
 
     Ok(id.and_then(|s| s.parse().ok()).unwrap_or(0))
+}
+
+/// Counts the number of flag-value pairs in a token list.
+///
+/// A flag-value pair is a flag token followed by a non-flag, non-pipe token.
+fn count_flag_value_pairs(tokens: &[super::types::AnalyzedToken]) -> usize {
+    use crate::chrome::command_edit::TokenType;
+
+    let mut count = 0;
+    for i in 0..tokens.len().saturating_sub(1) {
+        if tokens[i].token_type != TokenType::Flag {
+            continue;
+        }
+        let next = &tokens[i + 1];
+        // Skip if next is a flag (boolean flag) or pipe/redirect
+        if next.token_type == TokenType::Flag {
+            continue;
+        }
+        if next.text == "|" || next.text == ">" || next.text == ">>" || next.text == "<" || next.text.ends_with('|') {
+            continue;
+        }
+        count += 1;
+    }
+    count
 }
 
 #[cfg(test)]
@@ -563,10 +364,11 @@ mod tests {
     #[test]
     fn test_get_or_create_token() {
         let conn = setup_test_db();
+        let mut cache = HashMap::new();
         let now = chrono::Utc::now().timestamp();
 
-        let id1 = get_or_create_token(&conn, "git", crate::chrome::command_edit::TokenType::Command, now).unwrap();
-        let id2 = get_or_create_token(&conn, "git", crate::chrome::command_edit::TokenType::Command, now).unwrap();
+        let id1 = patterns::get_or_create_token(&conn, &mut cache, "git", crate::chrome::command_edit::TokenType::Command, now).unwrap();
+        let id2 = patterns::get_or_create_token(&conn, &mut cache, "git", crate::chrome::command_edit::TokenType::Command, now).unwrap();
 
         assert_eq!(id1, id2);
 
@@ -659,5 +461,47 @@ mod tests {
         // Create a fresh SyncStats and verify entries_skipped defaults to 0
         let stats = SyncStats::default();
         assert_eq!(stats.entries_skipped, 0);
+    }
+
+    #[test]
+    fn test_sync_populates_hierarchy_table() {
+        let conn = setup_test_db();
+
+        // Insert test history with a multi-token command
+        conn.execute(
+            "INSERT INTO history (command_line, start_timestamp, exit_status, cwd)
+             VALUES ('git remote add origin https://github.com/user/repo', 1700000000000, 0, '/home/user')",
+            [],
+        ).unwrap();
+
+        let (stats, _) = sync_from_reedline(&conn, 0).unwrap();
+        assert_eq!(stats.commands_processed, 1);
+        assert!(stats.hierarchy_learned > 0, "Hierarchy should be populated");
+
+        // Verify hierarchy table has entries
+        let hierarchy_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM ci_command_hierarchy",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert!(hierarchy_count >= 5, "Expected at least 5 hierarchy entries for 'git remote add origin <url>'");
+
+        // Verify we can query suggestions from the hierarchy
+        let git_id: i64 = conn.query_row(
+            "SELECT id FROM ci_tokens WHERE text = 'git'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+
+        let subcommands: Vec<String> = conn.prepare(
+            "SELECT t.text FROM ci_command_hierarchy h
+             JOIN ci_tokens t ON t.id = h.token_id
+             WHERE h.position = 1 AND h.parent_token_id = ?1"
+        ).unwrap()
+        .query_map([git_id], |row| row.get(0)).unwrap()
+        .filter_map(|r| r.ok())
+        .collect();
+
+        assert!(subcommands.contains(&"remote".to_string()), "Should find 'remote' as git subcommand");
     }
 }

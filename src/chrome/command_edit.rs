@@ -96,21 +96,13 @@ pub fn classify_token(text: &str, position: usize, prev_token: Option<&str>) -> 
     // Check for subcommand (second token after known compound commands)
     if position == 1 {
         if let Some(cmd) = prev_token {
-            if is_compound_command(cmd) {
+            // Use canonical implementation from tokenizer
+            if crate::intelligence::tokenizer::is_compound_command(cmd) {
                 return TokenType::Subcommand;
             }
         }
     }
     TokenType::Argument
-}
-
-/// Returns true if the command has subcommands.
-fn is_compound_command(cmd: &str) -> bool {
-    matches!(
-        cmd,
-        "git" | "docker" | "kubectl" | "cargo" | "npm" | "yarn"
-        | "systemctl" | "journalctl" | "apt" | "brew" | "pacman"
-    )
 }
 
 /// Returns the style for a token based on its type.

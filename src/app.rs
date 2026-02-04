@@ -328,6 +328,9 @@ pub struct App {
     /// Whether we're waiting for dedupe confirmation (after `:dedupe` was entered).
     pending_dedupe_confirmation: bool,
 
+    /// Whether we're waiting for wipe-ci confirmation (after `:wipe-ci` was entered).
+    pending_wipe_ci_confirmation: bool,
+
     /// Timestamp when injection started (for timeout).
     injection_start: Option<Instant>,
 
@@ -433,6 +436,7 @@ impl App {
             pending_command: None,
             pending_wipe_confirmation: false,
             pending_dedupe_confirmation: false,
+            pending_wipe_ci_confirmation: false,
             injection_start: None,
             current_cwd,
             git_branch: None,
@@ -872,6 +876,47 @@ impl App {
                 // Clear pending dedupe confirmation if user enters anything else
                 if self.pending_dedupe_confirmation && trimmed != "dedupe" {
                     self.pending_dedupe_confirmation = false;
+                }
+
+                // Intelligence wipe command - sets pending confirmation flag
+                if trimmed == ":wipe-ci" {
+                    self.pending_wipe_ci_confirmation = true;
+                    self.chrome.notify(
+                        "Type 'wipe' to confirm intelligence database reset",
+                        NotificationStyle::Warning,
+                        Duration::from_secs(10),
+                    );
+                    return Ok(());
+                }
+
+                // Handle wipe-ci confirmation (only if :wipe-ci was entered first)
+                if trimmed == "wipe" && self.pending_wipe_ci_confirmation {
+                    self.pending_wipe_ci_confirmation = false;
+                    self.chrome.clear_notifications();
+                    if let Ok(mut store) = self.history_store.lock() {
+                        match store.reset_intelligence() {
+                            Ok(()) => {
+                                self.chrome.notify(
+                                    "Intelligence database reset",
+                                    NotificationStyle::Success,
+                                    Duration::from_secs(3),
+                                );
+                            }
+                            Err(e) => {
+                                self.chrome.notify(
+                                    format!("Failed to reset intelligence: {}", e),
+                                    NotificationStyle::Error,
+                                    Duration::from_secs(5),
+                                );
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
+
+                // Clear pending wipe-ci confirmation if user enters anything else
+                if self.pending_wipe_ci_confirmation && trimmed != "wipe" {
+                    self.pending_wipe_ci_confirmation = false;
                 }
 
                 // Skip empty commands

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use rusqlite::Connection;
 
 use crate::intelligence::error::CIError;
-use crate::intelligence::tokenizer::{compute_command_hash, split_at_pipes, token_type_to_string};
+use crate::intelligence::tokenizer::{compute_command_hash, split_at_pipes};
 use crate::intelligence::types::AnalyzedToken;
 
 /// Learns pipe chain patterns from a command.
@@ -42,7 +42,7 @@ pub fn learn_pipe_chains(
 
         // First token after pipe is the pipe command
         let pipe_command = &post_pipe[0];
-        let pipe_command_id = get_or_create_token(conn, token_cache, &pipe_command.text, pipe_command.token_type, timestamp)?;
+        let pipe_command_id = super::get_or_create_token(conn, token_cache, &pipe_command.text, pipe_command.token_type, timestamp)?;
 
         // Full post-pipe chain
         let full_chain: String = post_pipe
@@ -69,52 +69,6 @@ pub fn learn_pipe_chains(
     }
 
     Ok(())
-}
-
-/// Gets or creates a token (helper for pipe learning).
-///
-/// Uses INSERT OR IGNORE + SELECT pattern to avoid race conditions
-/// in concurrent access scenarios.
-fn get_or_create_token(
-    conn: &Connection,
-    cache: &mut HashMap<String, i64>,
-    text: &str,
-    token_type: crate::chrome::command_edit::TokenType,
-    timestamp: i64,
-) -> Result<i64, CIError> {
-    if let Some(&id) = cache.get(text) {
-        // Update frequency/last_seen even on cache hit
-        conn.execute(
-            "UPDATE ci_tokens SET frequency = frequency + 1, last_seen = ?1 WHERE id = ?2",
-            rusqlite::params![timestamp, id],
-        )?;
-        return Ok(id);
-    }
-
-    let type_str = token_type_to_string(token_type);
-
-    // Use INSERT OR IGNORE to safely handle concurrent inserts
-    conn.execute(
-        "INSERT OR IGNORE INTO ci_tokens (text, token_type, frequency, first_seen, last_seen)
-         VALUES (?1, ?2, 1, ?3, ?3)",
-        rusqlite::params![text, type_str, timestamp],
-    )?;
-
-    // Always SELECT to get the id (whether we just inserted or it already existed)
-    let id: i64 = conn.query_row(
-        "SELECT id FROM ci_tokens WHERE text = ?1",
-        [text],
-        |row| row.get(0),
-    )?;
-
-    // Update frequency if the row already existed (INSERT OR IGNORE doesn't update)
-    conn.execute(
-        "UPDATE ci_tokens SET frequency = frequency + 1, last_seen = ?1 WHERE id = ?2 AND first_seen < ?1",
-        rusqlite::params![timestamp, id],
-    )?;
-
-    cache.insert(text.to_string(), id);
-    Ok(id)
 }
 
 /// Queries pipe chain suggestions.

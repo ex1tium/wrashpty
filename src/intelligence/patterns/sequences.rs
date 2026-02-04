@@ -5,7 +5,6 @@
 use rusqlite::Connection;
 
 use crate::intelligence::error::CIError;
-use crate::intelligence::tokenizer::compute_token_hash;
 use crate::intelligence::types::AnalyzedToken;
 
 /// Learns token sequences from a command.
@@ -51,57 +50,6 @@ pub fn learn_sequences(
     Ok(())
 }
 
-/// Learns n-gram patterns from a command.
-pub fn learn_ngrams(
-    conn: &Connection,
-    tokens: &[AnalyzedToken],
-    token_ids: &[i64],
-    timestamp: i64,
-) -> Result<(), CIError> {
-    // 2-grams: pairs of tokens predicting the next
-    if tokens.len() >= 3 {
-        for i in 0..tokens.len() - 2 {
-            let context_tokens: Vec<&str> = tokens[i..i + 2]
-                .iter()
-                .map(|t| t.text.as_str())
-                .collect();
-            let pattern_hash = compute_token_hash(&context_tokens);
-            let context_ids = serde_json::to_string(&token_ids[i..i + 2])?;
-            let next_id = token_ids[i + 2];
-
-            conn.execute(
-                "INSERT INTO ci_ngrams (n, pattern_hash, token_ids, next_token_id, frequency, last_seen)
-                 VALUES (2, ?1, ?2, ?3, 1, ?4)
-                 ON CONFLICT(pattern_hash)
-                 DO UPDATE SET frequency = frequency + 1, last_seen = ?4",
-                rusqlite::params![pattern_hash, context_ids, next_id, timestamp],
-            )?;
-        }
-    }
-
-    // 3-grams: triplets of tokens predicting the next
-    if tokens.len() >= 4 {
-        for i in 0..tokens.len() - 3 {
-            let context_tokens: Vec<&str> = tokens[i..i + 3]
-                .iter()
-                .map(|t| t.text.as_str())
-                .collect();
-            let pattern_hash = compute_token_hash(&context_tokens);
-            let context_ids = serde_json::to_string(&token_ids[i..i + 3])?;
-            let next_id = token_ids[i + 3];
-
-            conn.execute(
-                "INSERT INTO ci_ngrams (n, pattern_hash, token_ids, next_token_id, frequency, last_seen)
-                 VALUES (3, ?1, ?2, ?3, 1, ?4)
-                 ON CONFLICT(pattern_hash)
-                 DO UPDATE SET frequency = frequency + 1, last_seen = ?4",
-                rusqlite::params![pattern_hash, context_ids, next_id, timestamp],
-            )?;
-        }
-    }
-
-    Ok(())
-}
 
 /// Queries learned sequences for suggestions.
 ///
@@ -177,41 +125,6 @@ pub fn query_sequences(
         for row in rows.flatten() {
             results.push(row);
         }
-    }
-
-    Ok(results)
-}
-
-/// Queries n-gram patterns for suggestions.
-///
-/// Returns tuples of (next_token, frequency, last_seen).
-pub fn query_ngrams(
-    conn: &Connection,
-    context_tokens: &[&str],
-    limit: usize,
-) -> Result<Vec<(String, u32, i64)>, CIError> {
-    if context_tokens.is_empty() || context_tokens.len() > 3 {
-        return Ok(Vec::new());
-    }
-
-    let pattern_hash = compute_token_hash(context_tokens);
-
-    let mut stmt = conn.prepare(
-        "SELECT t.text, n.frequency, n.last_seen
-         FROM ci_ngrams n
-         JOIN ci_tokens t ON t.id = n.next_token_id
-         WHERE n.pattern_hash = ?1
-         ORDER BY n.frequency DESC
-         LIMIT ?2"
-    )?;
-
-    let rows = stmt.query_map(rusqlite::params![pattern_hash, limit], |row| {
-        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-    })?;
-
-    let mut results = Vec::new();
-    for r in rows.flatten() {
-        results.push(r);
     }
 
     Ok(results)
