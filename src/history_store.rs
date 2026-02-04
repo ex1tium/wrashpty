@@ -588,6 +588,57 @@ impl HistoryStore {
         Ok(())
     }
 
+    /// Deduplicates the SQLite history, removing consecutive duplicate commands.
+    ///
+    /// Keeps the most recent occurrence of each consecutive duplicate sequence.
+    /// Non-consecutive duplicates are preserved (like HISTCONTROL=ignoredups).
+    ///
+    /// # Returns
+    ///
+    /// The number of duplicate entries removed.
+    pub fn dedupe(&self) -> Result<usize, HistoryStoreError> {
+        let conn = self.open_connection()?;
+
+        // Find IDs of entries to delete (all but the last in each consecutive duplicate sequence)
+        // This query finds entries where the next entry (by timestamp) has the same command
+        let removed: usize = conn.execute(
+            "DELETE FROM history WHERE id IN (
+                SELECT h1.id FROM history h1
+                INNER JOIN history h2 ON h1.command_line = h2.command_line
+                WHERE h2.start_timestamp > h1.start_timestamp
+                AND NOT EXISTS (
+                    SELECT 1 FROM history h3
+                    WHERE h3.start_timestamp > h1.start_timestamp
+                    AND h3.start_timestamp < h2.start_timestamp
+                    AND h3.command_line != h1.command_line
+                )
+            )",
+            [],
+        )?;
+
+        if removed > 0 {
+            // Reclaim space
+            conn.execute("VACUUM", [])?;
+            info!(removed, "Deduplicated SQLite history");
+        }
+
+        Ok(removed)
+    }
+
+    /// Deduplicates both SQLite and bash_history.
+    ///
+    /// # Returns
+    ///
+    /// A tuple of (sqlite_removed, bash_removed).
+    pub fn dedupe_all(&self) -> Result<(usize, usize), HistoryStoreError> {
+        let sqlite_removed = self.dedupe()?;
+
+        let bash_removed = crate::history::dedupe_bash_history()
+            .map_err(|e| HistoryStoreError::Internal(format!("bash_history dedupe failed: {}", e)))?;
+
+        Ok((sqlite_removed, bash_removed))
+    }
+
     /// Returns the path to the database file.
     pub fn db_path(&self) -> &PathBuf {
         &self.db_path
@@ -718,6 +769,75 @@ impl HistoryStore {
     /// Should be called when the user submits a command.
     pub fn record_command_submission(&mut self, command: &str) {
         self.last_command_text = Some(command.to_string());
+    }
+
+    /// Saves a command to both SQLite history and ~/.bash_history.
+    ///
+    /// This method should be called for commands that bypass reedline's normal
+    /// input flow (e.g., commands executed from the panel). It ensures the command
+    /// appears in:
+    /// - wrashpty's SQLite history (for reedline Up/Down navigation)
+    /// - ~/.bash_history (for other bash sessions)
+    ///
+    /// # Arguments
+    ///
+    /// * `command` - The command to save
+    /// * `cwd` - Optional current working directory
+    ///
+    /// # Returns
+    ///
+    /// The history item ID if successfully saved to SQLite.
+    pub fn save_command(
+        &mut self,
+        command: &str,
+        cwd: Option<&PathBuf>,
+    ) -> Result<Option<HistoryItemId>, HistoryStoreError> {
+        // Skip empty commands
+        if command.trim().is_empty() {
+            return Ok(None);
+        }
+
+        // Save to SQLite history
+        let conn = self.open_connection()?;
+        let timestamp_ms = chrono::Utc::now().timestamp_millis();
+        let cwd_str = cwd.map(|p| p.to_string_lossy().to_string());
+
+        conn.execute(
+            "INSERT INTO history (command_line, start_timestamp, cwd) VALUES (?1, ?2, ?3)",
+            rusqlite::params![command, timestamp_ms, cwd_str],
+        )?;
+
+        let id = conn.last_insert_rowid();
+        debug!(id, command_len = command.len(), "Saved command to SQLite history");
+
+        // Also record for intelligence learning
+        self.last_command_text = Some(command.to_string());
+
+        // Append to bash_history for other sessions
+        if let Err(e) = crate::history::append_to_bash_history(command) {
+            warn!("Failed to append to bash_history: {}", e);
+            // Don't fail the whole operation - SQLite save succeeded
+        }
+
+        Ok(Some(HistoryItemId::new(id)))
+    }
+
+    /// Appends a command to ~/.bash_history only.
+    ///
+    /// Use this for commands that are already saved to SQLite by reedline
+    /// but need to be synced to bash_history for other sessions.
+    ///
+    /// # Arguments
+    ///
+    /// * `command` - The command to append
+    pub fn sync_to_bash_history(&self, command: &str) {
+        if command.trim().is_empty() {
+            return;
+        }
+
+        if let Err(e) = crate::history::append_to_bash_history(command) {
+            warn!("Failed to sync to bash_history: {}", e);
+        }
     }
 
     /// Learns from command completion.
