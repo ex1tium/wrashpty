@@ -515,9 +515,12 @@ impl HistoryBrowserPanel {
         if edit_state.is_confirming() {
             return match key.code {
                 KeyCode::Enter => {
-                    let command = edit_state.confirm_dangerous().unwrap_or_default();
+                    let result = match edit_state.confirm_dangerous() {
+                        Some(cmd) if !cmd.is_empty() => PanelResult::Execute(cmd),
+                        _ => PanelResult::Continue,
+                    };
                     self.exit_edit_mode();
-                    Some(PanelResult::Execute(command))
+                    Some(result)
                 }
                 KeyCode::Esc => {
                     edit_state.cancel_confirm();
