@@ -338,8 +338,12 @@ pub struct CommandEditState {
     pub config: EditConfig,
 
     // --- Undo State ---
-    /// Undo stack for reverting changes.
-    undo_stack: Vec<Vec<CommandToken>>,
+    /// Undo stack for reverting changes (tokens, edit_buffer, selected).
+    undo_stack: Vec<(Vec<CommandToken>, String, usize)>,
+
+    // --- Original State ---
+    /// Original tokens for revert (preserves locked state).
+    original_tokens: Vec<CommandToken>,
 
     // --- Suggestion State ---
     /// Current suggestions for the selected token position.
@@ -367,6 +371,7 @@ impl CommandEditState {
     pub fn new(tokens: Vec<CommandToken>, config: EditConfig) -> Self {
         let original = tokens.iter().map(|t| t.text.as_str()).collect::<Vec<_>>().join(" ");
         let edit_buffer = tokens.first().map(|t| t.text.clone()).unwrap_or_default();
+        let original_tokens = tokens.clone();
         Self {
             original,
             tokens,
@@ -374,6 +379,7 @@ impl CommandEditState {
             edit_buffer,
             config,
             undo_stack: Vec::new(),
+            original_tokens,
             suggestions: Vec::new(),
             suggestion_index: None,
             pending_confirm: None,
@@ -481,6 +487,7 @@ impl CommandEditState {
     /// Types a character into the edit buffer (if not locked).
     pub fn type_char(&mut self, c: char) {
         if !self.is_selected_locked() {
+            self.save_undo();
             self.edit_buffer.push(c);
             self.suggestion_index = None;
         }
@@ -489,6 +496,7 @@ impl CommandEditState {
     /// Deletes a character from the edit buffer (if not locked).
     pub fn backspace(&mut self) {
         if !self.is_selected_locked() {
+            self.save_undo();
             self.edit_buffer.pop();
             self.suggestion_index = None;
         }
@@ -529,7 +537,11 @@ impl CommandEditState {
         if !self.config.enable_undo {
             return;
         }
-        self.undo_stack.push(self.tokens.clone());
+        self.undo_stack.push((
+            self.tokens.clone(),
+            self.edit_buffer.clone(),
+            self.selected,
+        ));
         if self.undo_stack.len() > self.config.max_undo_size {
             self.undo_stack.remove(0);
         }
@@ -537,12 +549,10 @@ impl CommandEditState {
 
     /// Restores previous state from undo stack.
     pub fn undo(&mut self) {
-        if let Some(prev) = self.undo_stack.pop() {
-            self.tokens = prev;
-            self.selected = self.selected.min(self.tokens.len().saturating_sub(1));
-            self.edit_buffer = self.tokens.get(self.selected)
-                .map(|t| t.text.clone())
-                .unwrap_or_default();
+        if let Some((tokens, edit_buffer, selected)) = self.undo_stack.pop() {
+            self.tokens = tokens;
+            self.selected = selected.min(self.tokens.len().saturating_sub(1));
+            self.edit_buffer = edit_buffer;
             self.reclassify_tokens();
         }
     }
@@ -603,6 +613,7 @@ impl CommandEditState {
         if !self.config.enable_quotes || self.is_selected_locked() {
             return;
         }
+        self.save_undo();
         let (inner, current_style) = parse_quotes(&self.edit_buffer);
         let new_style = match current_style {
             QuoteStyle::None => QuoteStyle::Single,
@@ -751,7 +762,7 @@ impl CommandEditState {
 
     /// Reverts all changes back to the original command.
     pub fn revert(&mut self) {
-        self.tokens = tokenize_command(&self.original);
+        self.tokens = self.original_tokens.clone();
         if self.tokens.is_empty() {
             self.tokens.push(CommandToken::new(String::new(), TokenType::Command));
         }
