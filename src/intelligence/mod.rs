@@ -4,9 +4,19 @@
 //! patterns from command history. It integrates with reedline's SQLite
 //! database using the `ci_*` table prefix for all intelligence data.
 //!
+//! # Architecture
+//!
+//! The engine uses a **hierarchy-first** approach for suggestions:
+//!
+//! - **Primary Source**: `ci_command_hierarchy` table provides position-aware
+//!   token suggestions. This is the main source for all command completions.
+//! - **Supplementary Sources**: Flag values, pipe chains, and user patterns
+//!   augment suggestions for specific contexts.
+//!
 //! # Features
 //!
-//! - **Pattern Learning**: Learns token sequences, pipe chains, and flag values
+//! - **Hierarchy Learning**: Position-aware token relationships (primary suggestion source)
+//! - **Pattern Learning**: Token sequences, pipe chains, and flag values
 //! - **Session Tracking**: Tracks command sequences within terminal sessions
 //! - **Template Recognition**: Identifies command templates with placeholders
 //! - **Failure Learning**: Prefers successful command variants
@@ -144,58 +154,14 @@ impl CommandIntelligence {
 
     /// Gets or creates a token ID, using the cache.
     ///
-    /// Note: Even on cache hits, we update frequency and last_seen in the database
-    /// to maintain consistency with patterns::get_or_create_token behavior.
+    /// Delegates to the canonical patterns::get_or_create_token implementation.
     pub fn get_or_create_token(
         &mut self,
         text: &str,
         token_type: crate::chrome::command_edit::TokenType,
     ) -> Result<i64, CIError> {
         let now = chrono::Utc::now().timestamp();
-
-        // Check cache first - but still update frequency/last_seen in DB
-        if let Some(&id) = self.token_cache.get(text) {
-            // Update frequency and last_seen even on cache hit for consistency
-            self.conn.execute(
-                "UPDATE ci_tokens SET frequency = frequency + 1, last_seen = ?1 WHERE id = ?2",
-                rusqlite::params![now, id],
-            )?;
-            return Ok(id);
-        }
-
-        let type_str = tokenizer::token_type_to_string(token_type);
-
-        // Try to get existing token
-        let existing: Option<i64> = self
-            .conn
-            .query_row(
-                "SELECT id FROM ci_tokens WHERE text = ?1",
-                [text],
-                |row| row.get(0),
-            )
-            .ok();
-
-        let id = if let Some(id) = existing {
-            // Update frequency and last_seen
-            self.conn.execute(
-                "UPDATE ci_tokens SET frequency = frequency + 1, last_seen = ?1 WHERE id = ?2",
-                rusqlite::params![now, id],
-            )?;
-            id
-        } else {
-            // Create new token
-            self.conn.execute(
-                "INSERT INTO ci_tokens (text, token_type, frequency, first_seen, last_seen)
-                 VALUES (?1, ?2, 1, ?3, ?3)",
-                rusqlite::params![text, type_str, now],
-            )?;
-            self.conn.last_insert_rowid()
-        };
-
-        // Update cache
-        self.token_cache.insert(text.to_string(), id);
-
-        Ok(id)
+        patterns::get_or_create_token(&self.conn, &mut self.token_cache, text, token_type, now)
     }
 
     /// Learns from a command execution.
@@ -215,7 +181,7 @@ impl CommandIntelligence {
             sessions::get_session_db_id(&self.conn, &session.session_id)
         });
 
-        // patterns::learn_command handles sequences, n-grams, pipes, flags, and variant recording
+        // patterns::learn_command handles sequences, hierarchy, pipes, flags, and variant recording
         // Pass session_db_id so ci_commands.session_id is set
         patterns::learn_command(&mut self.conn, &mut self.token_cache, command, exit_status, session_db_id)?;
 
@@ -389,6 +355,25 @@ impl CommandIntelligence {
     /// Clears the token cache.
     pub fn clear_cache(&mut self) {
         self.token_cache.clear();
+    }
+
+    /// Resets the intelligence database, deleting all learned patterns.
+    ///
+    /// This drops and recreates all `ci_*` tables, giving a clean slate.
+    /// The schema is re-bootstrapped with default commands after reset.
+    pub fn reset(&mut self) -> Result<(), CIError> {
+        db_schema::reset_database(&self.conn)?;
+
+        // Re-bootstrap with default commands
+        bootstrap::bootstrap_if_empty(&self.conn)?;
+
+        // Clear in-memory state
+        self.token_cache.clear();
+        self.last_sync_id = 0;
+        self.current_session = None;
+
+        info!("Command Intelligence database reset complete");
+        Ok(())
     }
 
     /// Gets statistics about the intelligence database.

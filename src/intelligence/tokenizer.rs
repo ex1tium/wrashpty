@@ -50,7 +50,7 @@ pub fn determine_position_type(
     if last_token.token_type == TokenType::Flag {
         // Common flags that expect values
         let flag = &last_token.text;
-        if is_value_flag(flag, base_command) {
+        if flag_expects_value(flag, base_command) {
             return PositionType::FlagValue {
                 flag: flag.clone(),
             };
@@ -70,12 +70,16 @@ pub fn determine_position_type(
 }
 
 /// Returns true if the flag typically expects a value.
-fn is_value_flag(flag: &str, base_command: Option<&str>) -> bool {
+///
+/// This is the canonical implementation - used by both tokenizer and types.
+/// Includes command-specific flag knowledge.
+pub fn flag_expects_value(flag: &str, base_command: Option<&str>) -> bool {
     // Common flags that always expect values
     let common_value_flags = [
         "-o", "-f", "-i", "-c", "-n", "-m", "-p", "-t", "-u", "-d",
         "--output", "--file", "--input", "--config", "--name", "--message",
         "--port", "--target", "--user", "--directory", "--format",
+        "--filter", "--branch", "--remote",
     ];
 
     if common_value_flags.contains(&flag) {
@@ -84,7 +88,7 @@ fn is_value_flag(flag: &str, base_command: Option<&str>) -> bool {
 
     // Command-specific flags
     match base_command {
-        Some("docker") => matches!(
+        Some("docker") | Some("podman") => matches!(
             flag,
             "-p" | "--port"
                 | "-v"
@@ -109,7 +113,9 @@ fn is_value_flag(flag: &str, base_command: Option<&str>) -> bool {
 }
 
 /// Returns true if the command has subcommands.
-fn is_compound_command(cmd: &str) -> bool {
+///
+/// This is the canonical implementation - used by both tokenizer and command_edit.
+pub fn is_compound_command(cmd: &str) -> bool {
     matches!(
         cmd,
         "git" | "docker"
@@ -124,9 +130,13 @@ fn is_compound_command(cmd: &str) -> bool {
             | "brew"
             | "pacman"
             | "pip"
+            | "pipx"
             | "poetry"
             | "go"
             | "rustup"
+            | "podman"
+            | "dnf"
+            | "yum"
     )
 }
 

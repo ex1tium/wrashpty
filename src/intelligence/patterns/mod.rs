@@ -1,10 +1,26 @@
 //! Pattern learning subsystem for the Command Intelligence Engine.
 //!
-//! This module coordinates learning of:
-//! - Token sequences (what follows what)
-//! - Pipe chains (post-pipe command patterns)
-//! - Flag values (common values for flags)
-//! - N-grams (2-gram and 3-gram patterns)
+//! This module coordinates all pattern learning from commands.
+//! It is the canonical location for the `get_or_create_token` function
+//! and delegates to specialized submodules for each pattern type.
+//!
+//! # Learning Pipeline
+//!
+//! When a command is learned (via `learn_command`):
+//! 1. **Tokenization**: Command is split into `AnalyzedToken`s
+//! 2. **Token Storage**: Each token gets an ID via `get_or_create_token`
+//! 3. **Hierarchy Learning**: Position-aware parent-child relationships (primary)
+//! 4. **Sequence Learning**: Pairwise token transitions
+//! 5. **Pipe Learning**: Post-pipe command patterns
+//! 6. **Flag Learning**: Common values for flags
+//!
+//! # Pattern Types
+//!
+//! - **Hierarchy** (`ci_command_hierarchy`): Primary suggestion source.
+//!   Tracks which tokens appear at which positions with parent context.
+//! - **Sequences** (`ci_sequences`): Token-to-token transitions.
+//! - **Pipes** (`ci_pipe_chains`): Commands that follow pipes.
+//! - **Flags** (`ci_flag_values`): Common values for specific flags.
 
 pub mod flags;
 pub mod hierarchy;
@@ -84,7 +100,6 @@ pub fn learn_command(
 
     // Learn all pattern types
     sequences::learn_sequences(conn, &tokens, &token_ids, base_command_id, is_success, now)?;
-    sequences::learn_ngrams(conn, &tokens, &token_ids, now)?;
     pipes::learn_pipe_chains(conn, token_cache, &tokens, base_command_id, now)?;
     flags::learn_flag_values(conn, &tokens, &token_ids, base_command_id, now)?;
 
@@ -109,7 +124,10 @@ pub fn learn_command(
 }
 
 /// Gets or creates a token in the vocabulary.
-fn get_or_create_token(
+///
+/// This is the canonical implementation for token management.
+/// It uses a cache for performance and updates frequency/last_seen on each access.
+pub fn get_or_create_token(
     conn: &Connection,
     cache: &mut HashMap<String, i64>,
     text: &str,
@@ -160,20 +178,6 @@ fn get_or_create_token(
     Ok(id)
 }
 
-/// Queries suggestions based on learned sequences.
-///
-/// Returns tuples of (next_token, frequency, success_count, last_seen).
-pub fn suggest_from_sequences(
-    conn: &Connection,
-    context_token: &str,
-    position: usize,
-    base_command: Option<&str>,
-    limit: usize,
-) -> Vec<(String, u32, u32, i64)> {
-    sequences::query_sequences(conn, context_token, position, base_command, limit)
-        .unwrap_or_default()
-}
-
 /// Queries suggestions for post-pipe commands.
 ///
 /// Returns tuples of (pipe_command, frequency, last_seen).
@@ -196,17 +200,6 @@ pub fn suggest_flag_values(
     limit: usize,
 ) -> Vec<(String, u32, i64)> {
     flags::query_flag_values(conn, base_command, subcommand, flag, limit).unwrap_or_default()
-}
-
-/// Queries base commands (first token) by frequency.
-///
-/// Returns tuples of (command, frequency, success_count, last_seen).
-/// This is for top-level command suggestions.
-pub fn suggest_base_commands(
-    conn: &Connection,
-    limit: usize,
-) -> Vec<(String, u32, u32, i64)> {
-    sequences::query_base_commands(conn, limit).unwrap_or_default()
 }
 
 /// Queries command hierarchy for suggestions at a given position.

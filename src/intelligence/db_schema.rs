@@ -265,26 +265,6 @@ fn create_sequence_tables(conn: &Connection) -> Result<(), CIError> {
         [],
     )?;
 
-    // N-gram patterns
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS ci_ngrams (
-            id INTEGER PRIMARY KEY,
-            n INTEGER NOT NULL,
-            pattern_hash TEXT NOT NULL UNIQUE,
-            token_ids TEXT NOT NULL,
-            next_token_id INTEGER NOT NULL,
-            frequency INTEGER DEFAULT 1,
-            last_seen INTEGER NOT NULL,
-            FOREIGN KEY (next_token_id) REFERENCES ci_tokens(id)
-        )",
-        [],
-    )?;
-
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_ci_ngrams_hash ON ci_ngrams(pattern_hash)",
-        [],
-    )?;
-
     debug!("Created sequence tables");
     Ok(())
 }
@@ -658,6 +638,60 @@ fn create_user_pattern_tables(conn: &Connection) -> Result<(), CIError> {
     )?;
 
     debug!("Created user pattern tables");
+    Ok(())
+}
+
+/// Resets the database by dropping and recreating all ci_* tables.
+///
+/// This is useful for starting fresh without any learned patterns.
+/// WARNING: This will delete all learned data including user patterns.
+pub fn reset_database(conn: &Connection) -> Result<(), CIError> {
+    info!("Resetting Command Intelligence database");
+
+    // Drop all ci_* tables in reverse dependency order
+    let tables = [
+        // First drop tables with foreign keys
+        "ci_session_commands",
+        "ci_template_values",
+        "ci_transitions",
+        "ci_sequences",
+        "ci_ngrams", // Legacy table from schema v1
+        "ci_pipe_chains",
+        "ci_flag_values",
+        "ci_command_hierarchy",
+        "ci_command_variants",
+        "ci_suggestion_cache",
+        // Drop FTS triggers first
+        "ci_commands_fts_ai",
+        "ci_commands_fts_ad",
+        "ci_commands_fts_au",
+        // Then parent tables
+        "ci_commands",
+        "ci_commands_fts",
+        "ci_sessions",
+        "ci_templates",
+        "ci_tokens",
+        "ci_user_patterns",
+        "ci_user_aliases",
+        "ci_sync_state",
+        "ci_schema_version",
+        "ci_command_schemas",
+    ];
+
+    conn.execute_batch("BEGIN TRANSACTION")?;
+
+    for table in &tables {
+        // Try as trigger first, then table
+        let _ = conn.execute(&format!("DROP TRIGGER IF EXISTS {}", table), []);
+        let _ = conn.execute(&format!("DROP TABLE IF EXISTS {}", table), []);
+    }
+
+    conn.execute_batch("COMMIT")?;
+
+    // Recreate the schema
+    create_schema(conn)?;
+
+    info!("Database reset complete");
     Ok(())
 }
 

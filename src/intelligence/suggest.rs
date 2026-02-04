@@ -1,16 +1,32 @@
 //! Main suggestion engine.
 //!
-//! Aggregates suggestions from all sources and ranks them.
+//! Aggregates suggestions from all sources and ranks them using frecency scoring.
 //!
-//! The primary source is the learned command hierarchy, which provides
-//! position-aware token suggestions. Supplementary sources include:
-//! - User patterns (highest priority, user-defined)
-//! - Flag values (for flag-value positions)
-//! - Pipe commands (for post-pipe positions)
+//! # Suggestion Sources (Priority Order)
+//!
+//! 1. **User Patterns** (`ci_user_patterns`): Highest priority. User-defined
+//!    aliases, completions, and rules. Always included in results.
+//!
+//! 2. **Command Hierarchy** (`ci_command_hierarchy`): Primary learned source.
+//!    Provides position-aware token suggestions based on:
+//!    - Current position in command
+//!    - Parent token context
+//!    - Base command context
+//!
+//! 3. **Supplementary Sources** (context-specific):
+//!    - Flag values (`ci_flag_values`) for `--flag <value>` positions
+//!    - Pipe commands (`ci_pipe_chains`) for post-pipe positions
+//!
+//! # Scoring and Ranking
+//!
+//! All suggestions are scored using the frecency formula (see `scoring` module),
+//! then deduplicated, penalized for low success rates, and boosted for high
+//! success rates before final ranking.
 
 use rusqlite::Connection;
 use tracing::debug;
 
+use super::fuzzy;
 use super::patterns;
 use super::scoring::{self, ContextMatch};
 use super::types::{
@@ -133,7 +149,16 @@ fn gather_suggestions(conn: &Connection, context: &SuggestionContext) -> Vec<Sug
             // Add learned pipe chain suggestions
             suggestions.extend(suggest_pipe_commands(conn, context));
         }
+        PositionType::Command => {
+            // For command position, add historical frequency suggestions as fallback
+            suggestions.extend(suggest_from_historical_frequency(conn, 10));
+        }
         _ => {}
+    }
+
+    // 4. Fuzzy search fallback: if partial text is provided and might be a typo
+    if !context.partial.is_empty() && context.partial.len() >= 2 {
+        suggestions.extend(suggest_from_fuzzy_search(conn, &context.partial, 5));
     }
 
     suggestions
@@ -290,6 +315,87 @@ fn suggest_pipe_commands(conn: &Connection, context: &SuggestionContext) -> Vec<
                 ..Default::default()
             },
         });
+    }
+
+    suggestions
+}
+
+/// Suggests based on fuzzy search for typo correction.
+///
+/// Uses FTS5 full-text search to find commands similar to the partial input.
+/// This helps when the user makes typos in command names.
+fn suggest_from_fuzzy_search(conn: &Connection, partial: &str, limit: usize) -> Vec<Suggestion> {
+    let mut suggestions = Vec::new();
+
+    // Use fuzzy search to find similar base commands
+    if let Ok(matches) = fuzzy::search_base_command(conn, partial, limit) {
+        for (text, score) in matches {
+            // Convert fuzzy score to suggestion score
+            // Fuzzy matches are lower priority than exact hierarchy matches
+            let suggestion_score = score * 0.5; // Penalize fuzzy matches
+
+            suggestions.push(Suggestion {
+                text,
+                source: SuggestionSource::FuzzySearch,
+                score: suggestion_score,
+                metadata: SuggestionMetadata {
+                    fuzzy_score: Some(score),
+                    ..Default::default()
+                },
+            });
+        }
+    }
+
+    suggestions
+}
+
+/// Suggests based on historical command frequency.
+///
+/// Queries the most frequently used commands as a fallback when
+/// no context-specific suggestions are available.
+fn suggest_from_historical_frequency(conn: &Connection, limit: usize) -> Vec<Suggestion> {
+    let mut suggestions = Vec::new();
+
+    // Query most frequently used base commands
+    let query = "SELECT t.text, COUNT(*) as freq, MAX(c.timestamp) as last_seen
+                 FROM ci_commands c
+                 JOIN ci_tokens t ON t.id = c.base_command_id
+                 WHERE c.base_command_id IS NOT NULL
+                 GROUP BY c.base_command_id
+                 ORDER BY freq DESC
+                 LIMIT ?1";
+
+    if let Ok(mut stmt) = conn.prepare(query) {
+        if let Ok(rows) = stmt.query_map(rusqlite::params![limit], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u32>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        }) {
+            for row in rows.flatten() {
+                let (text, freq, last_seen) = row;
+
+                let score = scoring::compute_score(
+                    freq,
+                    last_seen,
+                    None,
+                    ContextMatch::Generic,
+                    SuggestionSource::HistoricalFrequency,
+                );
+
+                suggestions.push(Suggestion {
+                    text,
+                    source: SuggestionSource::HistoricalFrequency,
+                    score,
+                    metadata: SuggestionMetadata {
+                        frequency: freq,
+                        last_seen: Some(last_seen),
+                        ..Default::default()
+                    },
+                });
+            }
+        }
     }
 
     suggestions
