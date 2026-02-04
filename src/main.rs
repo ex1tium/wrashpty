@@ -8,10 +8,24 @@ use std::process::Command;
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
+use clap::Parser;
 use tracing::{debug, info};
 use wrashpty::app::App;
 use wrashpty::bashrc;
 use wrashpty::safety::install_panic_hook;
+use wrashpty::types::ChromeMode;
+use wrashpty::Config;
+
+/// Modern interactive shell on stock Bash
+#[derive(Parser)]
+#[command(name = "wrashpty")]
+#[command(version)] // Automatically pulls version from Cargo.toml
+#[command(about = "Modern interactive shell on stock Bash")]
+struct Cli {
+    /// Disable chrome layer (headless mode)
+    #[arg(long)]
+    no_chrome: bool,
+}
 
 /// RAII guard for cleaning up the generated bashrc file.
 ///
@@ -107,6 +121,21 @@ fn main() -> Result<()> {
 
     info!("Wrashpty starting up");
 
+    // Parse CLI arguments
+    let cli = Cli::parse();
+
+    // Determine chrome mode from CLI flag
+    let chrome_mode = if cli.no_chrome {
+        ChromeMode::Headless
+    } else {
+        ChromeMode::Full
+    };
+    info!(chrome_mode = ?chrome_mode, "Chrome mode configured");
+
+    // Load configuration from environment (theme, nerdfonts detection)
+    let config = Config::from_env();
+    info!(symbol_set = ?config.symbol_set, theme = ?config.theme, "Config loaded from environment");
+
     // Validate bash is available
     validate_bash_version()?;
 
@@ -118,8 +147,8 @@ fn main() -> Result<()> {
 
     // Create and run the application in a block to ensure Drop runs before exit
     let exit_code = {
-        let mut app =
-            App::new(bashrc_guard.path(), session_token).context("Failed to initialize App")?;
+        let mut app = App::new(bashrc_guard.path(), session_token, chrome_mode, &config)
+            .context("Failed to initialize App")?;
         // App created successfully - disarm guard since App owns bashrc cleanup
         bashrc_guard.disarm();
         let code = app.run().context("App run failed")?;

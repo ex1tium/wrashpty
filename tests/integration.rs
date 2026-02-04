@@ -97,9 +97,7 @@ mod edit_mode_tests {
             let pair = pty_system.openpty(size).ok()?;
 
             // Try to find wrashpty binary
-            let wrashpty_path = std::env::current_dir()
-                .ok()?
-                .join("target/debug/wrashpty");
+            let wrashpty_path = std::env::current_dir().ok()?.join("target/debug/wrashpty");
 
             if !wrashpty_path.exists() {
                 // Try release build

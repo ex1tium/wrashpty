@@ -7,6 +7,7 @@
 // These modules are foundational; full usage comes in future implementation phases.
 #![allow(dead_code)]
 
+pub mod config;
 pub mod marker;
 pub mod pty;
 pub mod pump;
@@ -20,7 +21,13 @@ pub mod bashrc;
 mod chrome;
 mod complete;
 pub mod editor;
+pub mod git;
 pub mod history;
+pub mod history_store;
 pub mod prompt;
 pub mod signals;
 mod suggest;
+
+// Re-export key types for convenience
+pub use chrome::ChromeContext;
+pub use config::Config;
