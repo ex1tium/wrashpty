@@ -13,6 +13,8 @@
 //! - [`CaptureState`] - Streaming line parser for PTY output
 //! - [`AltScreenDetector`] - Detects alternate screen buffer (vim, htop) to suspend capture
 //! - [`ScrollViewer`] - Stateless renderer for scrollback content
+//! - [`ViewerState`] - Consolidated state for scroll viewer modes and display settings
+//! - [`CommandBoundaries`] - Index for command boundary navigation (Ctrl+P/N)
 //!
 //! # Usage
 //!
@@ -26,11 +28,20 @@
 //! returns to live view and forwards the key to the shell.
 
 mod alt_screen;
+mod boundaries;
 mod buffer;
 mod capture;
+pub mod features;
+mod mini_input;
+mod mode;
+mod state;
 mod viewer;
 
 pub use alt_screen::{AltScreenDetector, AltScreenEvent};
+pub use boundaries::CommandBoundaries;
 pub use buffer::{ScrollLine, ScrollbackBuffer};
 pub use capture::CaptureState;
-pub use viewer::ScrollViewer;
+pub use mini_input::{MiniInput, MiniInputResult};
+pub use mode::ScrollViewMode;
+pub use state::{DisplaySettings, ViewerState};
+pub use viewer::{RenderOptions, RenderStats, ScrollViewer};

@@ -86,6 +86,32 @@ pub struct Theme {
     pub tab_inactive_bg: Color,
     /// Inactive tab foreground.
     pub tab_inactive_fg: Color,
+
+    // === Scroll Viewer Colors ===
+    /// Search match background (current match).
+    pub search_current_bg: Color,
+    /// Search match foreground (current match).
+    pub search_current_fg: Color,
+    /// Search match background (other matches).
+    pub search_other_bg: Color,
+    /// Search match foreground (other matches).
+    pub search_other_fg: Color,
+    /// URL foreground color.
+    pub url_fg: Color,
+    /// Selection background in yank mode.
+    pub yank_selection_bg: Color,
+    /// Selection foreground in yank mode.
+    pub yank_selection_fg: Color,
+    /// Timestamp gutter foreground.
+    pub timestamp_fg: Color,
+    /// Boundary marker foreground (BEGIN/END).
+    pub marker_fg: Color,
+    /// Help bar background.
+    pub help_bar_bg: Color,
+    /// Help bar foreground.
+    pub help_bar_fg: Color,
+    /// Help bar key highlight.
+    pub help_bar_key: Color,
 }
 
 impl Theme {
@@ -144,6 +170,20 @@ pub static AMBER_THEME: Theme = Theme {
     tab_active_fg: Color::Rgb(0, 0, 0),      // Black text on amber
     tab_inactive_bg: Color::Rgb(51, 34, 0),  // #332200 - dark amber
     tab_inactive_fg: Color::Rgb(153, 102, 0), // #996600 - dim amber
+
+    // Scroll Viewer
+    search_current_bg: Color::Rgb(255, 215, 0),  // #ffd700 - bright amber highlight
+    search_current_fg: Color::Rgb(0, 0, 0),      // Black text on highlight
+    search_other_bg: Color::Rgb(102, 68, 0),     // #664400 - dim amber
+    search_other_fg: Color::Rgb(255, 215, 0),    // #ffd700 - bright amber
+    url_fg: Color::Rgb(100, 180, 255),           // Light blue (stands out on amber)
+    yank_selection_bg: Color::Rgb(51, 34, 0),    // #332200 - dark amber
+    yank_selection_fg: Color::Rgb(255, 215, 0),  // #ffd700 - bright amber
+    timestamp_fg: Color::Rgb(153, 102, 0),       // #996600 - dim amber
+    marker_fg: Color::Rgb(204, 136, 0),          // #cc8800 - medium amber
+    help_bar_bg: Color::Rgb(51, 34, 0),          // #332200 - dark amber
+    help_bar_fg: Color::Rgb(204, 153, 0),        // #cc9900 - medium amber
+    help_bar_key: Color::Rgb(255, 215, 0),       // #ffd700 - bright amber
 };
 
 /// Terminal-native theme.
@@ -193,6 +233,20 @@ pub static TERMINAL_THEME: Theme = Theme {
     tab_active_fg: Color::Black,        // ANSI color 0
     tab_inactive_bg: Color::DarkGray,   // ANSI color 8
     tab_inactive_fg: Color::White,      // ANSI color 7
+
+    // Scroll Viewer
+    search_current_bg: Color::Yellow,       // ANSI color 3
+    search_current_fg: Color::Black,        // ANSI color 0
+    search_other_bg: Color::DarkGray,       // ANSI color 8
+    search_other_fg: Color::Yellow,         // ANSI color 3
+    url_fg: Color::LightBlue,               // ANSI color 12
+    yank_selection_bg: Color::DarkGray,     // ANSI color 8
+    yank_selection_fg: Color::White,        // ANSI color 7
+    timestamp_fg: Color::DarkGray,          // ANSI color 8
+    marker_fg: Color::Cyan,                 // ANSI color 6
+    help_bar_bg: Color::DarkGray,           // ANSI color 8
+    help_bar_fg: Color::White,              // ANSI color 7
+    help_bar_key: Color::LightCyan,         // ANSI color 14
 };
 
 #[cfg(test)]
