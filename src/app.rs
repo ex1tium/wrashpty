@@ -2313,6 +2313,36 @@ impl App {
                     }
                 }
                 Event::Key(KeyEvent {
+                    code: KeyCode::Char('u'),
+                    modifiers,
+                    ..
+                }) if modifiers.contains(KeyModifiers::CONTROL) => {
+                    // Ctrl+U: half-page up
+                    if self.can_scroll() {
+                        let half_page = self.viewport_height() / 2;
+                        self.scroll_up(half_page.max(1));
+                        if let Err(e) = self.render_scrollback_view() {
+                            warn!("Failed to render scrollback: {}", e);
+                            self.scroll_to_bottom();
+                            break;
+                        }
+                    }
+                }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Char('d'),
+                    modifiers,
+                    ..
+                }) if modifiers.contains(KeyModifiers::CONTROL) => {
+                    // Ctrl+D: half-page down
+                    let half_page = self.viewport_height() / 2;
+                    self.scroll_down(half_page.max(1));
+                    if let Err(e) = self.render_scrollback_view() {
+                        warn!("Failed to render scrollback: {}", e);
+                        self.scroll_to_bottom();
+                        break;
+                    }
+                }
+                Event::Key(KeyEvent {
                     code: KeyCode::Esc,
                     ..
                 }) => {
