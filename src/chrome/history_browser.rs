@@ -16,7 +16,8 @@ use ratatui_core::widgets::Widget;
 use ratatui_widgets::paragraph::Paragraph;
 use tracing::{debug, warn};
 
-use super::command_edit::{superscript_digit, token_type_style, CommandEditState};
+use super::command_edit::{superscript_digit, token_type_style, CommandEditState, CommandToken, TokenType};
+use super::command_knowledge::COMMAND_KNOWLEDGE;
 use super::panel::{Panel, PanelResult};
 use super::theme::Theme;
 use crate::history_store::{FilterMode, HistoryRecord, HistoryStore, SortMode};
@@ -202,8 +203,30 @@ impl HistoryBrowserPanel {
     /// The CommandEditState now handles intelligent suggestions internally when
     /// history_store is configured. This method provides a fallback to simple
     /// history-based token suggestions when intelligence is disabled.
+    ///
+    /// When editing after a pipe, pipeable commands are suggested instead.
     fn update_suggestions_with_history(&mut self) {
         let Some(edit_state) = &mut self.edit_mode else { return };
+
+        // Check if we're editing after a pipe - if so, suggest pipeable commands
+        // This mirrors the file browser's pipe handling behavior
+        let editing_after_pipe = if edit_state.selected > 0 {
+            edit_state.tokens.get(edit_state.selected.saturating_sub(1))
+                .map(|t| t.text == "|")
+                .unwrap_or(false)
+        } else {
+            false
+        };
+
+        if editing_after_pipe {
+            edit_state.suggestions = COMMAND_KNOWLEDGE
+                .pipeable_commands()
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            edit_state.suggestion_index = None;
+            return;
+        }
 
         // update_suggestions() handles both static and intelligent suggestions
         // (if history_store was configured via set_intelligence_context)
@@ -632,6 +655,29 @@ impl HistoryBrowserPanel {
             }
             KeyCode::BackTab => {
                 edit_state.prev();
+                self.update_suggestions_with_history();
+                Some(PanelResult::Continue)
+            }
+            KeyCode::Char('|') => {
+                // Pipe: commit current token, add pipe, start new token with pipeable suggestions
+                // This mirrors the file browser's pipe handling behavior
+                if !edit_state.edit_buffer.is_empty() {
+                    // Save current edit to current token
+                    if let Some(token) = edit_state.tokens.get_mut(edit_state.selected) {
+                        if !token.locked {
+                            token.text = edit_state.edit_buffer.clone();
+                        }
+                    }
+                }
+                // Add the pipe as its own token
+                let pipe_pos = edit_state.selected + 1;
+                edit_state.tokens.insert(pipe_pos, CommandToken::new("|", TokenType::Argument));
+                // Point to virtual "new token" position by creating an empty token
+                let empty_pos = pipe_pos + 1;
+                edit_state.tokens.insert(empty_pos, CommandToken::new("", TokenType::Argument));
+                edit_state.selected = empty_pos;
+                edit_state.edit_buffer.clear();
+                edit_state.suggestion_index = None;
                 self.update_suggestions_with_history();
                 Some(PanelResult::Continue)
             }
