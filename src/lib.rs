@@ -31,5 +31,5 @@ pub mod signals;
 mod suggest;
 
 // Re-export key types for convenience
-pub use chrome::ChromeContext;
+pub use chrome::TopbarState;
 pub use config::Config;
