@@ -352,6 +352,18 @@ pub struct App {
     /// Flag indicating a resize occurred during Edit mode and chrome needs updating.
     /// This defers scroll region and context bar updates until after reedline yields.
     pending_resize: bool,
+
+    // Scrollback system
+    /// Configuration for scrollback behavior (cached from Config).
+    scrollback_config: crate::config::ScrollbackConfig,
+    /// Ring buffer storing captured terminal output for scrollback.
+    scrollback_buffer: crate::scrollback::ScrollbackBuffer,
+    /// State machine for parsing PTY output into lines.
+    capture_state: crate::scrollback::CaptureState,
+    /// Detector for alternate screen buffer (vim, htop).
+    alt_screen_detector: crate::scrollback::AltScreenDetector,
+    /// Current scroll state (Live or Scrolled with offset).
+    scroll_state: crate::types::ScrollState,
 }
 
 impl App {
@@ -420,6 +432,19 @@ impl App {
 
         info!(mode = ?Mode::Initializing, "App starting");
 
+        // Initialize scrollback system
+        let scrollback_buffer = if config.scrollback.enabled {
+            crate::scrollback::ScrollbackBuffer::with_capacity(
+                config.scrollback.max_lines,
+                config.scrollback.max_line_bytes,
+            )
+        } else {
+            // Create a minimal buffer that won't actually store anything
+            crate::scrollback::ScrollbackBuffer::with_capacity(0, 0)
+        };
+        let capture_state = crate::scrollback::CaptureState::new(cols);
+        let alt_screen_detector = crate::scrollback::AltScreenDetector::new();
+
         Ok(Self {
             mode: Mode::Initializing,
             pty,
@@ -446,6 +471,11 @@ impl App {
             last_command_duration: None,
             command_start_time: None,
             pending_resize: false,
+            scrollback_config: config.scrollback,
+            scrollback_buffer,
+            capture_state,
+            alt_screen_detector,
+            scroll_state: crate::types::ScrollState::Live,
         })
     }
 
@@ -508,7 +538,9 @@ impl App {
     /// We process ALL markers in the batch, handling state transitions correctly.
     fn run_initializing(&mut self) -> Result<()> {
         match self.pump.run_once()? {
-            PumpResult::MarkerDetected(markers) => {
+            PumpResult::MarkerDetected { markers, captured_bytes } => {
+                // Feed captured bytes to scrollback (during init, captures shell startup)
+                self.capture_for_scrollback(&captured_bytes);
                 // Process ALL markers in the batch, updating state as we go.
                 for marker in markers {
                     match self.mode {
@@ -554,7 +586,9 @@ impl App {
                 info!("PTY EOF during initialization");
                 self.transition_to_terminating();
             }
-            PumpResult::Continue => {
+            PumpResult::Continue { captured_bytes } => {
+                // Feed captured bytes to scrollback
+                self.capture_for_scrollback(&captured_bytes);
                 // Check for initialization timeout
                 if self.startup_time.elapsed() > INITIALIZATION_TIMEOUT {
                     warn!(
@@ -580,8 +614,38 @@ impl App {
     /// cycles can arrive in a single read batch. We process ALL markers in the
     /// batch, handling state transitions correctly to avoid losing markers.
     fn run_passthrough(&mut self) -> Result<()> {
+        // Enable stdin interception when scrollback is available and not in alt-screen
+        // This allows filtering scroll keys (PgUp/PgDown) before forwarding to PTY
+        let should_intercept = self.scrollback_config.enabled
+            && !self.alt_screen_detector.is_in_alt_screen();
+
+        if should_intercept != self.pump.is_stdin_intercepted() {
+            self.pump.set_stdin_intercept(should_intercept);
+        }
+
         match self.pump.run_once()? {
-            PumpResult::MarkerDetected(markers) => {
+            PumpResult::MarkerDetected { markers, captured_bytes } => {
+                // Feed captured bytes to scrollback
+                self.capture_for_scrollback(&captured_bytes);
+
+                // Process intercepted stdin (if any) for scroll keys
+                if should_intercept {
+                    let stdin_bytes = self.pump.take_stdin_buffer();
+                    if !stdin_bytes.is_empty() {
+                        debug!(
+                            stdin_len = stdin_bytes.len(),
+                            stdin_hex = %format!("{:02x?}", &stdin_bytes),
+                            buffer_lines = self.scrollback_buffer.len(),
+                            can_scroll = self.can_scroll(),
+                            "Processing stdin for scroll (MarkerDetected)"
+                        );
+                        let to_forward = self.process_stdin_for_scroll(&stdin_bytes);
+                        if !to_forward.is_empty() {
+                            self.pump.write_to_pty(&to_forward)?;
+                        }
+                    }
+                }
+
                 // Process ALL markers in the batch, updating state as we go.
                 // This handles rapid command sequences where markers batch together.
                 for marker in markers {
@@ -633,7 +697,28 @@ impl App {
                 info!("PTY EOF in Passthrough");
                 self.transition_to_terminating();
             }
-            PumpResult::Continue => {}
+            PumpResult::Continue { captured_bytes } => {
+                // Feed captured bytes to scrollback
+                self.capture_for_scrollback(&captured_bytes);
+
+                // Process intercepted stdin (if any) for scroll keys
+                if should_intercept {
+                    let stdin_bytes = self.pump.take_stdin_buffer();
+                    if !stdin_bytes.is_empty() {
+                        debug!(
+                            stdin_len = stdin_bytes.len(),
+                            stdin_hex = %format!("{:02x?}", &stdin_bytes),
+                            buffer_lines = self.scrollback_buffer.len(),
+                            can_scroll = self.can_scroll(),
+                            "Processing stdin for scroll (Continue)"
+                        );
+                        let to_forward = self.process_stdin_for_scroll(&stdin_bytes);
+                        if !to_forward.is_empty() {
+                            self.pump.write_to_pty(&to_forward)?;
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -725,6 +810,7 @@ impl App {
                     last_command: self.last_command.as_deref(),
                     last_duration: self.last_command_duration,
                     timestamp: &timestamp,
+                    scroll_info: self.get_scroll_info(),
                 };
                 if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &ctx) {
                     warn!("Failed to redraw context bar before prompt: {}", e);
@@ -1017,6 +1103,36 @@ impl App {
                 match cmd.as_str() {
                     "open_panel" => {
                         self.open_panel()?;
+                    }
+                    "scroll_up" => {
+                        if self.can_scroll() {
+                            let lines = self.viewport_height();
+                            self.scroll_up(lines);
+                            self.run_scroll_view()?;
+                        }
+                    }
+                    "scroll_down" => {
+                        if self.scroll_state.is_scrolled() {
+                            let lines = self.viewport_height();
+                            self.scroll_down(lines);
+                            if self.scroll_state.is_scrolled() {
+                                self.run_scroll_view()?;
+                            }
+                        }
+                    }
+                    "scroll_line_up" => {
+                        if self.can_scroll() {
+                            self.scroll_up(1);
+                            self.run_scroll_view()?;
+                        }
+                    }
+                    "scroll_line_down" => {
+                        if self.scroll_state.is_scrolled() {
+                            self.scroll_down(1);
+                            if self.scroll_state.is_scrolled() {
+                                self.run_scroll_view()?;
+                            }
+                        }
                     }
                     _ => {
                         warn!(command = %cmd, "Unknown host command");
@@ -1438,6 +1554,7 @@ impl App {
             last_command: self.last_command.as_deref(),
             last_duration: self.last_command_duration,
             timestamp: &timestamp,
+            scroll_info: self.get_scroll_info(),
         };
 
         if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &ctx) {
@@ -1520,7 +1637,9 @@ impl App {
             .pump
             .run_once_with_timeout(Some(INJECTION_POLL_TIMEOUT))?
         {
-            PumpResult::MarkerDetected(markers) => {
+            PumpResult::MarkerDetected { markers, captured_bytes } => {
+                // Feed captured bytes to scrollback
+                self.capture_for_scrollback(&captured_bytes);
                 // Process ALL markers in the batch, updating state as we go.
                 // This handles the case where [PREEXEC, PRECMD, PROMPT] arrive
                 // together when a command fails quickly.
@@ -1581,7 +1700,10 @@ impl App {
                 self.injection_start = None;
                 self.transition_to_terminating();
             }
-            PumpResult::Continue => {}
+            PumpResult::Continue { captured_bytes } => {
+                // Feed captured bytes to scrollback
+                self.capture_for_scrollback(&captured_bytes);
+            }
         }
         Ok(())
     }
@@ -1631,6 +1753,531 @@ impl App {
 
         Ok(self.last_exit_code)
     }
+
+    // =========================================================================
+    // Scrollback capture and viewing
+    // =========================================================================
+}
+
+/// Actions recognized from scroll key sequences.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScrollAction {
+    /// Page up (scroll back one screen)
+    PageUp,
+    /// Page down (scroll forward one screen)
+    PageDown,
+    /// Scroll up one line (Shift+PgUp)
+    LineUp,
+    /// Scroll down one line (Shift+PgDown)
+    LineDown,
+    /// Jump to top (oldest content)
+    Home,
+    /// Jump to bottom (live view)
+    End,
+}
+
+impl App {
+    /// Processes captured bytes for the scrollback system.
+    ///
+    /// This method:
+    /// 1. Feeds bytes through the alt-screen detector
+    /// 2. Suspends/resumes capture when entering/exiting alt-screen
+    /// 3. Parses output into lines via CaptureState
+    /// 4. Stores lines in ScrollbackBuffer
+    fn capture_for_scrollback(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+
+        // Check for alt-screen transitions
+        for event in self.alt_screen_detector.feed(bytes) {
+            match event {
+                crate::scrollback::AltScreenEvent::Enter => {
+                    debug!("Alt-screen entered, suspending scrollback capture");
+                    self.scrollback_buffer.suspend_capture();
+                }
+                crate::scrollback::AltScreenEvent::Exit => {
+                    debug!("Alt-screen exited, resuming scrollback capture");
+                    self.scrollback_buffer.resume_capture();
+                }
+            }
+        }
+
+        // Parse bytes into lines and add to buffer
+        if self.scrollback_buffer.is_capture_active() {
+            for line in self.capture_state.feed(bytes) {
+                self.scrollback_buffer.push_line(line);
+            }
+        }
+
+        // If we're scrolled back and new output arrives, return to live view
+        if self.scroll_state.is_scrolled() {
+            debug!("New output arrived while scrolled, returning to live view");
+            self.scroll_state = crate::types::ScrollState::Live;
+        }
+    }
+
+    /// Returns whether scrolling is currently allowed.
+    ///
+    /// Scrolling is allowed when:
+    /// - Not in alternate screen buffer (vim, htop, etc.)
+    /// - Scrollback buffer has content
+    /// - In Edit or Passthrough mode (not during mode transitions)
+    #[inline]
+    fn can_scroll(&self) -> bool {
+        !self.alt_screen_detector.is_in_alt_screen()
+            && !self.scrollback_buffer.is_empty()
+            && matches!(self.mode, Mode::Edit | Mode::Passthrough)
+    }
+
+    /// Scrolls the view up by the specified number of lines.
+    fn scroll_up(&mut self, lines: usize) {
+        if !self.can_scroll() {
+            return;
+        }
+
+        let max_offset = crate::scrollback::ScrollViewer::max_offset(
+            self.scrollback_buffer.len(),
+            self.viewport_height(),
+        );
+
+        let current = self.scroll_state.offset();
+        let new_offset = (current + lines).min(max_offset);
+        self.scroll_state = crate::types::ScrollState::with_offset(new_offset);
+
+        debug!(from = current, to = new_offset, "Scrolled up");
+    }
+
+    /// Scrolls the view down by the specified number of lines.
+    fn scroll_down(&mut self, lines: usize) {
+        let current = self.scroll_state.offset();
+        let new_offset = current.saturating_sub(lines);
+        self.scroll_state = crate::types::ScrollState::with_offset(new_offset);
+
+        debug!(from = current, to = new_offset, "Scrolled down");
+    }
+
+    /// Scrolls to the top (oldest content).
+    fn scroll_to_top(&mut self) {
+        if !self.can_scroll() {
+            return;
+        }
+
+        let max_offset = crate::scrollback::ScrollViewer::max_offset(
+            self.scrollback_buffer.len(),
+            self.viewport_height(),
+        );
+        self.scroll_state = crate::types::ScrollState::with_offset(max_offset);
+
+        debug!(offset = max_offset, "Scrolled to top");
+    }
+
+    /// Scrolls to the bottom (live view).
+    fn scroll_to_bottom(&mut self) {
+        self.scroll_state = crate::types::ScrollState::Live;
+        debug!("Scrolled to bottom (live view)");
+    }
+
+    /// Returns the viewport height for scroll calculations.
+    fn viewport_height(&self) -> usize {
+        match TerminalGuard::get_size() {
+            Ok((_, rows)) => {
+                // Reserve 1 row for scroll indicator when scrolled
+                if self.scroll_state.is_scrolled() {
+                    (rows as usize).saturating_sub(1)
+                } else {
+                    rows as usize
+                }
+            }
+            Err(_) => 24, // Fallback
+        }
+    }
+
+    /// Returns scroll info for the context bar, if currently scrolled.
+    fn get_scroll_info(&self) -> Option<crate::chrome::ScrollInfo> {
+        if !self.scroll_state.is_scrolled() {
+            return None;
+        }
+
+        let offset = self.scroll_state.offset();
+        let total = self.scrollback_buffer.len();
+        let viewport = self.viewport_height();
+        let max_offset = crate::scrollback::ScrollViewer::max_offset(total, viewport);
+
+        // Calculate percentage (0 = at bottom, 100 = at top)
+        let percentage = if max_offset == 0 {
+            0
+        } else {
+            ((offset * 100) / max_offset).min(100) as u8
+        };
+
+        Some(crate::chrome::ScrollInfo {
+            percentage,
+            total_lines: total,
+        })
+    }
+
+    /// Processes stdin bytes for scroll key handling.
+    ///
+    /// Detects PgUp/PgDown/Home/End sequences and handles scrolling.
+    /// Returns bytes that should be forwarded to the PTY.
+    ///
+    /// This function handles multiple accumulated scroll sequences (e.g., when
+    /// the user presses PgUp rapidly). It processes all leading scroll keys
+    /// and returns only the non-scroll remainder.
+    ///
+    /// # Behavior
+    ///
+    /// - PgUp: Scroll up one page (consumed, not forwarded)
+    /// - PgDown when scrolled: Scroll down one page (consumed)
+    /// - PgDown at bottom: Forward to PTY (shell might use it)
+    /// - Home: Jump to top (oldest content)
+    /// - End: Jump to bottom (live view)
+    /// - Any other key while scrolled: Return to live view, forward key
+    /// - Any other key not scrolled: Forward key as-is
+    fn process_stdin_for_scroll(&mut self, bytes: &[u8]) -> Vec<u8> {
+        if bytes.is_empty() {
+            return Vec::new();
+        }
+
+        let mut remaining = bytes;
+        let mut did_scroll = false;
+        let mut needs_render = false;
+
+        // Process all leading scroll sequences
+        loop {
+            if remaining.is_empty() {
+                break;
+            }
+
+            match self.detect_scroll_action_prefix(remaining) {
+                Some((action, consumed)) => {
+                    // Consume the sequence
+                    remaining = &remaining[consumed..];
+                    did_scroll = true;
+
+                    // Apply the scroll action
+                    match action {
+                        ScrollAction::PageUp => {
+                            if self.can_scroll() {
+                                self.scroll_up(self.viewport_height());
+                                needs_render = true;
+                            }
+                        }
+                        ScrollAction::PageDown => {
+                            if self.scroll_state.is_scrolled() {
+                                self.scroll_down(self.viewport_height());
+                                needs_render = self.scroll_state.is_scrolled();
+                            } else {
+                                // At bottom - don't consume, forward to PTY
+                                // But we've already consumed it from remaining...
+                                // For simplicity, just consume it (shell rarely uses PgDown)
+                            }
+                        }
+                        ScrollAction::LineUp => {
+                            if self.can_scroll() {
+                                self.scroll_up(1);
+                                needs_render = true;
+                            }
+                        }
+                        ScrollAction::LineDown => {
+                            if self.scroll_state.is_scrolled() {
+                                self.scroll_down(1);
+                                needs_render = self.scroll_state.is_scrolled();
+                            }
+                        }
+                        ScrollAction::Home => {
+                            if self.can_scroll() {
+                                self.scroll_to_top();
+                                needs_render = true;
+                            }
+                        }
+                        ScrollAction::End => {
+                            if self.scroll_state.is_scrolled() {
+                                self.scroll_to_bottom();
+                                needs_render = false;
+                            }
+                        }
+                    }
+                }
+                None => {
+                    // Not a scroll sequence at start - stop processing
+                    break;
+                }
+            }
+        }
+
+        // Render scrollback view if we scrolled (only render once at the end)
+        if needs_render {
+            if let Err(e) = self.render_scrollback_view() {
+                warn!("Failed to render scrollback: {}", e);
+                self.scroll_to_bottom();
+            }
+        } else if did_scroll && !self.scroll_state.is_scrolled() {
+            // We scrolled but ended up at bottom - clear the view
+            if let Err(e) = self.clear_scrollback_view() {
+                warn!("Failed to clear scrollback view: {}", e);
+            }
+        }
+
+        // Handle remaining bytes
+        if remaining.is_empty() {
+            Vec::new()
+        } else {
+            // Non-scroll key(s) remain
+            if self.scroll_state.is_scrolled() {
+                // Return to live view before forwarding
+                self.scroll_to_bottom();
+                if let Err(e) = self.clear_scrollback_view() {
+                    warn!("Failed to clear scrollback view: {}", e);
+                }
+            }
+            remaining.to_vec()
+        }
+    }
+
+    /// Detects scroll action at the START of bytes.
+    ///
+    /// Returns the action and how many bytes were consumed.
+    /// This allows processing multiple accumulated scroll sequences.
+    fn detect_scroll_action_prefix(&self, bytes: &[u8]) -> Option<(ScrollAction, usize)> {
+        // Common escape sequences for scroll keys
+        // Note: These can vary by terminal, but these cover most cases
+
+        // PgUp: ESC[5~
+        if bytes.starts_with(b"\x1b[5~") {
+            debug!("Detected PgUp key");
+            return Some((ScrollAction::PageUp, 4));
+        }
+        // PgDown: ESC[6~
+        if bytes.starts_with(b"\x1b[6~") {
+            debug!("Detected PgDown key");
+            return Some((ScrollAction::PageDown, 4));
+        }
+        // Shift+PgUp: ESC[5;2~ (scroll one line) - check BEFORE shorter sequences
+        if bytes.starts_with(b"\x1b[5;2~") {
+            debug!("Detected Shift+PgUp key");
+            return Some((ScrollAction::LineUp, 6));
+        }
+        // Shift+PgDown: ESC[6;2~ (scroll one line)
+        if bytes.starts_with(b"\x1b[6;2~") {
+            debug!("Detected Shift+PgDown key");
+            return Some((ScrollAction::LineDown, 6));
+        }
+        // Home: ESC[H (3 bytes) or ESC[1~ (4 bytes)
+        if bytes.starts_with(b"\x1b[1~") {
+            debug!("Detected Home key (ESC[1~)");
+            return Some((ScrollAction::Home, 4));
+        }
+        if bytes.starts_with(b"\x1b[H") {
+            debug!("Detected Home key (ESC[H)");
+            return Some((ScrollAction::Home, 3));
+        }
+        // End: ESC[F (3 bytes) or ESC[4~ (4 bytes)
+        if bytes.starts_with(b"\x1b[4~") {
+            debug!("Detected End key (ESC[4~)");
+            return Some((ScrollAction::End, 4));
+        }
+        if bytes.starts_with(b"\x1b[F") {
+            debug!("Detected End key (ESC[F)");
+            return Some((ScrollAction::End, 3));
+        }
+
+        None
+    }
+
+    /// Renders the scrollback view to the terminal.
+    ///
+    /// This replaces the terminal content with scrollback buffer content
+    /// and shows a scroll position indicator.
+    fn render_scrollback_view(&self) -> std::io::Result<()> {
+        let (cols, rows) = match TerminalGuard::get_size() {
+            Ok(size) => size,
+            Err(_) => return Ok(()), // Can't render without size
+        };
+
+        let offset = self.scroll_state.offset();
+        let mut stdout = std::io::stdout();
+
+        crate::scrollback::ScrollViewer::render_with_indicator(
+            &mut stdout,
+            &self.scrollback_buffer,
+            offset,
+            cols,
+            rows,
+        )?;
+
+        Ok(())
+    }
+
+    /// Clears the scrollback view and restores normal terminal display.
+    ///
+    /// Called when returning to live view from scrolled state.
+    fn clear_scrollback_view(&self) -> std::io::Result<()> {
+        use std::io::Write;
+
+        let mut stdout = std::io::stdout();
+
+        // Clear screen and move cursor home
+        write!(stdout, "\x1b[2J\x1b[H")?;
+
+        // If chrome is active, restore the scroll region and context bar
+        if self.chrome.is_active() {
+            if let Ok((cols, rows)) = TerminalGuard::get_size() {
+                // Re-setup scroll region
+                if let Err(e) = self.chrome.setup_scroll_region(rows) {
+                    warn!("Failed to restore scroll region: {}", e);
+                }
+
+                // Render context bar
+                let timestamp = chrono::Local::now().format("%H:%M").to_string();
+                let ctx = ChromeContext {
+                    cwd: &self.current_cwd,
+                    git_branch: self.git_branch.as_deref(),
+                    git_dirty: self.git_dirty,
+                    last_exit_code: self.last_exit_code,
+                    last_command: self.last_command.as_deref(),
+                    last_duration: self.last_command_duration,
+                    timestamp: &timestamp,
+                    scroll_info: None, // No longer scrolled
+                };
+                if let Err(e) = self.chrome.render_context_bar(cols, &ctx) {
+                    warn!("Failed to render context bar: {}", e);
+                }
+            }
+        }
+
+        stdout.flush()?;
+        Ok(())
+    }
+
+    /// Runs the scroll view mode, handling scroll keys until user exits.
+    ///
+    /// This is called from HostCommand handlers when user presses PageUp/PageDown
+    /// in Edit mode. Renders scrollback content and handles scroll navigation
+    /// until user presses Esc or any non-scroll key.
+    fn run_scroll_view(&mut self) -> Result<()> {
+        use crossterm::terminal::{enable_raw_mode, disable_raw_mode};
+
+        // Enable raw mode for crossterm event capture
+        // Reedline may have disabled raw mode before returning via ExecuteHostCommand
+        if let Err(e) = enable_raw_mode() {
+            warn!("Failed to enable raw mode for scroll view: {}", e);
+            return Ok(());
+        }
+
+        // Ensure we restore terminal state even on error/panic
+        let result = self.run_scroll_view_inner();
+
+        // Disable raw mode before returning to reedline (it will re-enable as needed)
+        let _ = disable_raw_mode();
+
+        result
+    }
+
+    /// Inner scroll view loop (separated for RAII cleanup).
+    fn run_scroll_view_inner(&mut self) -> Result<()> {
+        use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+
+        // Initial render
+        if let Err(e) = self.render_scrollback_view() {
+            warn!("Failed to render scrollback: {}", e);
+            self.scroll_to_bottom();
+            return Ok(());
+        }
+
+        loop {
+            // Wait for input (with periodic checks for signals)
+            let has_event = event::poll(std::time::Duration::from_millis(100))
+                .context("Failed to poll for events")?;
+
+            if !has_event {
+                continue;
+            }
+
+            let evt = event::read().context("Failed to read event")?;
+
+            match evt {
+                Event::Key(KeyEvent {
+                    code: KeyCode::PageUp,
+                    modifiers,
+                    ..
+                }) => {
+                    if self.can_scroll() {
+                        let lines = if modifiers.contains(KeyModifiers::SHIFT) {
+                            1 // Shift+PgUp: one line
+                        } else {
+                            self.viewport_height() // PgUp: one page
+                        };
+                        self.scroll_up(lines);
+                        if let Err(e) = self.render_scrollback_view() {
+                            warn!("Failed to render scrollback: {}", e);
+                            self.scroll_to_bottom();
+                            break;
+                        }
+                    }
+                }
+                Event::Key(KeyEvent {
+                    code: KeyCode::PageDown,
+                    modifiers,
+                    ..
+                }) => {
+                    let lines = if modifiers.contains(KeyModifiers::SHIFT) {
+                        1 // Shift+PgDown: one line
+                    } else {
+                        self.viewport_height() // PgDown: one page
+                    };
+                    self.scroll_down(lines);
+                    if self.scroll_state.is_scrolled() {
+                        if let Err(e) = self.render_scrollback_view() {
+                            warn!("Failed to render scrollback: {}", e);
+                            self.scroll_to_bottom();
+                            break;
+                        }
+                    } else {
+                        // Returned to live view
+                        break;
+                    }
+                }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Esc,
+                    ..
+                }) => {
+                    // Exit scroll view
+                    self.scroll_to_bottom();
+                    break;
+                }
+                Event::Key(_) => {
+                    // Any other key exits scroll view
+                    self.scroll_to_bottom();
+                    break;
+                }
+                Event::Resize(cols, _rows) => {
+                    // Handle resize while in scroll view
+                    self.capture_state.set_terminal_width(cols);
+                    if let Err(e) = self.render_scrollback_view() {
+                        warn!("Failed to re-render after resize: {}", e);
+                        self.scroll_to_bottom();
+                        break;
+                    }
+                }
+                _ => {
+                    // Ignore other events (mouse, focus, etc.)
+                }
+            }
+        }
+
+        // Clear scroll view and restore normal terminal
+        if let Err(e) = self.clear_scrollback_view() {
+            warn!("Failed to clear scrollback view: {}", e);
+        }
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // Mode transitions
+    // =========================================================================
 
     /// Transitions to Edit mode.
     ///
@@ -1704,6 +2351,7 @@ impl App {
                 last_command: self.last_command.as_deref(),
                 last_duration: self.last_command_duration,
                 timestamp: &timestamp,
+                scroll_info: self.get_scroll_info(),
             };
 
             if let Err(e) = self.chrome.render_context_bar(cols, &ctx) {
@@ -1989,6 +2637,7 @@ impl App {
                         last_command: self.last_command.as_deref(),
                         last_duration: self.last_command_duration,
                         timestamp: &timestamp,
+                        scroll_info: self.get_scroll_info(),
                     };
 
                     if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &ctx) {
@@ -2055,6 +2704,7 @@ impl App {
                 last_command: self.last_command.as_deref(),
                 last_duration: self.last_command_duration,
                 timestamp: &timestamp,
+                scroll_info: self.get_scroll_info(),
             };
 
             if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &ctx) {

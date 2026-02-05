@@ -98,3 +98,50 @@ pub enum SignalEvent {
     /// shutdown sequence restores terminal state and cleans up resources.
     Shutdown,
 }
+
+/// Scroll state for the internal scrollback system.
+///
+/// This is orthogonal to the main Mode state machine, similar to ChromeMode.
+/// It tracks whether the user is viewing historical output or at the live view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScrollState {
+    /// At live view (scroll_offset = 0), output flows normally.
+    /// This is the default state where new output is visible immediately.
+    #[default]
+    Live,
+
+    /// User has scrolled back to view historical output.
+    /// The offset indicates how many lines from the bottom they've scrolled.
+    Scrolled {
+        /// Lines scrolled back from the most recent output.
+        offset: usize,
+    },
+}
+
+impl ScrollState {
+    /// Returns true if currently scrolled back (not at live view).
+    #[inline]
+    pub fn is_scrolled(&self) -> bool {
+        matches!(self, Self::Scrolled { .. })
+    }
+
+    /// Returns the scroll offset (0 if at live view).
+    #[inline]
+    pub fn offset(&self) -> usize {
+        match self {
+            Self::Live => 0,
+            Self::Scrolled { offset } => *offset,
+        }
+    }
+
+    /// Creates a scrolled state with the given offset.
+    /// If offset is 0, returns Live instead.
+    #[inline]
+    pub fn with_offset(offset: usize) -> Self {
+        if offset == 0 {
+            Self::Live
+        } else {
+            Self::Scrolled { offset }
+        }
+    }
+}

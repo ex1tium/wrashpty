@@ -23,6 +23,65 @@ pub enum ThemePreset {
     Terminal,
 }
 
+/// Configuration for the internal scrollback system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScrollbackConfig {
+    /// Whether scrollback is enabled.
+    pub enabled: bool,
+    /// Maximum number of lines to store.
+    pub max_lines: usize,
+    /// Maximum bytes per line before truncation.
+    pub max_line_bytes: usize,
+    /// Whether to preserve ANSI color codes in scrollback.
+    pub preserve_colors: bool,
+}
+
+impl Default for ScrollbackConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_lines: 10_000,
+            max_line_bytes: 4096,
+            preserve_colors: true,
+        }
+    }
+}
+
+impl ScrollbackConfig {
+    /// Loads scrollback configuration from environment variables.
+    ///
+    /// # Environment Variables
+    ///
+    /// - `WRASHPTY_SCROLLBACK`: Set to `0`, `false`, or `no` to disable.
+    ///   Defaults to enabled.
+    ///
+    /// - `WRASHPTY_SCROLLBACK_LINES`: Maximum lines to store (e.g., `50000`).
+    ///   Defaults to 10,000.
+    pub fn from_env() -> Self {
+        let enabled = match std::env::var("WRASHPTY_SCROLLBACK")
+            .as_deref()
+            .map(str::to_lowercase)
+            .as_deref()
+        {
+            Ok("0") | Ok("false") | Ok("no") | Ok("off") => false,
+            _ => true,
+        };
+
+        let max_lines = std::env::var("WRASHPTY_SCROLLBACK_LINES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(10_000)
+            .max(100) // Minimum 100 lines
+            .min(1_000_000); // Maximum 1 million lines
+
+        Self {
+            enabled,
+            max_lines,
+            ..Self::default()
+        }
+    }
+}
+
 /// Application-wide configuration loaded from environment.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -30,6 +89,8 @@ pub struct Config {
     pub symbol_set: SymbolSet,
     /// Which color theme to use.
     pub theme: ThemePreset,
+    /// Scrollback buffer configuration.
+    pub scrollback: ScrollbackConfig,
 }
 
 impl Default for Config {
@@ -37,6 +98,7 @@ impl Default for Config {
         Self {
             symbol_set: SymbolSet::Fallback,
             theme: ThemePreset::Amber,
+            scrollback: ScrollbackConfig::default(),
         }
     }
 }
@@ -56,7 +118,8 @@ impl Config {
     pub fn from_env() -> Self {
         let symbol_set = Self::detect_symbol_set();
         let theme = Self::detect_theme();
-        Self { symbol_set, theme }
+        let scrollback = ScrollbackConfig::from_env();
+        Self { symbol_set, theme, scrollback }
     }
 
     /// Detects whether to use nerdfonts based on environment.
@@ -139,6 +202,8 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.symbol_set, SymbolSet::Fallback);
         assert_eq!(config.theme, ThemePreset::Amber);
+        assert!(config.scrollback.enabled);
+        assert_eq!(config.scrollback.max_lines, 10_000);
     }
 
     #[test]
@@ -149,5 +214,14 @@ mod tests {
     #[test]
     fn test_theme_preset_default() {
         assert_eq!(ThemePreset::default(), ThemePreset::Amber);
+    }
+
+    #[test]
+    fn test_scrollback_config_default() {
+        let config = ScrollbackConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.max_lines, 10_000);
+        assert_eq!(config.max_line_bytes, 4096);
+        assert!(config.preserve_colors);
     }
 }

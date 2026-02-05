@@ -12,6 +12,7 @@ pub mod marker;
 pub mod pty;
 pub mod pump;
 pub mod safety;
+pub mod scrollback;
 pub mod terminal;
 pub mod types;
 
