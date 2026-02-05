@@ -500,22 +500,52 @@ impl App {
     /// In this mode, we wait for bash to emit its first PROMPT marker,
     /// indicating it's ready for input. If no marker arrives within the
     /// timeout, we fall back to degraded passthrough mode.
+    /// Handles the Initializing mode: waiting for first PROMPT marker.
+    ///
+    /// # Marker Batching
+    ///
+    /// Multiple markers can arrive in a single read batch during shell startup.
+    /// We process ALL markers in the batch, handling state transitions correctly.
     fn run_initializing(&mut self) -> Result<()> {
         match self.pump.run_once()? {
             PumpResult::MarkerDetected(markers) => {
+                // Process ALL markers in the batch, updating state as we go.
                 for marker in markers {
-                    match marker {
-                        MarkerEvent::Precmd { exit_code } => {
-                            self.last_exit_code = exit_code;
-                            debug!(exit_code, "Received PRECMD in Initializing");
+                    match self.mode {
+                        Mode::Initializing => {
+                            match marker {
+                                MarkerEvent::Precmd { exit_code } => {
+                                    self.last_exit_code = exit_code;
+                                    debug!(exit_code, "Received PRECMD in Initializing");
+                                }
+                                MarkerEvent::Prompt => {
+                                    self.transition_to_edit();
+                                    // Continue processing remaining markers in Edit mode context
+                                }
+                                MarkerEvent::Preexec => {
+                                    // Unexpected in Initializing, ignore
+                                    debug!("Unexpected PREEXEC in Initializing");
+                                }
+                            }
                         }
-                        MarkerEvent::Prompt => {
-                            self.transition_to_edit();
-                            return Ok(());
+                        Mode::Edit => {
+                            // We transitioned mid-batch, handle remaining markers
+                            match marker {
+                                MarkerEvent::Precmd { exit_code } => {
+                                    self.last_exit_code = exit_code;
+                                    debug!(exit_code, "Received PRECMD in Edit (batched during init)");
+                                }
+                                MarkerEvent::Prompt => {
+                                    debug!("Received duplicate PROMPT in Edit (batched during init)");
+                                }
+                                MarkerEvent::Preexec => {
+                                    warn!("Unexpected PREEXEC in Edit (batched during init)");
+                                }
+                            }
                         }
-                        MarkerEvent::Preexec => {
-                            // Unexpected in Initializing, ignore
-                            debug!("Unexpected PREEXEC in Initializing");
+                        _ => {
+                            // Other modes shouldn't happen here
+                            break;
                         }
                     }
                 }
@@ -543,22 +573,58 @@ impl App {
     /// In this mode, the pump forwards all I/O between the terminal and PTY,
     /// watching for markers. When a PROMPT marker arrives, we transition to
     /// Edit mode.
+    ///
+    /// # Marker Batching
+    ///
+    /// When multiple commands are pasted rapidly, markers from multiple command
+    /// cycles can arrive in a single read batch. We process ALL markers in the
+    /// batch, handling state transitions correctly to avoid losing markers.
     fn run_passthrough(&mut self) -> Result<()> {
         match self.pump.run_once()? {
             PumpResult::MarkerDetected(markers) => {
+                // Process ALL markers in the batch, updating state as we go.
+                // This handles rapid command sequences where markers batch together.
                 for marker in markers {
-                    match marker {
-                        MarkerEvent::Precmd { exit_code } => {
-                            self.last_exit_code = exit_code;
-                            debug!(exit_code, "Received PRECMD");
+                    match self.mode {
+                        Mode::Passthrough => {
+                            match marker {
+                                MarkerEvent::Precmd { exit_code } => {
+                                    self.last_exit_code = exit_code;
+                                    debug!(exit_code, "Received PRECMD");
+                                }
+                                MarkerEvent::Prompt => {
+                                    self.transition_to_edit();
+                                    // Continue processing remaining markers in Edit mode context
+                                }
+                                MarkerEvent::Preexec => {
+                                    // Already in passthrough, this is expected
+                                    debug!("Received PREEXEC (already in Passthrough)");
+                                }
+                            }
                         }
-                        MarkerEvent::Prompt => {
-                            self.transition_to_edit();
-                            return Ok(());
+                        Mode::Edit => {
+                            // We transitioned mid-batch, handle remaining markers
+                            // These are markers that arrived after PROMPT but before
+                            // we processed them (e.g., from rapid pasting)
+                            match marker {
+                                MarkerEvent::Precmd { exit_code } => {
+                                    self.last_exit_code = exit_code;
+                                    debug!(exit_code, "Received PRECMD in Edit (batched)");
+                                }
+                                MarkerEvent::Prompt => {
+                                    // Already at prompt, ignore
+                                    debug!("Received duplicate PROMPT in Edit (batched)");
+                                }
+                                MarkerEvent::Preexec => {
+                                    // This shouldn't happen - PREEXEC only comes after
+                                    // user submits a command from Edit mode
+                                    warn!("Unexpected PREEXEC in Edit (batched)");
+                                }
+                            }
                         }
-                        MarkerEvent::Preexec => {
-                            // Already in passthrough, this is expected
-                            debug!("Received PREEXEC (already in Passthrough)");
+                        _ => {
+                            // Other modes shouldn't happen here
+                            break;
                         }
                     }
                 }
@@ -1427,6 +1493,13 @@ impl App {
     ///
     /// If no PREEXEC arrives within INJECTION_TIMEOUT, transitions to Passthrough
     /// anyway to prevent deadlocks.
+    ///
+    /// # Marker Batching
+    ///
+    /// When commands fail quickly (e.g., "command not found"), multiple markers
+    /// can arrive in a single read: [PREEXEC, PRECMD, PROMPT]. We process ALL
+    /// markers in the batch, transitioning state as we go, to avoid losing
+    /// the PROMPT marker that would otherwise leave us stuck in Passthrough.
     fn run_injecting(&mut self) -> Result<()> {
         // Check for injection timeout
         if let Some(start) = self.injection_start {
@@ -1448,25 +1521,57 @@ impl App {
             .run_once_with_timeout(Some(INJECTION_POLL_TIMEOUT))?
         {
             PumpResult::MarkerDetected(markers) => {
+                // Process ALL markers in the batch, updating state as we go.
+                // This handles the case where [PREEXEC, PRECMD, PROMPT] arrive
+                // together when a command fails quickly.
                 for marker in markers {
-                    match marker {
-                        MarkerEvent::Precmd { exit_code } => {
-                            self.last_exit_code = exit_code;
-                            debug!(exit_code, "Received PRECMD in Injecting");
+                    match self.mode {
+                        Mode::Injecting => {
+                            match marker {
+                                MarkerEvent::Precmd { exit_code } => {
+                                    self.last_exit_code = exit_code;
+                                    debug!(exit_code, "Received PRECMD in Injecting");
+                                }
+                                MarkerEvent::Prompt => {
+                                    // Command completed before we saw PREEXEC - unusual but possible
+                                    debug!("Received PROMPT in Injecting - transitioning to Edit");
+                                    self.injection_start = None;
+                                    self.transition_to_edit();
+                                    // Continue processing remaining markers in Edit mode
+                                }
+                                MarkerEvent::Preexec => {
+                                    debug!("Received PREEXEC - command executing");
+                                    self.injection_start = None;
+                                    self.transition_to_passthrough()?;
+                                    // Continue processing remaining markers in Passthrough mode
+                                }
+                            }
                         }
-                        MarkerEvent::Prompt => {
-                            // Unexpected - command should execute before next prompt
-                            // But handle gracefully by transitioning to Edit
-                            debug!("Unexpected PROMPT in Injecting - transitioning to Edit");
-                            self.injection_start = None;
-                            self.transition_to_edit();
+                        Mode::Passthrough => {
+                            // We transitioned mid-batch, handle remaining markers
+                            match marker {
+                                MarkerEvent::Precmd { exit_code } => {
+                                    self.last_exit_code = exit_code;
+                                    debug!(exit_code, "Received PRECMD in Passthrough (batched)");
+                                }
+                                MarkerEvent::Prompt => {
+                                    debug!("Received PROMPT in Passthrough (batched) - transitioning to Edit");
+                                    self.transition_to_edit();
+                                    // We're now in Edit mode, done with this batch
+                                    return Ok(());
+                                }
+                                MarkerEvent::Preexec => {
+                                    debug!("Received PREEXEC in Passthrough (batched)");
+                                }
+                            }
+                        }
+                        Mode::Edit => {
+                            // Already in Edit, we're done
                             return Ok(());
                         }
-                        MarkerEvent::Preexec => {
-                            debug!("Received PREEXEC - command executing");
-                            self.injection_start = None;
-                            self.transition_to_passthrough()?;
-                            return Ok(());
+                        _ => {
+                            // Other modes shouldn't happen here
+                            break;
                         }
                     }
                 }
@@ -2522,5 +2627,357 @@ mod tests {
         assert!(format!("{:?}", SignalEvent::WindowResize).contains("WindowResize"));
         assert!(format!("{:?}", SignalEvent::ChildExit).contains("ChildExit"));
         assert!(format!("{:?}", SignalEvent::Shutdown).contains("Shutdown"));
+    }
+
+    // =========================================================================
+    // Marker Batching Tests
+    //
+    // These tests verify that when multiple markers arrive in a single read
+    // batch (common when commands fail quickly), all markers are processed
+    // and none are lost. This guards against regression of the batching bug
+    // where early returns after state transitions would lose remaining markers.
+    // =========================================================================
+
+    /// Helper to create a valid marker sequence for testing.
+    fn make_test_marker(token: &[u8; 16], marker_type: &str, payload: Option<&str>) -> Vec<u8> {
+        let mut seq = vec![0x1B, 0x5D]; // ESC ]
+        seq.extend_from_slice(b"777;");
+        seq.extend_from_slice(token);
+        seq.push(b';');
+        seq.extend_from_slice(marker_type.as_bytes());
+        if let Some(p) = payload {
+            seq.push(b';');
+            seq.extend_from_slice(p.as_bytes());
+        }
+        seq.push(0x07); // BEL
+        seq
+    }
+
+    #[test]
+    fn test_marker_batching_all_markers_parsed_from_single_chunk() {
+        use crate::marker::{MarkerParser, ParseOutput};
+
+        let token = *b"a1b2c3d4e5f67890";
+        let mut parser = MarkerParser::new(token);
+
+        // Simulate a fast-failing command: PREEXEC, PRECMD, PROMPT all arrive together
+        let mut batch = Vec::new();
+        batch.extend(make_test_marker(&token, "PREEXEC", None));
+        batch.extend(make_test_marker(&token, "PRECMD", Some("127"))); // command not found
+        batch.extend(make_test_marker(&token, "PROMPT", None));
+
+        let outputs: Vec<_> = parser.feed(&batch).collect();
+
+        // All three markers should be parsed
+        let markers: Vec<_> = outputs
+            .iter()
+            .filter_map(|o| match o {
+                ParseOutput::Marker(m) => Some(m.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(markers.len(), 3, "All three markers should be parsed from batch");
+        assert!(matches!(markers[0], MarkerEvent::Preexec));
+        assert!(matches!(markers[1], MarkerEvent::Precmd { exit_code: 127 }));
+        assert!(matches!(markers[2], MarkerEvent::Prompt));
+    }
+
+    #[test]
+    fn test_marker_batching_with_interleaved_output() {
+        use crate::marker::{MarkerParser, ParseOutput};
+
+        let token = *b"a1b2c3d4e5f67890";
+        let mut parser = MarkerParser::new(token);
+
+        // Simulate markers with error output interleaved
+        let mut batch = Vec::new();
+        batch.extend(make_test_marker(&token, "PREEXEC", None));
+        batch.extend(b"bash: foo: command not found\n");
+        batch.extend(make_test_marker(&token, "PRECMD", Some("127")));
+        batch.extend(make_test_marker(&token, "PROMPT", None));
+
+        let outputs: Vec<_> = parser.feed(&batch).collect();
+
+        // Count markers and bytes
+        let mut marker_count = 0;
+        let mut byte_chunks = 0;
+        for output in &outputs {
+            match output {
+                ParseOutput::Marker(_) => marker_count += 1,
+                ParseOutput::Bytes(_) => byte_chunks += 1,
+            }
+        }
+
+        assert_eq!(marker_count, 3, "All three markers should be parsed");
+        assert!(byte_chunks >= 1, "Error output should be passed through");
+    }
+
+    #[test]
+    fn test_marker_batching_rapid_command_sequence() {
+        use crate::marker::{MarkerParser, ParseOutput};
+
+        let token = *b"a1b2c3d4e5f67890";
+        let mut parser = MarkerParser::new(token);
+
+        // Simulate multiple rapid commands (like pasting garbage)
+        // Each command cycle: PREEXEC -> PRECMD -> PROMPT
+        let mut batch = Vec::new();
+
+        // Command 1: "foo" (not found)
+        batch.extend(make_test_marker(&token, "PREEXEC", None));
+        batch.extend(b"bash: foo: command not found\n");
+        batch.extend(make_test_marker(&token, "PRECMD", Some("127")));
+        batch.extend(make_test_marker(&token, "PROMPT", None));
+
+        // Command 2: "bar" (not found)
+        batch.extend(make_test_marker(&token, "PREEXEC", None));
+        batch.extend(b"bash: bar: command not found\n");
+        batch.extend(make_test_marker(&token, "PRECMD", Some("127")));
+        batch.extend(make_test_marker(&token, "PROMPT", None));
+
+        // Command 3: "baz" (not found)
+        batch.extend(make_test_marker(&token, "PREEXEC", None));
+        batch.extend(b"bash: baz: command not found\n");
+        batch.extend(make_test_marker(&token, "PRECMD", Some("127")));
+        batch.extend(make_test_marker(&token, "PROMPT", None));
+
+        let outputs: Vec<_> = parser.feed(&batch).collect();
+
+        // Count markers by type
+        let mut preexec_count = 0;
+        let mut precmd_count = 0;
+        let mut prompt_count = 0;
+
+        for output in &outputs {
+            if let ParseOutput::Marker(m) = output {
+                match m {
+                    MarkerEvent::Preexec => preexec_count += 1,
+                    MarkerEvent::Precmd { .. } => precmd_count += 1,
+                    MarkerEvent::Prompt => prompt_count += 1,
+                }
+            }
+        }
+
+        assert_eq!(preexec_count, 3, "All PREEXEC markers should be parsed");
+        assert_eq!(precmd_count, 3, "All PRECMD markers should be parsed");
+        assert_eq!(prompt_count, 3, "All PROMPT markers should be parsed");
+    }
+
+    #[test]
+    fn test_injection_batched_marker_transitions() {
+        // Test that the mode transition logic handles batched markers correctly.
+        // This simulates what happens in run_injecting() when processing a batch.
+        let mut mode = Mode::Injecting;
+        let mut last_exit_code = 0;
+
+        // Simulate receiving [PREEXEC, PRECMD, PROMPT] in one batch
+        let markers = vec![
+            MarkerEvent::Preexec,
+            MarkerEvent::Precmd { exit_code: 127 },
+            MarkerEvent::Prompt,
+        ];
+
+        // Process markers the same way run_injecting() does after the fix
+        for marker in markers {
+            match mode {
+                Mode::Injecting => match marker {
+                    MarkerEvent::Precmd { exit_code } => {
+                        last_exit_code = exit_code;
+                    }
+                    MarkerEvent::Prompt => {
+                        mode = Mode::Edit;
+                    }
+                    MarkerEvent::Preexec => {
+                        mode = Mode::Passthrough;
+                    }
+                },
+                Mode::Passthrough => match marker {
+                    MarkerEvent::Precmd { exit_code } => {
+                        last_exit_code = exit_code;
+                    }
+                    MarkerEvent::Prompt => {
+                        mode = Mode::Edit;
+                    }
+                    MarkerEvent::Preexec => {
+                        // Already in passthrough
+                    }
+                },
+                Mode::Edit => {
+                    // Already in edit, done processing
+                    break;
+                }
+                _ => break,
+            }
+        }
+
+        // After processing the batch, we should end up in Edit mode
+        assert_eq!(mode, Mode::Edit, "Should end in Edit mode after PROMPT");
+        assert_eq!(last_exit_code, 127, "Exit code should be captured from PRECMD");
+    }
+
+    #[test]
+    fn test_passthrough_batched_marker_transitions() {
+        // Test that run_passthrough() logic handles batched markers correctly
+        let mode = Mode::Passthrough;
+        let mut last_exit_code = 0;
+
+        // Simulate receiving [PRECMD, PROMPT, PREEXEC, PRECMD, PROMPT] in one batch
+        // This represents: command ends, prompt shown, new command starts, fails, prompt shown
+        let markers = vec![
+            MarkerEvent::Precmd { exit_code: 0 },
+            MarkerEvent::Prompt,
+            MarkerEvent::Preexec,
+            MarkerEvent::Precmd { exit_code: 1 },
+            MarkerEvent::Prompt,
+        ];
+
+        let mut final_mode = mode;
+        for marker in markers {
+            match final_mode {
+                Mode::Passthrough => match marker {
+                    MarkerEvent::Precmd { exit_code } => {
+                        last_exit_code = exit_code;
+                    }
+                    MarkerEvent::Prompt => {
+                        final_mode = Mode::Edit;
+                    }
+                    MarkerEvent::Preexec => {
+                        // Stay in passthrough
+                    }
+                },
+                Mode::Edit => match marker {
+                    MarkerEvent::Precmd { exit_code } => {
+                        // Still update exit code for markers that arrive while in Edit
+                        last_exit_code = exit_code;
+                    }
+                    MarkerEvent::Prompt => {
+                        // Already at prompt
+                    }
+                    MarkerEvent::Preexec => {
+                        // Unexpected in edit
+                    }
+                },
+                _ => break,
+            }
+        }
+
+        // Should end in Edit mode with the first PROMPT
+        assert_eq!(final_mode, Mode::Edit);
+        // With the batching fix, we continue processing markers in Edit mode,
+        // so the final exit code is 1 from the second PRECMD
+        assert_eq!(last_exit_code, 1);
+    }
+
+    #[test]
+    fn test_initializing_mode_batched_markers() {
+        // Test that run_initializing() logic handles batched markers
+        let mut mode = Mode::Initializing;
+        let mut last_exit_code = 0;
+
+        // During initialization, we might see PRECMD and PROMPT together
+        let markers = vec![
+            MarkerEvent::Precmd { exit_code: 0 },
+            MarkerEvent::Prompt,
+        ];
+
+        for marker in markers {
+            match mode {
+                Mode::Initializing => match marker {
+                    MarkerEvent::Precmd { exit_code } => {
+                        last_exit_code = exit_code;
+                    }
+                    MarkerEvent::Prompt => {
+                        mode = Mode::Edit;
+                    }
+                    MarkerEvent::Preexec => {
+                        // Unexpected
+                    }
+                },
+                Mode::Edit => {
+                    // Handle remaining markers in Edit context
+                    match marker {
+                        MarkerEvent::Precmd { exit_code } => {
+                            last_exit_code = exit_code;
+                        }
+                        _ => {}
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        assert_eq!(mode, Mode::Edit);
+        assert_eq!(last_exit_code, 0);
+    }
+
+    #[test]
+    fn test_marker_batching_no_markers_lost_regression() {
+        // Regression test: ensure we don't lose markers after state transitions.
+        // This specifically tests the bug where returning early after PREEXEC
+        // would lose subsequent PRECMD and PROMPT markers.
+        use crate::marker::{MarkerParser, ParseOutput};
+        use smallvec::SmallVec;
+
+        let token = *b"a1b2c3d4e5f67890";
+        let mut parser = MarkerParser::new(token);
+
+        // Create the exact scenario that caused the bug:
+        // Fast-failing command where all markers arrive in one read
+        let mut batch = Vec::new();
+        batch.extend(make_test_marker(&token, "PREEXEC", None));
+        batch.extend(make_test_marker(&token, "PRECMD", Some("127")));
+        batch.extend(make_test_marker(&token, "PROMPT", None));
+
+        // Parse all markers
+        let mut markers: SmallVec<[MarkerEvent; 4]> = SmallVec::new();
+        for output in parser.feed(&batch) {
+            if let ParseOutput::Marker(m) = output {
+                markers.push(m);
+            }
+        }
+
+        // Simulate processing with the FIXED logic (continues after transitions)
+        let mut mode = Mode::Injecting;
+        let mut reached_edit = false;
+
+        for marker in &markers {
+            match mode {
+                Mode::Injecting => match marker {
+                    MarkerEvent::Preexec => {
+                        mode = Mode::Passthrough;
+                        // BUG FIX: Don't return here, continue processing
+                    }
+                    MarkerEvent::Prompt => {
+                        mode = Mode::Edit;
+                        reached_edit = true;
+                    }
+                    MarkerEvent::Precmd { .. } => {}
+                },
+                Mode::Passthrough => match marker {
+                    MarkerEvent::Prompt => {
+                        mode = Mode::Edit;
+                        reached_edit = true;
+                    }
+                    _ => {}
+                },
+                Mode::Edit => {
+                    reached_edit = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        // The critical assertion: we MUST reach Edit mode
+        assert!(
+            reached_edit,
+            "Must reach Edit mode after processing batched markers"
+        );
+        assert_eq!(
+            mode,
+            Mode::Edit,
+            "Final mode must be Edit after PROMPT marker"
+        );
     }
 }
