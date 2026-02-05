@@ -86,7 +86,7 @@ pub fn compute_score(
     // Success bonus - default to 0.75 (neutral) when missing to avoid NaN
     let success_bonus = match success_rate {
         Some(rate) => 0.5 + (rate.clamp(0.0, 1.0) * 0.5), // Clamp rate to valid range
-        None => 0.75, // Neutral if unknown
+        None => 0.75,                                     // Neutral if unknown
     };
 
     // Context and source bonuses
@@ -217,7 +217,10 @@ mod test_helpers {
         if suggestions.is_empty() {
             return;
         }
-        let max_score = suggestions.iter().map(|s| s.score).fold(0.0f64, |a, b| a.max(b));
+        let max_score = suggestions
+            .iter()
+            .map(|s| s.score)
+            .fold(0.0f64, |a, b| a.max(b));
         if max_score > 0.0 {
             for suggestion in suggestions {
                 suggestion.score /= max_score;
@@ -235,10 +238,22 @@ mod tests {
         let now = chrono::Utc::now().timestamp();
 
         // High frequency, recent, successful
-        let score1 = compute_score(100, now, Some(1.0), ContextMatch::Exact, SuggestionSource::LearnedSequence);
+        let score1 = compute_score(
+            100,
+            now,
+            Some(1.0),
+            ContextMatch::Exact,
+            SuggestionSource::LearnedSequence,
+        );
 
         // Low frequency, old, failed
-        let score2 = compute_score(1, now - 365 * 86400, Some(0.0), ContextMatch::Generic, SuggestionSource::LearnedHierarchy);
+        let score2 = compute_score(
+            1,
+            now - 365 * 86400,
+            Some(0.0),
+            ContextMatch::Generic,
+            SuggestionSource::LearnedHierarchy,
+        );
 
         assert!(score1 > score2);
     }

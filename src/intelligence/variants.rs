@@ -74,7 +74,7 @@ pub fn get_successful_variants(
          FROM ci_command_variants
          WHERE canonical_pattern = ?1 AND success_rate > 0.5
          ORDER BY success_rate DESC, success_count DESC
-         LIMIT ?2"
+         LIMIT ?2",
     )?;
 
     let rows = stmt.query_map(rusqlite::params![pattern, limit], |row| {
@@ -216,7 +216,9 @@ mod tests {
         record_execution(&conn, "git commit -m 'test'", 1).unwrap();
 
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM ci_command_variants", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM ci_command_variants", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(count, 1);
 

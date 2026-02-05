@@ -33,7 +33,7 @@ use tracing::{debug, info, warn};
 use unicode_width::UnicodeWidthStr;
 
 use super::buffer_convert::buffer_to_ansi;
-use super::segments::{color_to_bg_ansi, color_to_fg_ansi, TopbarRegistry, TopbarState};
+use super::segments::{TopbarRegistry, TopbarState, color_to_bg_ansi, color_to_fg_ansi};
 use super::symbols::Symbols;
 use super::theme::Theme;
 use crate::config::Config;
@@ -429,7 +429,9 @@ impl Chrome {
             return Ok(());
         }
 
-        let content = self.registry.render(state, cols as usize, self.theme, self.symbols);
+        let content = self
+            .registry
+            .render(state, cols as usize, self.theme, self.symbols);
         let bar_bg = color_to_bg_ansi(self.theme.bar_bg);
 
         let stdout = io::stdout();
@@ -622,8 +624,8 @@ impl Chrome {
 
         // Reset scroll region to full screen first (required to clear rows outside
         // the panel's scroll region which was height+1 to total_rows)
-        write!(out, "\x1b[0m")?;   // Reset attributes
-        write!(out, "\x1b[r")?;    // Reset scroll region to full screen
+        write!(out, "\x1b[0m")?; // Reset attributes
+        write!(out, "\x1b[r")?; // Reset scroll region to full screen
 
         // Clear each panel row
         for row in 1..=old_height {
@@ -905,6 +907,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn test_chrome_minimum_size_constants() {
         assert!(MIN_COLS > 0);
         assert!(MIN_ROWS > 0);
@@ -947,8 +950,8 @@ mod tests {
 
     #[test]
     fn test_registry_render_success() {
-        use std::path::PathBuf;
         use super::super::segments::GitInfo;
+        use std::path::PathBuf;
 
         let config = test_config();
         let chrome = Chrome::new(ChromeMode::Full, &config);
@@ -964,7 +967,9 @@ mod tests {
             scroll: None,
         };
 
-        let result = chrome.registry.render(&state, 80, chrome.theme, chrome.symbols);
+        let result = chrome
+            .registry
+            .render(&state, 80, chrome.theme, chrome.symbols);
 
         assert!(result.contains(chrome.symbols.success));
         // Duration < 0.5s not shown
@@ -975,8 +980,8 @@ mod tests {
 
     #[test]
     fn test_registry_render_failure() {
-        use std::path::PathBuf;
         use super::super::segments::GitInfo;
+        use std::path::PathBuf;
 
         let config = test_config();
         let chrome = Chrome::new(ChromeMode::Full, &config);
@@ -989,15 +994,17 @@ mod tests {
             scroll: None,
         };
 
-        let result = chrome.registry.render(&state, 80, chrome.theme, chrome.symbols);
+        let result = chrome
+            .registry
+            .render(&state, 80, chrome.theme, chrome.symbols);
 
         assert!(result.contains(chrome.symbols.failure));
     }
 
     #[test]
     fn test_registry_render_with_dirty_git() {
-        use std::path::PathBuf;
         use super::super::segments::GitInfo;
+        use std::path::PathBuf;
 
         let config = test_config();
         let chrome = Chrome::new(ChromeMode::Full, &config);
@@ -1013,7 +1020,9 @@ mod tests {
             scroll: None,
         };
 
-        let result = chrome.registry.render(&state, 80, chrome.theme, chrome.symbols);
+        let result = chrome
+            .registry
+            .render(&state, 80, chrome.theme, chrome.symbols);
 
         // In fallback mode, dirty indicator is ●
         assert!(result.contains("feature"));
@@ -1021,8 +1030,8 @@ mod tests {
 
     #[test]
     fn test_registry_render_truncation() {
-        use std::path::PathBuf;
         use super::super::segments::GitInfo;
+        use std::path::PathBuf;
 
         let config = test_config();
         let chrome = Chrome::new(ChromeMode::Full, &config);
@@ -1038,7 +1047,9 @@ mod tests {
             scroll: None,
         };
 
-        let result = chrome.registry.render(&state, 40, chrome.theme, chrome.symbols);
+        let result = chrome
+            .registry
+            .render(&state, 40, chrome.theme, chrome.symbols);
 
         // Verify render completes and produces output
         // Note: result.len() is bytes, not display width (contains ANSI codes)

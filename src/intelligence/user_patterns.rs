@@ -182,7 +182,7 @@ pub fn list_aliases(conn: &Connection) -> Result<Vec<UserAlias>, CIError> {
     let mut stmt = conn.prepare(
         "SELECT id, alias, expansion, description, enabled, use_count
          FROM ci_user_aliases
-         ORDER BY use_count DESC, alias"
+         ORDER BY use_count DESC, alias",
     )?;
 
     let rows = stmt.query_map([], |row| {
@@ -257,7 +257,7 @@ pub fn suggest_from_patterns(
          WHERE enabled = 1
            AND (?1 LIKE trigger_pattern || '%' OR trigger_pattern LIKE ?1 || '%')
          ORDER BY priority DESC, use_count DESC
-         LIMIT 10"
+         LIMIT 10",
     )?;
 
     let rows = stmt.query_map([&context_str], |row| {
@@ -281,13 +281,8 @@ pub fn suggest_from_patterns(
             SuggestionSource::UserPattern
         };
 
-        let score = scoring::compute_score(
-            use_count,
-            0,
-            None,
-            ContextMatch::Exact,
-            source,
-        ) + (priority as f64 * 0.5);
+        let score = scoring::compute_score(use_count, 0, None, ContextMatch::Exact, source)
+            + (priority as f64 * 0.5);
 
         suggestions.push(Suggestion {
             text: suggestion,
@@ -307,7 +302,7 @@ pub fn suggest_from_patterns(
          FROM ci_user_aliases
          WHERE enabled = 1 AND alias LIKE ?1 || '%'
          ORDER BY use_count DESC
-         LIMIT 10"
+         LIMIT 10",
     )?;
 
     let alias_rows = alias_stmt.query_map([&context.partial], |row| {

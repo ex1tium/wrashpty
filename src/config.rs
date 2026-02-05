@@ -58,21 +58,19 @@ impl ScrollbackConfig {
     /// - `WRASHPTY_SCROLLBACK_LINES`: Maximum lines to store (e.g., `50000`).
     ///   Defaults to 10,000.
     pub fn from_env() -> Self {
-        let enabled = match std::env::var("WRASHPTY_SCROLLBACK")
-            .as_deref()
-            .map(str::to_lowercase)
-            .as_deref()
-        {
-            Ok("0") | Ok("false") | Ok("no") | Ok("off") => false,
-            _ => true,
-        };
+        let enabled = !matches!(
+            std::env::var("WRASHPTY_SCROLLBACK")
+                .as_deref()
+                .map(str::to_lowercase)
+                .as_deref(),
+            Ok("0") | Ok("false") | Ok("no") | Ok("off")
+        );
 
         let max_lines = std::env::var("WRASHPTY_SCROLLBACK_LINES")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(10_000)
-            .max(100) // Minimum 100 lines
-            .min(1_000_000); // Maximum 1 million lines
+            .clamp(100, 1_000_000); // Between 100 and 1 million lines
 
         Self {
             enabled,
@@ -119,7 +117,11 @@ impl Config {
         let symbol_set = Self::detect_symbol_set();
         let theme = Self::detect_theme();
         let scrollback = ScrollbackConfig::from_env();
-        Self { symbol_set, theme, scrollback }
+        Self {
+            symbol_set,
+            theme,
+            scrollback,
+        }
     }
 
     /// Detects whether to use nerdfonts based on environment.

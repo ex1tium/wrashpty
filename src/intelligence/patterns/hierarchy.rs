@@ -102,21 +102,17 @@ pub fn query_hierarchy(
 
     // Get parent token ID
     let parent_id: Option<i64> = parent_token.and_then(|text| {
-        conn.query_row(
-            "SELECT id FROM ci_tokens WHERE text = ?1",
-            [text],
-            |row| row.get(0),
-        )
+        conn.query_row("SELECT id FROM ci_tokens WHERE text = ?1", [text], |row| {
+            row.get(0)
+        })
         .ok()
     });
 
     // Get base command ID
     let base_id: Option<i64> = base_command.and_then(|text| {
-        conn.query_row(
-            "SELECT id FROM ci_tokens WHERE text = ?1",
-            [text],
-            |row| row.get(0),
-        )
+        conn.query_row("SELECT id FROM ci_tokens WHERE text = ?1", [text], |row| {
+            row.get(0)
+        })
         .ok()
     });
 
@@ -156,10 +152,7 @@ pub fn query_hierarchy(
 }
 
 /// Queries base commands (position 0, no parent).
-fn query_base_commands(
-    conn: &Connection,
-    limit: usize,
-) -> Result<Vec<HierarchyResult>, CIError> {
+fn query_base_commands(conn: &Connection, limit: usize) -> Result<Vec<HierarchyResult>, CIError> {
     let mut stmt = conn.prepare(
         "SELECT t.text, h.frequency, h.success_count, h.last_seen, h.role
          FROM ci_command_hierarchy h
@@ -207,15 +200,18 @@ fn query_with_context(
          LIMIT ?4",
     )?;
 
-    let rows = stmt.query_map(rusqlite::params![position, parent_id, base_id, limit], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, u32>(1)?,
-            row.get::<_, u32>(2)?,
-            row.get::<_, i64>(3)?,
-            row.get::<_, Option<String>>(4)?,
-        ))
-    })?;
+    let rows = stmt.query_map(
+        rusqlite::params![position, parent_id, base_id, limit],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u32>(1)?,
+                row.get::<_, u32>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        },
+    )?;
 
     let mut results = Vec::new();
     for row in rows.flatten() {
@@ -247,15 +243,18 @@ fn query_with_parent_and_base(
          LIMIT ?4",
     )?;
 
-    let rows = stmt.query_map(rusqlite::params![position, parent_id, base_id, limit], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, u32>(1)?,
-            row.get::<_, u32>(2)?,
-            row.get::<_, i64>(3)?,
-            row.get::<_, Option<String>>(4)?,
-        ))
-    })?;
+    let rows = stmt.query_map(
+        rusqlite::params![position, parent_id, base_id, limit],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u32>(1)?,
+                row.get::<_, u32>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Option<String>>(4)?,
+            ))
+        },
+    )?;
 
     let mut results = Vec::new();
     for row in rows.flatten() {
@@ -378,26 +377,30 @@ mod tests {
         learn_hierarchy(&conn, &tokens, &token_ids, true, now).unwrap();
 
         // Verify hierarchy was created
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM ci_command_hierarchy",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM ci_command_hierarchy", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
         assert_eq!(count, 3);
 
         // Verify relationships
-        let parent_of_remote: Option<i64> = conn.query_row(
-            "SELECT parent_token_id FROM ci_command_hierarchy WHERE token_id = 2",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let parent_of_remote: Option<i64> = conn
+            .query_row(
+                "SELECT parent_token_id FROM ci_command_hierarchy WHERE token_id = 2",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(parent_of_remote, Some(1)); // parent is git
 
-        let parent_of_add: Option<i64> = conn.query_row(
-            "SELECT parent_token_id FROM ci_command_hierarchy WHERE token_id = 3",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let parent_of_add: Option<i64> = conn
+            .query_row(
+                "SELECT parent_token_id FROM ci_command_hierarchy WHERE token_id = 3",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(parent_of_add, Some(2)); // parent is remote
     }
 

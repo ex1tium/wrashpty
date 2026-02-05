@@ -11,9 +11,7 @@ use tracing::debug;
 
 use super::error::CIError;
 use super::tokenizer::{analyze_command, compute_command_hash};
-use super::types::{
-    Placeholder, PlaceholderType, SuggestionContext, Template, TemplateCompletion,
-};
+use super::types::{Placeholder, PlaceholderType, SuggestionContext, Template, TemplateCompletion};
 
 /// Extracts a template from a command.
 ///
@@ -34,7 +32,8 @@ pub fn extract_template(conn: &Connection, command: &str) -> Result<Option<Templ
     for (i, token) in tokens.iter().enumerate() {
         // Use context from preceding tokens for context-aware extraction
         let context = &token_texts[..i];
-        let (template_part, placeholder) = extract_placeholder_with_context(&token.text, i, context);
+        let (template_part, placeholder) =
+            extract_placeholder_with_context(&token.text, i, context);
 
         if let Some(ph) = placeholder {
             placeholders.push(ph);
@@ -124,7 +123,11 @@ fn extract_placeholder_with_context(
     context: &[&str],
 ) -> (String, Option<Placeholder>) {
     // Port mapping pattern: 8080:8080
-    if Regex::new(r"^\d+:\d+$").ok().and_then(|r| r.captures(text)).is_some() {
+    if Regex::new(r"^\d+:\d+$")
+        .ok()
+        .and_then(|r| r.captures(text))
+        .is_some()
+    {
         return (
             "<PORT>:<PORT>".to_string(),
             Some(Placeholder {
@@ -136,11 +139,18 @@ fn extract_placeholder_with_context(
     }
 
     // Single port pattern: 8080 (only if it looks like a port)
-    if Regex::new(r"^\d{2,5}$").ok().and_then(|r| r.captures(text)).is_some() {
+    if Regex::new(r"^\d{2,5}$")
+        .ok()
+        .and_then(|r| r.captures(text))
+        .is_some()
+    {
         if let Ok(n) = text.parse::<u32>() {
             if (1..=65535).contains(&n) {
                 // Check if context suggests this is a port (after -p flag)
-                let is_port_context = context.last().map(|t| *t == "-p" || *t == "--port").unwrap_or(false);
+                let is_port_context = context
+                    .last()
+                    .map(|t| *t == "-p" || *t == "--port")
+                    .unwrap_or(false);
                 if is_port_context || n >= 1024 {
                     return (
                         "<PORT>".to_string(),
@@ -156,7 +166,11 @@ fn extract_placeholder_with_context(
     }
 
     // Generic number pattern: any purely numeric value
-    if Regex::new(r"^\d+$").ok().and_then(|r| r.captures(text)).is_some() {
+    if Regex::new(r"^\d+$")
+        .ok()
+        .and_then(|r| r.captures(text))
+        .is_some()
+    {
         return (
             "<NUMBER>".to_string(),
             Some(Placeholder {
@@ -183,7 +197,8 @@ fn extract_placeholder_with_context(
     // Match either full registry/name:tag format OR simple name:tag format
     if Regex::new(r"^([\w\-\.]+/)?[\w\-\.]+:[\w\-\.]+$")
         .ok()
-        .and_then(|r| r.captures(text)).is_some()
+        .and_then(|r| r.captures(text))
+        .is_some()
     {
         return (
             "<IMAGE>".to_string(),
@@ -264,7 +279,14 @@ fn is_branch_context(context: &[&str]) -> bool {
     }
 
     // Git subcommands that take branch names
-    let branch_commands = ["checkout", "switch", "branch", "merge", "rebase", "cherry-pick"];
+    let branch_commands = [
+        "checkout",
+        "switch",
+        "branch",
+        "merge",
+        "rebase",
+        "cherry-pick",
+    ];
 
     // Check if any of the branch commands appear in context
     context.iter().any(|t| branch_commands.contains(t))
@@ -278,8 +300,13 @@ fn looks_like_branch_name(text: &str) -> bool {
     }
 
     // Skip if it looks like a path
-    if text.contains('/') && !text.starts_with("origin/") && !text.starts_with("feature/")
-        && !text.starts_with("bugfix/") && !text.starts_with("release/") && !text.starts_with("hotfix/") {
+    if text.contains('/')
+        && !text.starts_with("origin/")
+        && !text.starts_with("feature/")
+        && !text.starts_with("bugfix/")
+        && !text.starts_with("release/")
+        && !text.starts_with("hotfix/")
+    {
         return false;
     }
 
@@ -290,7 +317,12 @@ fn looks_like_branch_name(text: &str) -> bool {
 
     // Common branch name patterns
     let branch_patterns = [
-        "main", "master", "develop", "development", "staging", "production",
+        "main",
+        "master",
+        "develop",
+        "development",
+        "staging",
+        "production",
     ];
 
     // Check if it's a common branch name or looks like one
@@ -347,7 +379,10 @@ fn learn_template_values(
 }
 
 /// Gets template completions for the given context.
-pub fn suggest_templates(conn: &Connection, context: &SuggestionContext) -> Vec<TemplateCompletion> {
+pub fn suggest_templates(
+    conn: &Connection,
+    context: &SuggestionContext,
+) -> Vec<TemplateCompletion> {
     let partial = &context.partial;
     if partial.is_empty() && context.preceding_tokens.is_empty() {
         return Vec::new();
@@ -372,7 +407,7 @@ pub fn suggest_templates(conn: &Connection, context: &SuggestionContext) -> Vec<
          FROM ci_templates
          WHERE template LIKE ?1
          ORDER BY frequency DESC
-         LIMIT 10"
+         LIMIT 10",
     ) {
         Ok(stmt) => stmt,
         Err(_) => return Vec::new(),
@@ -396,8 +431,8 @@ pub fn suggest_templates(conn: &Connection, context: &SuggestionContext) -> Vec<
     for row in rows.flatten() {
         let (id, pattern, _base_id, placeholders_json, frequency, example) = row;
 
-        let placeholders: Vec<Placeholder> = serde_json::from_str(&placeholders_json)
-            .unwrap_or_default();
+        let placeholders: Vec<Placeholder> =
+            serde_json::from_str(&placeholders_json).unwrap_or_default();
 
         // Get most common values for each placeholder
         let filled_values = get_common_placeholder_values(conn, id, &placeholders);
@@ -409,11 +444,7 @@ pub fn suggest_templates(conn: &Connection, context: &SuggestionContext) -> Vec<
             build_preview(&pattern, &filled_values)
         };
 
-        let base_command = pattern
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .to_string();
+        let base_command = pattern.split_whitespace().next().unwrap_or("").to_string();
 
         completions.push(TemplateCompletion {
             template: Template {
@@ -490,7 +521,7 @@ pub fn get_placeholder_values(
          FROM ci_template_values
          WHERE template_id = ?1 AND placeholder_name = ?2
          ORDER BY frequency DESC
-         LIMIT ?3"
+         LIMIT ?3",
     )?;
 
     let rows = stmt.query_map(
@@ -586,7 +617,11 @@ mod tests {
         // Without git context, should not be detected as branch
         let (text, ph) = extract_placeholder("feature-branch", 0);
         // Could be a generic token, not specifically a branch
-        assert!(text != "<BRANCH>" || ph.is_none() || ph.as_ref().unwrap().placeholder_type != PlaceholderType::Branch);
+        assert!(
+            text != "<BRANCH>"
+                || ph.is_none()
+                || ph.as_ref().unwrap().placeholder_type != PlaceholderType::Branch
+        );
     }
 
     #[test]

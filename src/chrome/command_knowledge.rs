@@ -36,10 +36,31 @@ impl Default for CommandKnowledge {
         subcommands.insert(
             "git",
             vec![
-                "add", "commit", "push", "pull", "fetch", "merge", "rebase",
-                "branch", "checkout", "switch", "status", "log", "diff",
-                "remote", "stash", "reset", "tag", "clone", "init", "cherry-pick",
-                "bisect", "blame", "show", "restore", "worktree",
+                "add",
+                "commit",
+                "push",
+                "pull",
+                "fetch",
+                "merge",
+                "rebase",
+                "branch",
+                "checkout",
+                "switch",
+                "status",
+                "log",
+                "diff",
+                "remote",
+                "stash",
+                "reset",
+                "tag",
+                "clone",
+                "init",
+                "cherry-pick",
+                "bisect",
+                "blame",
+                "show",
+                "restore",
+                "worktree",
             ],
         );
 
@@ -52,10 +73,7 @@ impl Default for CommandKnowledge {
             ("git", "stash"),
             vec!["list", "show", "pop", "apply", "drop", "clear", "push"],
         );
-        nested.insert(
-            ("git", "worktree"),
-            vec!["add", "list", "remove", "prune"],
-        );
+        nested.insert(("git", "worktree"), vec!["add", "list", "remove", "prune"]);
         nested.insert(
             ("git", "bisect"),
             vec!["start", "good", "bad", "reset", "skip"],
@@ -65,21 +83,20 @@ impl Default for CommandKnowledge {
         subcommands.insert(
             "docker",
             vec![
-                "run", "build", "pull", "push", "ps", "images", "exec",
-                "logs", "stop", "start", "restart", "rm", "rmi", "compose",
-                "network", "volume", "system", "inspect", "tag", "save", "load",
+                "run", "build", "pull", "push", "ps", "images", "exec", "logs", "stop", "start",
+                "restart", "rm", "rmi", "compose", "network", "volume", "system", "inspect", "tag",
+                "save", "load",
             ],
         );
 
         // Docker nested commands
         nested.insert(
             ("docker", "compose"),
-            vec!["up", "down", "build", "logs", "ps", "exec", "restart", "pull"],
+            vec![
+                "up", "down", "build", "logs", "ps", "exec", "restart", "pull",
+            ],
         );
-        nested.insert(
-            ("docker", "system"),
-            vec!["prune", "df", "info", "events"],
-        );
+        nested.insert(("docker", "system"), vec!["prune", "df", "info", "events"]);
         nested.insert(
             ("docker", "network"),
             vec!["create", "ls", "rm", "inspect", "connect", "disconnect"],
@@ -93,9 +110,25 @@ impl Default for CommandKnowledge {
         subcommands.insert(
             "cargo",
             vec![
-                "build", "run", "test", "check", "clippy", "fmt", "doc",
-                "clean", "update", "add", "remove", "publish", "bench",
-                "tree", "audit", "outdated", "fix", "install", "uninstall",
+                "build",
+                "run",
+                "test",
+                "check",
+                "clippy",
+                "fmt",
+                "doc",
+                "clean",
+                "update",
+                "add",
+                "remove",
+                "publish",
+                "bench",
+                "tree",
+                "audit",
+                "outdated",
+                "fix",
+                "install",
+                "uninstall",
             ],
         );
 
@@ -103,9 +136,8 @@ impl Default for CommandKnowledge {
         subcommands.insert(
             "npm",
             vec![
-                "install", "run", "test", "build", "start", "dev", "add",
-                "remove", "update", "audit", "publish", "init", "ci",
-                "link", "unlink", "exec", "outdated",
+                "install", "run", "test", "build", "start", "dev", "add", "remove", "update",
+                "audit", "publish", "init", "ci", "link", "unlink", "exec", "outdated",
             ],
         );
 
@@ -113,8 +145,8 @@ impl Default for CommandKnowledge {
         subcommands.insert(
             "yarn",
             vec![
-                "install", "run", "test", "build", "start", "dev", "add",
-                "remove", "upgrade", "audit", "publish", "init", "link",
+                "install", "run", "test", "build", "start", "dev", "add", "remove", "upgrade",
+                "audit", "publish", "init", "link",
             ],
         );
 
@@ -122,8 +154,8 @@ impl Default for CommandKnowledge {
         subcommands.insert(
             "pnpm",
             vec![
-                "install", "run", "test", "build", "start", "dev", "add",
-                "remove", "update", "audit", "publish", "init", "exec",
+                "install", "run", "test", "build", "start", "dev", "add", "remove", "update",
+                "audit", "publish", "init", "exec",
             ],
         );
 
@@ -131,9 +163,22 @@ impl Default for CommandKnowledge {
         subcommands.insert(
             "kubectl",
             vec![
-                "get", "describe", "logs", "exec", "apply", "delete",
-                "create", "edit", "scale", "rollout", "port-forward",
-                "config", "cluster-info", "top", "patch", "label",
+                "get",
+                "describe",
+                "logs",
+                "exec",
+                "apply",
+                "delete",
+                "create",
+                "edit",
+                "scale",
+                "rollout",
+                "port-forward",
+                "config",
+                "cluster-info",
+                "top",
+                "patch",
+                "label",
             ],
         );
 
@@ -144,16 +189,33 @@ impl Default for CommandKnowledge {
         );
         nested.insert(
             ("kubectl", "config"),
-            vec!["use-context", "get-contexts", "current-context", "view", "set-context"],
+            vec![
+                "use-context",
+                "get-contexts",
+                "current-context",
+                "view",
+                "set-context",
+            ],
         );
 
         // systemctl subcommands
         subcommands.insert(
             "systemctl",
             vec![
-                "start", "stop", "restart", "status", "enable", "disable",
-                "reload", "daemon-reload", "is-active", "is-enabled",
-                "list-units", "list-unit-files", "mask", "unmask",
+                "start",
+                "stop",
+                "restart",
+                "status",
+                "enable",
+                "disable",
+                "reload",
+                "daemon-reload",
+                "is-active",
+                "is-enabled",
+                "list-units",
+                "list-unit-files",
+                "mask",
+                "unmask",
             ],
         );
 
@@ -161,14 +223,28 @@ impl Default for CommandKnowledge {
         subcommands.insert(
             "journalctl",
             vec![
-                "-f", "-u", "-b", "--since", "--until", "-n", "-p",
-                "--disk-usage", "--vacuum-size", "--vacuum-time",
+                "-f",
+                "-u",
+                "-b",
+                "--since",
+                "--until",
+                "-n",
+                "-p",
+                "--disk-usage",
+                "--vacuum-size",
+                "--vacuum-time",
             ],
         );
 
         // File type commands
-        file_type_commands.insert("rs", vec!["cargo run", "cargo test", "rustfmt", "vim", "nano", "cat"]);
-        file_type_commands.insert("py", vec!["python", "python3", "pytest", "vim", "nano", "cat"]);
+        file_type_commands.insert(
+            "rs",
+            vec!["cargo run", "cargo test", "rustfmt", "vim", "nano", "cat"],
+        );
+        file_type_commands.insert(
+            "py",
+            vec!["python", "python3", "pytest", "vim", "nano", "cat"],
+        );
         file_type_commands.insert("js", vec!["node", "npm run", "vim", "nano", "cat"]);
         file_type_commands.insert("ts", vec!["npx ts-node", "npm run", "vim", "nano", "cat"]);
         file_type_commands.insert("sh", vec!["bash", "./", "chmod +x", "vim", "nano", "cat"]);
@@ -190,7 +266,10 @@ impl Default for CommandKnowledge {
         file_type_commands.insert("gif", vec!["xdg-open", "feh", "imv", "file"]);
         file_type_commands.insert("svg", vec!["xdg-open", "inkscape", "file"]);
         file_type_commands.insert("pdf", vec!["xdg-open", "zathura", "evince", "file"]);
-        file_type_commands.insert("html", vec!["xdg-open", "firefox", "chromium", "vim", "nano"]);
+        file_type_commands.insert(
+            "html",
+            vec!["xdg-open", "firefox", "chromium", "vim", "nano"],
+        );
         file_type_commands.insert("css", vec!["vim", "nano", "cat", "less"]);
         file_type_commands.insert("sql", vec!["cat", "vim", "nano", "sqlite3"]);
         file_type_commands.insert("db", vec!["sqlite3"]);
@@ -199,8 +278,14 @@ impl Default for CommandKnowledge {
         filename_commands.insert("Makefile", vec!["make", "make -n", "cat", "vim"]);
         filename_commands.insert("makefile", vec!["make", "make -n", "cat", "vim"]);
         filename_commands.insert("Dockerfile", vec!["docker build -t", "cat", "vim"]);
-        filename_commands.insert("docker-compose.yml", vec!["docker compose up", "docker compose down", "cat"]);
-        filename_commands.insert("docker-compose.yaml", vec!["docker compose up", "docker compose down", "cat"]);
+        filename_commands.insert(
+            "docker-compose.yml",
+            vec!["docker compose up", "docker compose down", "cat"],
+        );
+        filename_commands.insert(
+            "docker-compose.yaml",
+            vec!["docker compose up", "docker compose down", "cat"],
+        );
         filename_commands.insert("Cargo.toml", vec!["cargo build", "cargo run", "cat", "vim"]);
         filename_commands.insert("package.json", vec!["npm install", "npm run", "cat", "vim"]);
         filename_commands.insert("requirements.txt", vec!["pip install -r", "cat", "vim"]);
@@ -212,15 +297,72 @@ impl Default for CommandKnowledge {
 
         // Common top-level commands
         let commands = vec![
-            "git", "docker", "cargo", "npm", "yarn", "pnpm", "kubectl",
-            "systemctl", "journalctl", "ls", "cd", "cat", "vim", "nano",
-            "grep", "find", "make", "python", "python3", "node", "go",
-            "curl", "wget", "ssh", "scp", "rsync", "tar", "zip", "unzip",
-            "chmod", "chown", "mkdir", "rm", "cp", "mv", "ln", "touch",
-            "head", "tail", "less", "more", "diff", "sort", "uniq", "wc",
-            "awk", "sed", "xargs", "tee", "sudo", "su", "htop", "top",
-            "ps", "kill", "pkill", "man", "which", "whereis", "type",
-            "echo", "printf", "env", "export", "alias", "history",
+            "git",
+            "docker",
+            "cargo",
+            "npm",
+            "yarn",
+            "pnpm",
+            "kubectl",
+            "systemctl",
+            "journalctl",
+            "ls",
+            "cd",
+            "cat",
+            "vim",
+            "nano",
+            "grep",
+            "find",
+            "make",
+            "python",
+            "python3",
+            "node",
+            "go",
+            "curl",
+            "wget",
+            "ssh",
+            "scp",
+            "rsync",
+            "tar",
+            "zip",
+            "unzip",
+            "chmod",
+            "chown",
+            "mkdir",
+            "rm",
+            "cp",
+            "mv",
+            "ln",
+            "touch",
+            "head",
+            "tail",
+            "less",
+            "more",
+            "diff",
+            "sort",
+            "uniq",
+            "wc",
+            "awk",
+            "sed",
+            "xargs",
+            "tee",
+            "sudo",
+            "su",
+            "htop",
+            "top",
+            "ps",
+            "kill",
+            "pkill",
+            "man",
+            "which",
+            "whereis",
+            "type",
+            "echo",
+            "printf",
+            "env",
+            "export",
+            "alias",
+            "history",
         ];
 
         Self {
@@ -252,19 +394,13 @@ impl CommandKnowledge {
             1 => {
                 // Second token: suggest subcommands for the first token
                 let cmd = preceding_tokens[0];
-                self.subcommands
-                    .get(cmd)
-                    .cloned()
-                    .unwrap_or_default()
+                self.subcommands.get(cmd).cloned().unwrap_or_default()
             }
             2 => {
                 // Third token: check for nested subcommands
                 let cmd = preceding_tokens[0];
                 let subcmd = preceding_tokens[1];
-                self.nested
-                    .get(&(cmd, subcmd))
-                    .cloned()
-                    .unwrap_or_default()
+                self.nested.get(&(cmd, subcmd)).cloned().unwrap_or_default()
             }
             _ => Vec::new(),
         }
@@ -303,7 +439,8 @@ impl CommandKnowledge {
 
         // Handle compound extensions like .tar.gz
         if filename.ends_with(".tar.gz") || filename.ends_with(".tgz") {
-            return self.file_type_commands
+            return self
+                .file_type_commands
                 .get("gz")
                 .cloned()
                 .unwrap_or_default();
@@ -320,20 +457,32 @@ impl CommandKnowledge {
     /// These commands are suggested after a `|` in the suffix position.
     pub fn pipeable_commands(&self) -> Vec<&'static str> {
         vec![
-            "grep", "grep -i", "grep -v",
-            "head", "head -n 10",
-            "tail", "tail -n 10",
-            "sort", "sort -r", "sort -n",
-            "uniq", "uniq -c",
-            "wc", "wc -l",
-            "less", "more",
+            "grep",
+            "grep -i",
+            "grep -v",
+            "head",
+            "head -n 10",
+            "tail",
+            "tail -n 10",
+            "sort",
+            "sort -r",
+            "sort -n",
+            "uniq",
+            "uniq -c",
+            "wc",
+            "wc -l",
+            "less",
+            "more",
             "cat",
             "tee",
             "xargs",
-            "awk", "sed",
-            "cut", "cut -d' ' -f1",
+            "awk",
+            "sed",
+            "cut",
+            "cut -d' ' -f1",
             "tr",
-            "jq", "jq .",
+            "jq",
+            "jq .",
             "bat",
             "fzf",
         ]

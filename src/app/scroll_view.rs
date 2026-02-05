@@ -146,7 +146,9 @@ impl App {
     /// The boundary is recorded at the current buffer length.
     pub(super) fn record_command_boundary(&mut self, event: &crate::types::MarkerEvent) {
         let line_index = self.scrollback_buffer.len();
-        self.viewer_state.boundaries.record_marker(event, line_index);
+        self.viewer_state
+            .boundaries
+            .record_marker(event, line_index);
     }
 
     /// Jumps to the previous command boundary (Ctrl+P in scroll view).
@@ -184,9 +186,15 @@ impl App {
             let target_line = boundary.saturating_add(1);
             // Calculate offset to show target_line near the top of viewport
             // offset = total - (target_line + viewport - 1) = total - target_line - viewport + 1
-            let new_offset = total.saturating_sub(target_line).saturating_sub(viewport).saturating_add(1);
+            let new_offset = total
+                .saturating_sub(target_line)
+                .saturating_sub(viewport)
+                .saturating_add(1);
             self.scroll_state = crate::types::ScrollState::scrolled_at(new_offset.min(max_offset));
-            debug!(boundary, target_line, new_offset, "Jumped to previous command");
+            debug!(
+                boundary,
+                target_line, new_offset, "Jumped to previous command"
+            );
         } else {
             debug!("No previous command found");
         }
@@ -222,7 +230,10 @@ impl App {
             // Boundary points to where output STARTS, add 1 to skip the prompt/command line
             let target_line = boundary.saturating_add(1);
             // Calculate offset to show target_line near the top of viewport
-            let new_offset = total.saturating_sub(target_line).saturating_sub(viewport).saturating_add(1);
+            let new_offset = total
+                .saturating_sub(target_line)
+                .saturating_sub(viewport)
+                .saturating_add(1);
             self.scroll_state = crate::types::ScrollState::scrolled_at(new_offset.max(0));
             debug!(target_line, new_offset, "Jumped to next command");
         } else {
@@ -417,10 +428,8 @@ impl App {
                             let total = self.scrollback_buffer.len();
                             let viewport = self.viewport_height();
                             let offset = self.scroll_state.offset();
-                            let first_visible = total
-                                .saturating_sub(offset)
-                                .saturating_sub(viewport)
-                                .max(0);
+                            let first_visible =
+                                total.saturating_sub(offset).saturating_sub(viewport).max(0);
 
                             // Perform incremental search
                             search.perform_search(&self.scrollback_buffer, first_visible);
@@ -595,7 +604,11 @@ impl App {
                             navigated = true;
                             continue;
                         }
-                        KeyCode::Char('s') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                        KeyCode::Char('s')
+                            if key
+                                .modifiers
+                                .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                        {
                             // Ctrl+S: Enter search-within-filter mode
                             if filter.has_matches() {
                                 // Run search within the filtered lines
@@ -753,7 +766,11 @@ impl App {
                                 filter_offset = self.filter_offset_for_line(filter, m.line);
                                 scrolled_to_match = true;
                             }
-                            self.render_scrollback_with_filter_and_search(filter, filter_offset, &search)?;
+                            self.render_scrollback_with_filter_and_search(
+                                filter,
+                                filter_offset,
+                                &search,
+                            )?;
                             continue;
                         }
                         KeyCode::Up => {
@@ -763,7 +780,11 @@ impl App {
                                 filter_offset = self.filter_offset_for_line(filter, m.line);
                                 scrolled_to_match = true;
                             }
-                            self.render_scrollback_with_filter_and_search(filter, filter_offset, &search)?;
+                            self.render_scrollback_with_filter_and_search(
+                                filter,
+                                filter_offset,
+                                &search,
+                            )?;
                             continue;
                         }
                         _ => {}
@@ -783,11 +804,12 @@ impl App {
                             search.cursor = input.cursor;
 
                             // Get first visible line in filtered view for "nearest match" selection
-                            let first_visible = if let Some(&first_idx) = filter.matching_lines.first() {
-                                first_idx
-                            } else {
-                                0
-                            };
+                            let first_visible =
+                                if let Some(&first_idx) = filter.matching_lines.first() {
+                                    first_idx
+                                } else {
+                                    0
+                                };
 
                             // Perform search only within filtered lines
                             search.perform_search_within(
@@ -803,7 +825,11 @@ impl App {
                             }
 
                             // Re-render with highlights
-                            self.render_scrollback_with_filter_and_search(filter, filter_offset, &search)?;
+                            self.render_scrollback_with_filter_and_search(
+                                filter,
+                                filter_offset,
+                                &search,
+                            )?;
                         }
                         crate::scrollback::MiniInputResult::Continue => {
                             // Keep editing, no change to query
@@ -821,7 +847,11 @@ impl App {
         line_idx: usize,
     ) -> usize {
         // Find position of line_idx in matching_lines
-        if let Some(pos) = filter.matching_lines.iter().position(|&idx| idx == line_idx) {
+        if let Some(pos) = filter
+            .matching_lines
+            .iter()
+            .position(|&idx| idx == line_idx)
+        {
             // Convert position to offset from bottom
             let total = filter.matching_lines.len();
             let viewport = self.viewport_height();
@@ -930,8 +960,14 @@ impl App {
                 percentage,
                 total_lines: total,
                 current_line,
-                search_active: matches!(self.viewer_state.mode, crate::scrollback::ScrollViewMode::Search(_)),
-                filter_active: matches!(self.viewer_state.mode, crate::scrollback::ScrollViewMode::Filter(_)),
+                search_active: matches!(
+                    self.viewer_state.mode,
+                    crate::scrollback::ScrollViewMode::Search(_)
+                ),
+                filter_active: matches!(
+                    self.viewer_state.mode,
+                    crate::scrollback::ScrollViewMode::Filter(_)
+                ),
                 timestamps_on: self.viewer_state.show_timestamps(),
                 line_numbers_on: self.viewer_state.show_line_numbers(),
             })
@@ -1077,7 +1113,10 @@ impl App {
     ///
     /// Returns the action and how many bytes were consumed.
     /// This allows processing multiple accumulated scroll sequences.
-    pub(super) fn detect_scroll_action_prefix(&self, bytes: &[u8]) -> Option<(ScrollAction, usize)> {
+    pub(super) fn detect_scroll_action_prefix(
+        &self,
+        bytes: &[u8],
+    ) -> Option<(ScrollAction, usize)> {
         // Common escape sequences for scroll keys
         // Note: These can vary by terminal, but these cover most cases
 
@@ -1237,7 +1276,7 @@ impl App {
     /// in Edit mode. Renders scrollback content and handles scroll navigation
     /// until user presses Esc or any non-scroll key.
     pub(super) fn run_scroll_view(&mut self) -> Result<()> {
-        use crossterm::terminal::{enable_raw_mode, disable_raw_mode};
+        use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
         // Enable raw mode for crossterm event capture
         // Reedline may have disabled raw mode before returning via ExecuteHostCommand
@@ -1316,8 +1355,7 @@ impl App {
                     }
                 }
                 Event::Key(KeyEvent {
-                    code: KeyCode::Up,
-                    ..
+                    code: KeyCode::Up, ..
                 }) => {
                     // Up arrow: scroll up one line
                     if self.can_scroll() {
@@ -1354,8 +1392,7 @@ impl App {
                     }
                 }
                 Event::Key(KeyEvent {
-                    code: KeyCode::End,
-                    ..
+                    code: KeyCode::End, ..
                 }) => {
                     // End: jump to bottom (live view)
                     self.scroll_to_bottom();
@@ -1368,7 +1405,10 @@ impl App {
                 }) if modifiers.contains(KeyModifiers::CONTROL) => {
                     // Ctrl+L: toggle line numbers
                     self.viewer_state.toggle_line_numbers();
-                    debug!(show_line_numbers = self.viewer_state.show_line_numbers(), "Toggled line numbers");
+                    debug!(
+                        show_line_numbers = self.viewer_state.show_line_numbers(),
+                        "Toggled line numbers"
+                    );
                     if let Err(e) = self.render_scrollback_view() {
                         warn!("Failed to render scrollback: {}", e);
                         self.scroll_to_bottom();
@@ -1412,7 +1452,10 @@ impl App {
                 }) if modifiers.contains(KeyModifiers::CONTROL) => {
                     // Ctrl+T: toggle timestamp gutter
                     self.viewer_state.toggle_timestamps();
-                    debug!(show_timestamps = self.viewer_state.show_timestamps(), "Toggled timestamps");
+                    debug!(
+                        show_timestamps = self.viewer_state.show_timestamps(),
+                        "Toggled timestamps"
+                    );
                     if let Err(e) = self.render_scrollback_view() {
                         warn!("Failed to render scrollback: {}", e);
                         self.scroll_to_bottom();
@@ -1531,13 +1574,17 @@ impl App {
                 Event::Key(KeyEvent {
                     code: KeyCode::Char('?'),
                     ..
-                }) | Event::Key(KeyEvent {
+                })
+                | Event::Key(KeyEvent {
                     code: KeyCode::F(1),
                     ..
                 }) => {
                     // Toggle help bar
                     self.viewer_state.toggle_help_bar();
-                    debug!(show_help = self.viewer_state.show_help_bar(), "Toggled help bar");
+                    debug!(
+                        show_help = self.viewer_state.show_help_bar(),
+                        "Toggled help bar"
+                    );
                     if let Err(e) = self.render_scrollback_view() {
                         warn!("Failed to render scrollback: {}", e);
                         self.scroll_to_bottom();
@@ -1545,8 +1592,7 @@ impl App {
                     }
                 }
                 Event::Key(KeyEvent {
-                    code: KeyCode::Esc,
-                    ..
+                    code: KeyCode::Esc, ..
                 }) => {
                     // Exit scroll view
                     self.scroll_to_bottom();

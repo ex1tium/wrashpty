@@ -23,14 +23,13 @@ pub fn learn_flag_values(
 
     // Find subcommand if present
     // Safely check both tokens and token_ids have elements at index 1
-    let subcommand_id = if tokens.len() > 1
-        && token_ids.len() > 1
-        && tokens[1].token_type == TokenType::Subcommand
-    {
-        Some(token_ids[1])
-    } else {
-        None
-    };
+    let subcommand_id =
+        if tokens.len() > 1 && token_ids.len() > 1 && tokens[1].token_type == TokenType::Subcommand
+        {
+            Some(token_ids[1])
+        } else {
+            None
+        };
 
     // Look for flag -> value pairs
     for i in 0..tokens.len() - 1 {
@@ -97,11 +96,9 @@ pub fn query_flag_values(
 
     // Get subcommand ID if provided
     let subcommand_id: Option<i64> = subcommand.and_then(|sub| {
-        conn.query_row(
-            "SELECT id FROM ci_tokens WHERE text = ?1",
-            [sub],
-            |row| row.get(0),
-        )
+        conn.query_row("SELECT id FROM ci_tokens WHERE text = ?1", [sub], |row| {
+            row.get(0)
+        })
         .ok()
     });
 
@@ -113,7 +110,7 @@ pub fn query_flag_values(
                AND subcommand_id = ?2
                AND flag_text = ?3
              ORDER BY frequency DESC
-             LIMIT ?4"
+             LIMIT ?4",
         )?
     } else {
         conn.prepare(
@@ -123,21 +120,29 @@ pub fn query_flag_values(
                AND subcommand_id IS NULL
                AND flag_text = ?2
              ORDER BY frequency DESC
-             LIMIT ?3"
+             LIMIT ?3",
         )?
     };
 
     let mut results = Vec::new();
     if let Some(sub_id) = subcommand_id {
         let rows = stmt.query_map(rusqlite::params![base_id, sub_id, flag, limit], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?, row.get::<_, i64>(2)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u32>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
         })?;
         for row in rows.flatten() {
             results.push(row);
         }
     } else {
         let rows = stmt.query_map(rusqlite::params![base_id, flag, limit], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?, row.get::<_, i64>(2)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u32>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
         })?;
         for row in rows.flatten() {
             results.push(row);
@@ -152,7 +157,7 @@ pub fn query_flag_values(
              WHERE base_command_id = ?1
                AND flag_text = ?2
              ORDER BY frequency DESC
-             LIMIT ?3"
+             LIMIT ?3",
         )?;
 
         let rows = stmt.query_map(rusqlite::params![base_id, flag, limit], |row| {
@@ -189,11 +194,9 @@ pub fn query_flags_for_command(
 
     // Get subcommand ID if provided
     let subcommand_id: Option<i64> = subcommand.and_then(|sub| {
-        conn.query_row(
-            "SELECT id FROM ci_tokens WHERE text = ?1",
-            [sub],
-            |row| row.get(0),
-        )
+        conn.query_row("SELECT id FROM ci_tokens WHERE text = ?1", [sub], |row| {
+            row.get(0)
+        })
         .ok()
     });
 
@@ -204,7 +207,7 @@ pub fn query_flags_for_command(
              WHERE base_command_id = ?1 AND subcommand_id = ?2
              GROUP BY flag_text
              ORDER BY total_freq DESC
-             LIMIT ?3"
+             LIMIT ?3",
         )?
     } else {
         conn.prepare(
@@ -213,7 +216,7 @@ pub fn query_flags_for_command(
              WHERE base_command_id = ?1
              GROUP BY flag_text
              ORDER BY total_freq DESC
-             LIMIT ?2"
+             LIMIT ?2",
         )?
     };
 
@@ -281,11 +284,9 @@ mod tests {
 
         learn_flag_values(&conn, &tokens, &token_ids, Some(1), now).unwrap();
 
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM ci_flag_values",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM ci_flag_values", [], |row| row.get(0))
+            .unwrap();
         assert_eq!(count, 1);
     }
 

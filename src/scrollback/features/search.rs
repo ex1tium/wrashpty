@@ -51,8 +51,7 @@ impl SearchState {
 
     /// Returns the current match if one is selected.
     pub fn current(&self) -> Option<&SearchMatch> {
-        self.current_match
-            .and_then(|idx| self.matches.get(idx))
+        self.current_match.and_then(|idx| self.matches.get(idx))
     }
 
     /// Moves to the next match in current direction.
@@ -173,9 +172,7 @@ impl SearchState {
                 .matches
                 .iter()
                 .enumerate()
-                .min_by_key(|(_, m)| {
-                    m.line.abs_diff(near_line)
-                })
+                .min_by_key(|(_, m)| m.line.abs_diff(near_line))
                 .map(|(idx, _)| idx)
                 .unwrap_or(0);
 
@@ -281,9 +278,7 @@ impl SearchState {
                 .matches
                 .iter()
                 .enumerate()
-                .min_by_key(|(_, m)| {
-                    m.line.abs_diff(near_line)
-                })
+                .min_by_key(|(_, m)| m.line.abs_diff(near_line))
                 .map(|(idx, _)| idx)
                 .unwrap_or(0);
 
@@ -309,9 +304,21 @@ mod tests {
         let mut state = SearchState {
             query: "test".to_string(),
             matches: vec![
-                SearchMatch { line: 0, start: 0, end: 4 },
-                SearchMatch { line: 5, start: 10, end: 14 },
-                SearchMatch { line: 10, start: 0, end: 4 },
+                SearchMatch {
+                    line: 0,
+                    start: 0,
+                    end: 4,
+                },
+                SearchMatch {
+                    line: 5,
+                    start: 10,
+                    end: 14,
+                },
+                SearchMatch {
+                    line: 10,
+                    start: 0,
+                    end: 4,
+                },
             ],
             current_match: Some(0),
             ..Default::default()
@@ -338,7 +345,11 @@ mod tests {
         state.query = "test".to_string();
         assert_eq!(state.status(), "No matches");
 
-        state.matches.push(SearchMatch { line: 0, start: 0, end: 4 });
+        state.matches.push(SearchMatch {
+            line: 0,
+            start: 0,
+            end: 4,
+        });
         state.current_match = Some(0);
         assert_eq!(state.status(), "1/1");
     }
@@ -422,9 +433,21 @@ mod tests {
     fn test_matches_on_line() {
         let mut state = SearchState::new();
         state.matches = vec![
-            SearchMatch { line: 0, start: 0, end: 4 },
-            SearchMatch { line: 0, start: 10, end: 14 },
-            SearchMatch { line: 2, start: 5, end: 9 },
+            SearchMatch {
+                line: 0,
+                start: 0,
+                end: 4,
+            },
+            SearchMatch {
+                line: 0,
+                start: 10,
+                end: 14,
+            },
+            SearchMatch {
+                line: 2,
+                start: 5,
+                end: 9,
+            },
         ];
 
         let line0_matches: Vec<_> = state.matches_on_line(0).collect();
@@ -459,11 +482,31 @@ mod tests {
         let mut state = SearchState::new();
         // Add matches on lines 0, 0 (duplicate), 5, 10, 5 (duplicate)
         state.matches = vec![
-            SearchMatch { line: 0, start: 0, end: 4 },
-            SearchMatch { line: 0, start: 10, end: 14 },
-            SearchMatch { line: 5, start: 0, end: 4 },
-            SearchMatch { line: 10, start: 0, end: 4 },
-            SearchMatch { line: 5, start: 10, end: 14 },
+            SearchMatch {
+                line: 0,
+                start: 0,
+                end: 4,
+            },
+            SearchMatch {
+                line: 0,
+                start: 10,
+                end: 14,
+            },
+            SearchMatch {
+                line: 5,
+                start: 0,
+                end: 4,
+            },
+            SearchMatch {
+                line: 10,
+                start: 0,
+                end: 4,
+            },
+            SearchMatch {
+                line: 5,
+                start: 10,
+                end: 14,
+            },
         ];
 
         let lines = state.matched_line_indices();
@@ -474,11 +517,11 @@ mod tests {
     #[test]
     fn test_perform_search_within() {
         let mut buffer = ScrollbackBuffer::with_capacity(100, 1000);
-        buffer.push_line(b"error: first timeout".to_vec());   // 0
-        buffer.push_line(b"info: all good".to_vec());          // 1
-        buffer.push_line(b"error: second failure".to_vec());   // 2
+        buffer.push_line(b"error: first timeout".to_vec()); // 0
+        buffer.push_line(b"info: all good".to_vec()); // 1
+        buffer.push_line(b"error: second failure".to_vec()); // 2
         buffer.push_line(b"warning: timeout warning".to_vec()); // 3
-        buffer.push_line(b"error: third timeout".to_vec());    // 4
+        buffer.push_line(b"error: third timeout".to_vec()); // 4
 
         // Only search within lines 0, 2, 4 (the error lines)
         let within_lines = vec![0, 2, 4];

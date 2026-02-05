@@ -312,7 +312,11 @@ impl ScrollbackBuffer {
     /// # Returns
     ///
     /// Iterator over the requested lines, from oldest to newest in the range.
-    pub fn get_from_bottom(&self, offset: usize, count: usize) -> impl Iterator<Item = &ScrollLine> {
+    pub fn get_from_bottom(
+        &self,
+        offset: usize,
+        count: usize,
+    ) -> impl Iterator<Item = &ScrollLine> {
         let total = self.lines.len();
         if offset >= total {
             // Offset beyond buffer - return empty
@@ -323,7 +327,10 @@ impl ScrollbackBuffer {
         let end_from_start = total.saturating_sub(offset);
         let start_from_start = end_from_start.saturating_sub(count);
 
-        self.lines.iter().skip(start_from_start).take(count.min(end_from_start - start_from_start))
+        self.lines
+            .iter()
+            .skip(start_from_start)
+            .take(count.min(end_from_start - start_from_start))
     }
 
     /// Clears all stored lines.

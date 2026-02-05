@@ -4,7 +4,7 @@
 
 use unicode_width::UnicodeWidthStr;
 
-use super::{color_to_fg_ansi, RenderedSegment, SegmentAlign, TopbarSegment, TopbarState};
+use super::{RenderedSegment, SegmentAlign, TopbarSegment, TopbarState, color_to_fg_ansi};
 use crate::chrome::symbols::Symbols;
 use crate::chrome::theme::Theme;
 
@@ -58,7 +58,10 @@ impl TopbarSegment for ScrollSegment {
 
         let scroll_content = format!(
             "▶ SCROLL | {}/{} | {}%{}",
-            scroll_info.current_line, scroll_info.total_lines, scroll_info.percentage, mode_indicators
+            scroll_info.current_line,
+            scroll_info.total_lines,
+            scroll_info.percentage,
+            mode_indicators
         );
         let scroll_width = scroll_content.width();
 

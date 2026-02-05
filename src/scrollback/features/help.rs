@@ -23,12 +23,8 @@ impl HelpBar {
             ScrollViewMode::Filter(_) => {
                 "Enter:confirm  Esc:cancel  Ctrl+S:search  PgUp/Dn:scroll  Home/End:top/bot"
             }
-            ScrollViewMode::Yank(_) => {
-                "v:toggle line  y/Enter:copy  Esc:cancel  Arrows:move"
-            }
-            ScrollViewMode::GoToLine(_) => {
-                "Enter:go  Esc:cancel"
-            }
+            ScrollViewMode::Yank(_) => "v:toggle line  y/Enter:copy  Esc:cancel  Arrows:move",
+            ScrollViewMode::GoToLine(_) => "Enter:go  Esc:cancel",
         }
     }
 

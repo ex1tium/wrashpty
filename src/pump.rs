@@ -359,7 +359,9 @@ impl Pump {
                     if let Some(result) = self.process_pty_events(&pollfds[pty_idx])? {
                         return Ok(result);
                     }
-                    return Ok(PumpResult::Continue { captured_bytes: Vec::new() });
+                    return Ok(PumpResult::Continue {
+                        captured_bytes: Vec::new(),
+                    });
                 }
             }
         }
@@ -374,7 +376,9 @@ impl Pump {
             return Ok(result);
         }
 
-        Ok(PumpResult::Continue { captured_bytes: Vec::new() })
+        Ok(PumpResult::Continue {
+            captured_bytes: Vec::new(),
+        })
     }
 
     /// Process stdin poll events.
@@ -509,12 +513,17 @@ impl Pump {
                 if markers.is_empty() {
                     Ok(PumpResult::Continue { captured_bytes })
                 } else {
-                    Ok(PumpResult::MarkerDetected { markers, captured_bytes })
+                    Ok(PumpResult::MarkerDetected {
+                        markers,
+                        captured_bytes,
+                    })
                 }
             }
             Err(nix::errno::Errno::EAGAIN) => {
                 // No data available, ignore
-                Ok(PumpResult::Continue { captured_bytes: Vec::new() })
+                Ok(PumpResult::Continue {
+                    captured_bytes: Vec::new(),
+                })
             }
             Err(nix::errno::Errno::EIO) => {
                 // EIO on PTY read indicates child process exited - treat as EOF
@@ -817,20 +826,23 @@ mod tests {
             markers: smallvec![MarkerEvent::Prompt],
             captured_bytes: vec![b'h', b'i'],
         };
-        assert!(matches!(marker, PumpResult::MarkerDetected { ref markers, .. } if markers.len() == 1));
+        assert!(
+            matches!(marker, PumpResult::MarkerDetected { ref markers, .. } if markers.len() == 1)
+        );
         assert_eq!(marker.captured_bytes(), b"hi");
 
         // Multiple markers (still inline, no heap allocation)
         let markers = PumpResult::MarkerDetected {
-            markers: smallvec![
-                MarkerEvent::Precmd { exit_code: 0 },
-                MarkerEvent::Prompt,
-            ],
+            markers: smallvec![MarkerEvent::Precmd { exit_code: 0 }, MarkerEvent::Prompt,],
             captured_bytes: vec![],
         };
-        assert!(matches!(markers, PumpResult::MarkerDetected { markers: ref m, .. } if m.len() == 2));
+        assert!(
+            matches!(markers, PumpResult::MarkerDetected { markers: ref m, .. } if m.len() == 2)
+        );
 
-        let cont = PumpResult::Continue { captured_bytes: vec![b'x'] };
+        let cont = PumpResult::Continue {
+            captured_bytes: vec![b'x'],
+        };
         assert!(matches!(cont, PumpResult::Continue { .. }));
         assert_eq!(cont.captured_bytes(), b"x");
 
@@ -855,7 +867,11 @@ mod tests {
             captured_bytes: b"test output".to_vec(),
         };
 
-        if let PumpResult::MarkerDetected { markers: captured, captured_bytes } = result {
+        if let PumpResult::MarkerDetected {
+            markers: captured,
+            captured_bytes,
+        } = result
+        {
             assert_eq!(captured.len(), 3);
             assert_eq!(captured[0], MarkerEvent::Precmd { exit_code: 0 });
             assert_eq!(captured[1], MarkerEvent::Prompt);
@@ -877,7 +893,9 @@ mod tests {
         assert_eq!(result.markers().unwrap().len(), 1);
         assert_eq!(result.captured_bytes(), b"hello");
 
-        let cont = PumpResult::Continue { captured_bytes: b"world".to_vec() };
+        let cont = PumpResult::Continue {
+            captured_bytes: b"world".to_vec(),
+        };
         assert!(cont.markers().is_none());
         assert_eq!(cont.captured_bytes(), b"world");
 
@@ -911,6 +929,7 @@ mod tests {
 
     /// Test that buffer size is reasonable.
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn test_buffer_size() {
         assert!(BUFFER_SIZE >= 1024, "Buffer too small");
         assert!(BUFFER_SIZE <= 65536, "Buffer too large");
@@ -918,6 +937,7 @@ mod tests {
 
     /// Test timeout constants.
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn test_timeout_constants() {
         assert!(MID_SEQUENCE_TIMEOUT_MS > 0);
         assert!(MID_SEQUENCE_TIMEOUT_MS < 1000);
@@ -928,6 +948,7 @@ mod tests {
     /// Test that run_once_with_timeout accepts Duration parameter.
     /// This is a structural test; full I/O testing is in integration.rs.
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn test_run_once_with_timeout_exists() {
         // Verify the method signature compiles and accepts Duration
         let _: fn(&mut Pump, Option<Duration>) -> Result<PumpResult> = Pump::run_once_with_timeout;

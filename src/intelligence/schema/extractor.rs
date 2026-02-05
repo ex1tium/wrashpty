@@ -276,7 +276,10 @@ fn should_skip_subcommand(name: &str) -> bool {
 
 /// Extracts schemas for multiple commands.
 pub fn extract_multiple_schemas(commands: &[&str]) -> Vec<ExtractionResult> {
-    commands.iter().map(|cmd| extract_command_schema(cmd)).collect()
+    commands
+        .iter()
+        .map(|cmd| extract_command_schema(cmd))
+        .collect()
 }
 
 /// Probes a command to check if it exists and has help.
@@ -296,8 +299,12 @@ mod tests {
 
     #[test]
     fn test_is_help_output() {
-        assert!(is_help_output("Usage: mycommand [options]\n\nOptions:\n  --help"));
-        assert!(is_help_output("USAGE:\n    myapp [FLAGS]\n\nFLAGS:\n    -h, --help"));
+        assert!(is_help_output(
+            "Usage: mycommand [options]\n\nOptions:\n  --help"
+        ));
+        assert!(is_help_output(
+            "USAGE:\n    myapp [FLAGS]\n\nFLAGS:\n    -h, --help"
+        ));
         assert!(!is_help_output("error: command not found"));
         assert!(!is_help_output("short"));
     }

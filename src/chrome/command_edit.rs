@@ -108,7 +108,9 @@ pub fn classify_token(text: &str, position: usize, prev_token: Option<&str>) -> 
 /// Returns the style for a token based on its type.
 pub fn token_type_style(token_type: TokenType, theme: &Theme) -> Style {
     match token_type {
-        TokenType::Command => Style::default().fg(theme.semantic_success).add_modifier(Modifier::BOLD),
+        TokenType::Command => Style::default()
+            .fg(theme.semantic_success)
+            .add_modifier(Modifier::BOLD),
         TokenType::Subcommand => Style::default().fg(theme.header_fg),
         TokenType::Flag => Style::default().fg(theme.text_highlight),
         TokenType::Path => Style::default().fg(theme.semantic_info),
@@ -172,7 +174,32 @@ pub fn quote_for_shell(text: &str) -> String {
 
     // Check if quoting is needed
     let needs_quoting = text.chars().any(|c| {
-        matches!(c, ' ' | '\t' | '\n' | '"' | '\'' | '\\' | '$' | '`' | '!' | '*' | '?' | '[' | ']' | '(' | ')' | '{' | '}' | '<' | '>' | '|' | '&' | ';' | '#' | '~')
+        matches!(
+            c,
+            ' ' | '\t'
+                | '\n'
+                | '"'
+                | '\''
+                | '\\'
+                | '$'
+                | '`'
+                | '!'
+                | '*'
+                | '?'
+                | '['
+                | ']'
+                | '('
+                | ')'
+                | '{'
+                | '}'
+                | '<'
+                | '>'
+                | '|'
+                | '&'
+                | ';'
+                | '#'
+                | '~'
+        )
     });
 
     if !needs_quoting {
@@ -205,22 +232,34 @@ pub fn check_dangerous_command(command: &str) -> Option<DangerWarning> {
     let lower = command.to_lowercase();
 
     if lower.contains("rm -rf") || lower.contains("rm -fr") {
-        return Some(DangerWarning { message: "Recursive force delete" });
+        return Some(DangerWarning {
+            message: "Recursive force delete",
+        });
     }
     if lower.contains("dd if=") && lower.contains("of=/dev/") {
-        return Some(DangerWarning { message: "Direct disk write" });
+        return Some(DangerWarning {
+            message: "Direct disk write",
+        });
     }
     if lower.contains("mkfs") {
-        return Some(DangerWarning { message: "Filesystem format" });
+        return Some(DangerWarning {
+            message: "Filesystem format",
+        });
     }
     if lower.contains("> /dev/sd") || lower.contains(">/dev/sd") {
-        return Some(DangerWarning { message: "Direct device write" });
+        return Some(DangerWarning {
+            message: "Direct device write",
+        });
     }
     if lower.contains("chmod -r 777") || lower.contains("chmod 777 -r") {
-        return Some(DangerWarning { message: "Overly permissive chmod" });
+        return Some(DangerWarning {
+            message: "Overly permissive chmod",
+        });
     }
     if lower.contains(":(){ :|:& };:") {
-        return Some(DangerWarning { message: "Fork bomb" });
+        return Some(DangerWarning {
+            message: "Fork bomb",
+        });
     }
 
     None
@@ -279,7 +318,11 @@ pub fn tokenize_command(command: &str) -> Vec<CommandToken> {
         .iter()
         .enumerate()
         .map(|(i, text)| {
-            let prev = if i > 0 { Some(raw_tokens[i - 1].as_str()) } else { None };
+            let prev = if i > 0 {
+                Some(raw_tokens[i - 1].as_str())
+            } else {
+                None
+            };
             let token_type = classify_token(text, i, prev);
             CommandToken::new(text.clone(), token_type)
         })
@@ -416,7 +459,10 @@ impl std::fmt::Debug for CommandEditState {
             .field("pending_confirm", &self.pending_confirm)
             .field("skip_danger_check", &self.skip_danger_check)
             .field("context", &self.context)
-            .field("history_store", &self.history_store.as_ref().map(|_| "<HistoryStore>"))
+            .field(
+                "history_store",
+                &self.history_store.as_ref().map(|_| "<HistoryStore>"),
+            )
             .field("cwd", &self.cwd)
             .field("file_context", &self.file_context)
             .field("last_command", &self.last_command)
@@ -435,7 +481,11 @@ impl CommandEditState {
         if tokens.is_empty() {
             tokens.push(CommandToken::new(String::new(), TokenType::Command));
         }
-        let original = tokens.iter().map(|t| t.text.as_str()).collect::<Vec<_>>().join(" ");
+        let original = tokens
+            .iter()
+            .map(|t| t.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
         let edit_buffer = tokens.first().map(|t| t.text.clone()).unwrap_or_default();
         let original_tokens = tokens.clone();
         Self {
@@ -529,7 +579,10 @@ impl CommandEditState {
 
     /// Returns true if the selected token is locked.
     pub fn is_selected_locked(&self) -> bool {
-        self.tokens.get(self.selected).map(|t| t.locked).unwrap_or(false)
+        self.tokens
+            .get(self.selected)
+            .map(|t| t.locked)
+            .unwrap_or(false)
     }
 
     /// Returns the currently selected token, if any.
@@ -652,11 +705,8 @@ impl CommandEditState {
         if !self.config.enable_undo {
             return;
         }
-        self.undo_stack.push((
-            self.tokens.clone(),
-            self.edit_buffer.clone(),
-            self.selected,
-        ));
+        self.undo_stack
+            .push((self.tokens.clone(), self.edit_buffer.clone(), self.selected));
         if self.undo_stack.len() > self.config.max_undo_size {
             self.undo_stack.remove(0);
         }
@@ -687,7 +737,9 @@ impl CommandEditState {
         if self.selected >= self.tokens.len() {
             self.selected = self.tokens.len().saturating_sub(1);
         }
-        self.edit_buffer = self.tokens.get(self.selected)
+        self.edit_buffer = self
+            .tokens
+            .get(self.selected)
             .map(|t| t.text.clone())
             .unwrap_or_default();
         self.reclassify_tokens();
@@ -750,7 +802,11 @@ impl CommandEditState {
 
         let new_index = match self.suggestion_index {
             None => {
-                if direction > 0 { 0 } else { self.suggestions.len() - 1 }
+                if direction > 0 {
+                    0
+                } else {
+                    self.suggestions.len() - 1
+                }
             }
             Some(idx) => {
                 let len = self.suggestions.len();
@@ -815,7 +871,9 @@ impl CommandEditState {
 
                     // Only apply prefix filter when user has modified the text
                     // If edit_buffer matches the original token, show all suggestions
-                    let current_token_text = self.tokens.get(self.selected)
+                    let current_token_text = self
+                        .tokens
+                        .get(self.selected)
                         .map(|t| t.text.as_str())
                         .unwrap_or("");
                     let partial = if self.edit_buffer == current_token_text {
@@ -866,13 +924,19 @@ impl CommandEditState {
 
     /// Returns true if there are any changes from the original.
     pub fn is_changed(&self) -> bool {
-        let current: String = self.tokens.iter().enumerate().map(|(i, t)| {
-            if i == self.selected && !t.locked {
-                self.edit_buffer.clone()
-            } else {
-                t.text.clone()
-            }
-        }).collect::<Vec<_>>().join(" ");
+        let current: String = self
+            .tokens
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                if i == self.selected && !t.locked {
+                    self.edit_buffer.clone()
+                } else {
+                    t.text.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
         current != self.original
     }
 
@@ -880,10 +944,15 @@ impl CommandEditState {
     pub fn revert(&mut self) {
         self.tokens = self.original_tokens.clone();
         if self.tokens.is_empty() {
-            self.tokens.push(CommandToken::new(String::new(), TokenType::Command));
+            self.tokens
+                .push(CommandToken::new(String::new(), TokenType::Command));
         }
         self.selected = 0;
-        self.edit_buffer = self.tokens.first().map(|t| t.text.clone()).unwrap_or_default();
+        self.edit_buffer = self
+            .tokens
+            .first()
+            .map(|t| t.text.clone())
+            .unwrap_or_default();
         self.undo_stack.clear();
         self.suggestion_index = None;
     }
@@ -987,7 +1056,10 @@ mod tests {
         assert_eq!(state.tokens[1].text, "/path/to/test.rs");
 
         // Without intelligence, suggestions are empty (no static fallback)
-        assert!(state.suggestions.is_empty(), "Without intelligence, suggestions should be empty");
+        assert!(
+            state.suggestions.is_empty(),
+            "Without intelligence, suggestions should be empty"
+        );
     }
 
     #[test]
@@ -997,8 +1069,14 @@ mod tests {
         state.suggestions = vec!["cat".to_string(), "less".to_string(), "vim".to_string()];
 
         // Should return suggestions for display
-        assert!(state.next_suggestion().is_some(), "next_suggestion should return Some when suggestions exist");
-        assert!(state.prev_suggestion().is_some(), "prev_suggestion should return Some when suggestions exist");
+        assert!(
+            state.next_suggestion().is_some(),
+            "next_suggestion should return Some when suggestions exist"
+        );
+        assert!(
+            state.prev_suggestion().is_some(),
+            "prev_suggestion should return Some when suggestions exist"
+        );
 
         // Verify cycling works correctly
         assert_eq!(state.next_suggestion(), Some("cat"));
@@ -1017,14 +1095,22 @@ mod tests {
         state.update_suggestions();
 
         // Suggestions should be preserved, not cleared (key behavior being tested)
-        assert_eq!(state.suggestions.len(), initial_count, "Suggestions should be preserved when on locked token");
-        assert!(state.next_suggestion().is_some(), "next_suggestion should still work on locked token");
+        assert_eq!(
+            state.suggestions.len(),
+            initial_count,
+            "Suggestions should be preserved when on locked token"
+        );
+        assert!(
+            state.next_suggestion().is_some(),
+            "next_suggestion should still work on locked token"
+        );
     }
 
     #[test]
     fn test_history_browser_suggestions_cycling() {
         // Test suggestion cycling in history browser context
-        let mut state = CommandEditState::from_command("git remote add origin git@github.com:user/repo.git");
+        let mut state =
+            CommandEditState::from_command("git remote add origin git@github.com:user/repo.git");
 
         // Manually populate suggestions to test cycling mechanics
         state.suggestions = vec![
@@ -1038,15 +1124,27 @@ mod tests {
         let prev = state.prev_suggestion();
         let next = state.next_suggestion();
 
-        assert!(prev.is_some(), "prev_suggestion should return Some when suggestions exist");
-        assert!(next.is_some(), "next_suggestion should return Some when suggestions exist");
+        assert!(
+            prev.is_some(),
+            "prev_suggestion should return Some when suggestions exist"
+        );
+        assert!(
+            next.is_some(),
+            "next_suggestion should return Some when suggestions exist"
+        );
 
         // They should be different (cycling through list)
-        assert_ne!(prev, next, "prev and next should show different suggestions");
+        assert_ne!(
+            prev, next,
+            "prev and next should show different suggestions"
+        );
 
         // Test cycling updates edit_buffer
         state.cycle_suggestion(1);
-        assert!(!state.edit_buffer.is_empty(), "edit_buffer should update after cycling");
+        assert!(
+            !state.edit_buffer.is_empty(),
+            "edit_buffer should update after cycling"
+        );
     }
 
     #[test]
@@ -1061,7 +1159,10 @@ mod tests {
         state.update_suggestions();
 
         // Without intelligence, suggestions are cleared
-        assert!(state.suggestions.is_empty(), "Without intelligence, update_suggestions should clear suggestions");
+        assert!(
+            state.suggestions.is_empty(),
+            "Without intelligence, update_suggestions should clear suggestions"
+        );
     }
 
     #[test]
@@ -1079,15 +1180,29 @@ mod tests {
 
         // User cycles through suggestions to select "cat"
         state.cycle_suggestion(1); // Cycle to first suggestion
-        assert_eq!(state.edit_buffer, "cat", "Edit buffer should have 'cat' after cycling");
+        assert_eq!(
+            state.edit_buffer, "cat",
+            "Edit buffer should have 'cat' after cycling"
+        );
 
         // User presses Enter - build_command should create the full command
         let command = state.build_command();
 
         assert!(!command.is_empty(), "Command should not be empty");
-        assert!(command.starts_with("cat"), "Command should start with 'cat', got: {}", command);
-        assert!(command.contains("/path/to/test.txt"), "Command should contain the filepath, got: {}", command);
-        assert_eq!(command, "cat /path/to/test.txt", "Full command should be 'cat /path/to/test.txt'");
+        assert!(
+            command.starts_with("cat"),
+            "Command should start with 'cat', got: {}",
+            command
+        );
+        assert!(
+            command.contains("/path/to/test.txt"),
+            "Command should contain the filepath, got: {}",
+            command
+        );
+        assert_eq!(
+            command, "cat /path/to/test.txt",
+            "Full command should be 'cat /path/to/test.txt'"
+        );
     }
 
     #[test]
@@ -1191,9 +1306,18 @@ mod tests {
 
     #[test]
     fn test_split_quotes() {
-        assert_eq!(split_quotes("hello"), ("hello".to_string(), QuoteStyle::None));
-        assert_eq!(split_quotes("'hello'"), ("hello".to_string(), QuoteStyle::Single));
-        assert_eq!(split_quotes("\"hello\""), ("hello".to_string(), QuoteStyle::Double));
+        assert_eq!(
+            split_quotes("hello"),
+            ("hello".to_string(), QuoteStyle::None)
+        );
+        assert_eq!(
+            split_quotes("'hello'"),
+            ("hello".to_string(), QuoteStyle::Single)
+        );
+        assert_eq!(
+            split_quotes("\"hello\""),
+            ("hello".to_string(), QuoteStyle::Double)
+        );
     }
 
     #[test]

@@ -15,11 +15,8 @@ use rusqlite::Connection;
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
-use crate::intelligence::{
-    CommandIntelligence, Suggestion, build_context,
-    FileContext,
-};
 use crate::chrome::command_edit::CommandToken;
+use crate::intelligence::{CommandIntelligence, FileContext, Suggestion, build_context};
 
 /// Errors that can occur when interacting with the history store.
 #[derive(Debug, Error)]
@@ -164,8 +161,8 @@ impl HistoryStore {
         // Pass None for session_id to use all sessions, and None for timestamp retention
         let reedline_history = SqliteBackedHistory::with_file(
             db_path.clone(),
-            None,  // No session filtering
-            None,  // No timestamp retention filtering
+            None, // No session filtering
+            None, // No timestamp retention filtering
         )?;
 
         // Set restrictive permissions on the DB file (owner read/write only)
@@ -237,11 +234,9 @@ impl HistoryStore {
     /// does not exist, and propagates database errors.
     pub fn get_setting(&self, key: &str) -> Result<Option<String>, HistoryStoreError> {
         let conn = self.open_connection()?;
-        match conn.query_row(
-            "SELECT value FROM settings WHERE key = ?1",
-            [key],
-            |row| row.get(0),
-        ) {
+        match conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
+            row.get(0)
+        }) {
             Ok(value) => Ok(Some(value)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(HistoryStoreError::from(e)),
@@ -300,11 +295,7 @@ impl HistoryStore {
             Ok(Box::new(history))
         } else {
             // Create a new instance if already taken
-            let history = SqliteBackedHistory::with_file(
-                self.db_path.clone(),
-                None,
-                None,
-            )?;
+            let history = SqliteBackedHistory::with_file(self.db_path.clone(), None, None)?;
             Ok(Box::new(history))
         }
     }
@@ -461,7 +452,7 @@ impl HistoryStore {
                  cwd, exit_status, duration_ms,
                  1 as exec_count,
                  1.0 as frecency
-                 FROM history WHERE 1=1"
+                 FROM history WHERE 1=1",
             )
         };
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -489,7 +480,9 @@ impl HistoryStore {
         if needs_full_aggregation {
             sql.push_str(" GROUP BY command_line");
             match sort {
-                SortMode::Frequency => sql.push_str(" ORDER BY exec_count DESC, start_timestamp DESC"),
+                SortMode::Frequency => {
+                    sql.push_str(" ORDER BY exec_count DESC, start_timestamp DESC")
+                }
                 SortMode::Frecency => sql.push_str(" ORDER BY frecency DESC"),
                 SortMode::Recency => sql.push_str(" ORDER BY start_timestamp DESC"),
             }
@@ -633,8 +626,9 @@ impl HistoryStore {
     pub fn dedupe_all(&self) -> Result<(usize, usize), HistoryStoreError> {
         let sqlite_removed = self.dedupe()?;
 
-        let bash_removed = crate::history::dedupe_bash_history()
-            .map_err(|e| HistoryStoreError::Internal(format!("bash_history dedupe failed: {}", e)))?;
+        let bash_removed = crate::history::dedupe_bash_history().map_err(|e| {
+            HistoryStoreError::Internal(format!("bash_history dedupe failed: {}", e))
+        })?;
 
         Ok((sqlite_removed, bash_removed))
     }
@@ -674,9 +668,8 @@ impl HistoryStore {
         let pattern = format!("{}%", prefix);
 
         // Query commands that match the prefix
-        let mut stmt = conn.prepare(
-            "SELECT command_line FROM history WHERE command_line LIKE ?1 LIMIT 1000"
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT command_line FROM history WHERE command_line LIKE ?1 LIMIT 1000")?;
 
         let rows = stmt.query_map([&pattern], |row| {
             let cmd: String = row.get(0)?;
@@ -696,10 +689,7 @@ impl HistoryStore {
             let remainder = &row[prefix_len..];
 
             // Extract the first token (up to next space or end)
-            let next_token = remainder
-                .split_whitespace()
-                .next()
-                .map(|s| s.to_string());
+            let next_token = remainder.split_whitespace().next().map(|s| s.to_string());
 
             if let Some(token) = next_token {
                 if !token.is_empty() {
@@ -808,7 +798,11 @@ impl HistoryStore {
         )?;
 
         let id = conn.last_insert_rowid();
-        debug!(id, command_len = command.len(), "Saved command to SQLite history");
+        debug!(
+            id,
+            command_len = command.len(),
+            "Saved command to SQLite history"
+        );
 
         // Also record for intelligence learning
         self.last_command_text = Some(command.to_string());
@@ -882,21 +876,24 @@ impl HistoryStore {
         };
 
         let session = ci.current_session().cloned();
-        let context = build_context(
-            tokens, partial, cwd, file_context, session, last_command
-        );
+        let context = build_context(tokens, partial, cwd, file_context, session, last_command);
 
         ci.suggest(&context, 20)
     }
 
     /// Expands an alias if it exists.
     pub fn expand_alias(&self, text: &str) -> Option<String> {
-        self.intelligence.as_ref().and_then(|ci| ci.expand_alias(text))
+        self.intelligence
+            .as_ref()
+            .and_then(|ci| ci.expand_alias(text))
     }
 
     /// Returns whether intelligence is available and enabled.
     pub fn has_intelligence(&self) -> bool {
-        self.intelligence.as_ref().map(|ci| ci.is_enabled()).unwrap_or(false)
+        self.intelligence
+            .as_ref()
+            .map(|ci| ci.is_enabled())
+            .unwrap_or(false)
     }
 
     /// Enables or disables intelligence.
@@ -920,7 +917,9 @@ impl HistoryStore {
     /// Returns an error if intelligence is not available.
     pub fn reset_intelligence(&mut self) -> Result<(), HistoryStoreError> {
         if let Some(ref mut ci) = self.intelligence {
-            ci.reset().map_err(|e| HistoryStoreError::internal(format!("Intelligence reset failed: {}", e)))
+            ci.reset().map_err(|e| {
+                HistoryStoreError::internal(format!("Intelligence reset failed: {}", e))
+            })
         } else {
             Err(HistoryStoreError::internal("Intelligence not available"))
         }

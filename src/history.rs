@@ -171,7 +171,10 @@ pub fn append_to_bash_history(command: &str) -> anyhow::Result<()> {
     writeln!(file, "{}", command)
         .with_context(|| format!("Failed to write to {}", history_path.display()))?;
 
-    debug!(command_len = command.len(), "Appended command to bash_history");
+    debug!(
+        command_len = command.len(),
+        "Appended command to bash_history"
+    );
 
     Ok(())
 }
@@ -196,7 +199,7 @@ fn get_last_history_line(path: &PathBuf) -> anyhow::Result<Option<String>> {
     if file_len < 8192 {
         let reader = BufReader::new(file);
         let mut last_line = None;
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(Result::ok) {
             if !line.trim().is_empty() && !line.starts_with('#') {
                 last_line = Some(line);
             }
@@ -218,7 +221,7 @@ fn get_last_history_line(path: &PathBuf) -> anyhow::Result<Option<String>> {
         lines.next(); // Skip potentially partial line
     }
 
-    for line in lines.flatten() {
+    for line in lines.map_while(Result::ok) {
         if !line.trim().is_empty() && !line.starts_with('#') {
             last_line = Some(line);
         }
@@ -250,7 +253,7 @@ pub fn dedupe_bash_history() -> anyhow::Result<usize> {
     let mut deduped: Vec<String> = Vec::new();
     let mut removed = 0;
 
-    for line in reader.lines().flatten() {
+    for line in reader.lines().map_while(Result::ok) {
         // Skip empty lines
         if line.trim().is_empty() {
             continue;
@@ -276,9 +279,7 @@ pub fn dedupe_bash_history() -> anyhow::Result<usize> {
         // Write to a temporary file first for atomic replacement.
         // Use NamedTempFile for RAII cleanup - if any operation fails before persist(),
         // the temp file is automatically removed when dropped.
-        let parent_dir = history_path
-            .parent()
-            .unwrap_or(std::path::Path::new("."));
+        let parent_dir = history_path.parent().unwrap_or(std::path::Path::new("."));
         let mut temp_file = tempfile::NamedTempFile::new_in(parent_dir)
             .with_context(|| format!("Failed to create temp file in {}", parent_dir.display()))?;
 
@@ -305,9 +306,9 @@ pub fn dedupe_bash_history() -> anyhow::Result<usize> {
 
         // Atomically persist temp file to history file.
         // This consumes the NamedTempFile, preventing automatic deletion on success.
-        temp_file
-            .persist(&history_path)
-            .with_context(|| format!("Failed to persist temp file to {}", history_path.display()))?;
+        temp_file.persist(&history_path).with_context(|| {
+            format!("Failed to persist temp file to {}", history_path.display())
+        })?;
 
         info!(removed, "Deduplicated bash_history");
     }
@@ -320,6 +321,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn test_max_history_lines_constant() {
         // Verify the constant is reasonable
         assert!(MAX_HISTORY_LINES >= 1000);

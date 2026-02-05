@@ -286,9 +286,7 @@ mod tests {
     #[test]
     fn test_sequence_in_middle_of_data() {
         let mut detector = AltScreenDetector::new();
-        let events: Vec<_> = detector
-            .feed(b"hello\x1b[?1049hworld")
-            .collect();
+        let events: Vec<_> = detector.feed(b"hello\x1b[?1049hworld").collect();
         assert_eq!(events, vec![AltScreenEvent::Enter]);
     }
 

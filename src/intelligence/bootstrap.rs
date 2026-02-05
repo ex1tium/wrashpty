@@ -61,106 +61,252 @@ fn seed_command_knowledge(conn: &Connection) -> Result<(), CIError> {
 /// Seeds all command knowledge.
 fn seed_all_commands(conn: &Connection, timestamp: i64) -> Result<(), CIError> {
     // Git
-    seed_command_with_subcommands(conn, "git", &[
-        "add", "commit", "push", "pull", "fetch", "merge", "rebase",
-        "branch", "checkout", "switch", "status", "log", "diff",
-        "remote", "stash", "reset", "tag", "clone", "init", "cherry-pick",
-        "bisect", "blame", "show", "restore", "worktree",
-    ], timestamp)?;
+    seed_command_with_subcommands(
+        conn,
+        "git",
+        &[
+            "add",
+            "commit",
+            "push",
+            "pull",
+            "fetch",
+            "merge",
+            "rebase",
+            "branch",
+            "checkout",
+            "switch",
+            "status",
+            "log",
+            "diff",
+            "remote",
+            "stash",
+            "reset",
+            "tag",
+            "clone",
+            "init",
+            "cherry-pick",
+            "bisect",
+            "blame",
+            "show",
+            "restore",
+            "worktree",
+        ],
+        timestamp,
+    )?;
 
     // Git nested commands
-    seed_nested_commands(conn, "git", "remote", &[
-        "add", "remove", "-v", "show", "rename", "prune", "set-url",
-    ], timestamp)?;
-    seed_nested_commands(conn, "git", "stash", &[
-        "list", "show", "pop", "apply", "drop", "clear", "push",
-    ], timestamp)?;
-    seed_nested_commands(conn, "git", "worktree", &[
-        "add", "list", "remove", "prune",
-    ], timestamp)?;
-    seed_nested_commands(conn, "git", "bisect", &[
-        "start", "good", "bad", "reset", "skip",
-    ], timestamp)?;
+    seed_nested_commands(
+        conn,
+        "git",
+        "remote",
+        &["add", "remove", "-v", "show", "rename", "prune", "set-url"],
+        timestamp,
+    )?;
+    seed_nested_commands(
+        conn,
+        "git",
+        "stash",
+        &["list", "show", "pop", "apply", "drop", "clear", "push"],
+        timestamp,
+    )?;
+    seed_nested_commands(
+        conn,
+        "git",
+        "worktree",
+        &["add", "list", "remove", "prune"],
+        timestamp,
+    )?;
+    seed_nested_commands(
+        conn,
+        "git",
+        "bisect",
+        &["start", "good", "bad", "reset", "skip"],
+        timestamp,
+    )?;
 
     // Docker
-    seed_command_with_subcommands(conn, "docker", &[
-        "run", "build", "pull", "push", "ps", "images", "exec",
-        "logs", "stop", "start", "restart", "rm", "rmi", "compose",
-        "network", "volume", "system", "inspect", "tag", "save", "load",
-    ], timestamp)?;
+    seed_command_with_subcommands(
+        conn,
+        "docker",
+        &[
+            "run", "build", "pull", "push", "ps", "images", "exec", "logs", "stop", "start",
+            "restart", "rm", "rmi", "compose", "network", "volume", "system", "inspect", "tag",
+            "save", "load",
+        ],
+        timestamp,
+    )?;
 
     // Docker nested commands
-    seed_nested_commands(conn, "docker", "compose", &[
-        "up", "down", "build", "logs", "ps", "exec", "restart", "pull",
-    ], timestamp)?;
-    seed_nested_commands(conn, "docker", "system", &[
-        "prune", "df", "info", "events",
-    ], timestamp)?;
-    seed_nested_commands(conn, "docker", "network", &[
-        "create", "ls", "rm", "inspect", "connect", "disconnect",
-    ], timestamp)?;
-    seed_nested_commands(conn, "docker", "volume", &[
-        "create", "ls", "rm", "inspect", "prune",
-    ], timestamp)?;
+    seed_nested_commands(
+        conn,
+        "docker",
+        "compose",
+        &[
+            "up", "down", "build", "logs", "ps", "exec", "restart", "pull",
+        ],
+        timestamp,
+    )?;
+    seed_nested_commands(
+        conn,
+        "docker",
+        "system",
+        &["prune", "df", "info", "events"],
+        timestamp,
+    )?;
+    seed_nested_commands(
+        conn,
+        "docker",
+        "network",
+        &["create", "ls", "rm", "inspect", "connect", "disconnect"],
+        timestamp,
+    )?;
+    seed_nested_commands(
+        conn,
+        "docker",
+        "volume",
+        &["create", "ls", "rm", "inspect", "prune"],
+        timestamp,
+    )?;
 
     // Cargo
-    seed_command_with_subcommands(conn, "cargo", &[
-        "build", "run", "test", "check", "clippy", "fmt", "doc",
-        "clean", "update", "add", "remove", "publish", "bench",
-        "tree", "audit", "outdated", "fix", "install", "uninstall",
-    ], timestamp)?;
+    seed_command_with_subcommands(
+        conn,
+        "cargo",
+        &[
+            "build",
+            "run",
+            "test",
+            "check",
+            "clippy",
+            "fmt",
+            "doc",
+            "clean",
+            "update",
+            "add",
+            "remove",
+            "publish",
+            "bench",
+            "tree",
+            "audit",
+            "outdated",
+            "fix",
+            "install",
+            "uninstall",
+        ],
+        timestamp,
+    )?;
 
     // npm
-    seed_command_with_subcommands(conn, "npm", &[
-        "install", "run", "test", "build", "start", "dev", "add",
-        "remove", "update", "audit", "publish", "init", "ci",
-        "link", "unlink", "exec", "outdated",
-    ], timestamp)?;
+    seed_command_with_subcommands(
+        conn,
+        "npm",
+        &[
+            "install", "run", "test", "build", "start", "dev", "add", "remove", "update", "audit",
+            "publish", "init", "ci", "link", "unlink", "exec", "outdated",
+        ],
+        timestamp,
+    )?;
 
     // yarn
-    seed_command_with_subcommands(conn, "yarn", &[
-        "install", "run", "test", "build", "start", "dev", "add",
-        "remove", "upgrade", "audit", "publish", "init", "link",
-    ], timestamp)?;
+    seed_command_with_subcommands(
+        conn,
+        "yarn",
+        &[
+            "install", "run", "test", "build", "start", "dev", "add", "remove", "upgrade", "audit",
+            "publish", "init", "link",
+        ],
+        timestamp,
+    )?;
 
     // pnpm
-    seed_command_with_subcommands(conn, "pnpm", &[
-        "install", "run", "test", "build", "start", "dev", "add",
-        "remove", "update", "audit", "publish", "init", "exec",
-    ], timestamp)?;
+    seed_command_with_subcommands(
+        conn,
+        "pnpm",
+        &[
+            "install", "run", "test", "build", "start", "dev", "add", "remove", "update", "audit",
+            "publish", "init", "exec",
+        ],
+        timestamp,
+    )?;
 
     // kubectl
-    seed_command_with_subcommands(conn, "kubectl", &[
-        "get", "describe", "logs", "exec", "apply", "delete",
-        "create", "edit", "scale", "rollout", "port-forward",
-        "config", "cluster-info", "top", "patch", "label",
-    ], timestamp)?;
+    seed_command_with_subcommands(
+        conn,
+        "kubectl",
+        &[
+            "get",
+            "describe",
+            "logs",
+            "exec",
+            "apply",
+            "delete",
+            "create",
+            "edit",
+            "scale",
+            "rollout",
+            "port-forward",
+            "config",
+            "cluster-info",
+            "top",
+            "patch",
+            "label",
+        ],
+        timestamp,
+    )?;
 
     // kubectl nested commands
-    seed_nested_commands(conn, "kubectl", "rollout", &[
-        "status", "history", "undo", "restart", "pause", "resume",
-    ], timestamp)?;
-    seed_nested_commands(conn, "kubectl", "config", &[
-        "use-context", "get-contexts", "current-context", "view", "set-context",
-    ], timestamp)?;
+    seed_nested_commands(
+        conn,
+        "kubectl",
+        "rollout",
+        &["status", "history", "undo", "restart", "pause", "resume"],
+        timestamp,
+    )?;
+    seed_nested_commands(
+        conn,
+        "kubectl",
+        "config",
+        &[
+            "use-context",
+            "get-contexts",
+            "current-context",
+            "view",
+            "set-context",
+        ],
+        timestamp,
+    )?;
 
     // systemctl
-    seed_command_with_subcommands(conn, "systemctl", &[
-        "start", "stop", "restart", "status", "enable", "disable",
-        "reload", "daemon-reload", "is-active", "is-enabled",
-        "list-units", "list-unit-files", "mask", "unmask",
-    ], timestamp)?;
+    seed_command_with_subcommands(
+        conn,
+        "systemctl",
+        &[
+            "start",
+            "stop",
+            "restart",
+            "status",
+            "enable",
+            "disable",
+            "reload",
+            "daemon-reload",
+            "is-active",
+            "is-enabled",
+            "list-units",
+            "list-unit-files",
+            "mask",
+            "unmask",
+        ],
+        timestamp,
+    )?;
 
     // Simple base commands (no subcommands)
     let simple_commands = [
-        "ls", "cd", "cat", "vim", "nano", "grep", "find", "make",
-        "python", "python3", "node", "go", "curl", "wget", "ssh",
-        "scp", "rsync", "tar", "zip", "unzip", "chmod", "chown",
-        "mkdir", "rm", "cp", "mv", "ln", "touch", "head", "tail",
-        "less", "more", "diff", "sort", "uniq", "wc", "awk", "sed",
-        "xargs", "tee", "sudo", "su", "htop", "top", "ps", "kill",
-        "pkill", "man", "which", "whereis", "type", "echo", "printf",
-        "env", "export", "alias", "history",
+        "ls", "cd", "cat", "vim", "nano", "grep", "find", "make", "python", "python3", "node",
+        "go", "curl", "wget", "ssh", "scp", "rsync", "tar", "zip", "unzip", "chmod", "chown",
+        "mkdir", "rm", "cp", "mv", "ln", "touch", "head", "tail", "less", "more", "diff", "sort",
+        "uniq", "wc", "awk", "sed", "xargs", "tee", "sudo", "su", "htop", "top", "ps", "kill",
+        "pkill", "man", "which", "whereis", "type", "echo", "printf", "env", "export", "alias",
+        "history",
     ];
 
     for cmd in &simple_commands {
@@ -255,11 +401,9 @@ fn get_or_create_token(
 ) -> Result<i64, CIError> {
     // Try to get existing
     let existing: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM ci_tokens WHERE text = ?1",
-            [text],
-            |row| row.get(0),
-        )
+        .query_row("SELECT id FROM ci_tokens WHERE text = ?1", [text], |row| {
+            row.get(0)
+        })
         .ok();
 
     if let Some(id) = existing {
@@ -295,29 +439,33 @@ mod tests {
         bootstrap_if_empty(&conn).unwrap();
 
         // Verify hierarchy was populated
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM ci_command_hierarchy",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM ci_command_hierarchy", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
         assert!(count > 0);
 
         // Verify git exists
-        let git_exists: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM ci_tokens WHERE text = 'git')",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let git_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM ci_tokens WHERE text = 'git')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert!(git_exists);
 
         // Verify git has subcommands
-        let git_subcmds: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM ci_command_hierarchy h
+        let git_subcmds: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM ci_command_hierarchy h
              JOIN ci_tokens t ON t.id = h.parent_token_id
              WHERE t.text = 'git' AND h.position = 1",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert!(git_subcmds > 0);
     }
 
@@ -328,22 +476,22 @@ mod tests {
         // Run bootstrap first time
         bootstrap_if_empty(&conn).unwrap();
 
-        let count_after_first: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM ci_command_hierarchy",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let count_after_first: i64 = conn
+            .query_row("SELECT COUNT(*) FROM ci_command_hierarchy", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
         assert!(count_after_first > 0);
 
         // Run bootstrap again - should skip
         bootstrap_if_empty(&conn).unwrap();
 
         // Count should be the same (no duplicate entries)
-        let count_after_second: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM ci_command_hierarchy",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let count_after_second: i64 = conn
+            .query_row("SELECT COUNT(*) FROM ci_command_hierarchy", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
         assert_eq!(count_after_first, count_after_second);
     }
 
@@ -367,19 +515,21 @@ mod tests {
         bootstrap_if_empty(&conn).unwrap();
 
         // Should have original entry plus bootstrapped entries
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM ci_command_hierarchy",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM ci_command_hierarchy", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
         assert!(count > 1, "Should have bootstrap data plus original entry");
 
         // Original entry should still exist with its frequency
-        let original_freq: i64 = conn.query_row(
-            "SELECT frequency FROM ci_command_hierarchy WHERE token_id = 1",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let original_freq: i64 = conn
+            .query_row(
+                "SELECT frequency FROM ci_command_hierarchy WHERE token_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(original_freq, 100, "Original frequency should be preserved");
     }
 
@@ -389,21 +539,25 @@ mod tests {
         bootstrap_if_empty(&conn).unwrap();
 
         // Verify git remote add exists
-        let remote_id: i64 = conn.query_row(
-            "SELECT id FROM ci_tokens WHERE text = 'remote'",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let remote_id: i64 = conn
+            .query_row(
+                "SELECT id FROM ci_tokens WHERE text = 'remote'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
 
-        let add_after_remote: bool = conn.query_row(
-            "SELECT EXISTS(
+        let add_after_remote: bool = conn
+            .query_row(
+                "SELECT EXISTS(
                 SELECT 1 FROM ci_command_hierarchy h
                 JOIN ci_tokens t ON t.id = h.token_id
                 WHERE h.parent_token_id = ?1 AND t.text = 'add'
             )",
-            [remote_id],
-            |row| row.get(0),
-        ).unwrap();
+                [remote_id],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert!(add_after_remote);
     }
 }

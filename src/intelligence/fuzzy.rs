@@ -11,7 +11,11 @@ use super::types::FuzzyMatch;
 /// Performs a fuzzy search for commands.
 ///
 /// Uses FTS5 full-text search with BM25 ranking.
-pub fn fuzzy_search(conn: &Connection, query: &str, limit: usize) -> Result<Vec<FuzzyMatch>, CIError> {
+pub fn fuzzy_search(
+    conn: &Connection,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<FuzzyMatch>, CIError> {
     let query = query.trim();
     if query.is_empty() {
         return Ok(Vec::new());
@@ -26,7 +30,7 @@ pub fn fuzzy_search(conn: &Connection, query: &str, limit: usize) -> Result<Vec<
          FROM ci_commands_fts
          WHERE ci_commands_fts MATCH ?1
          ORDER BY score
-         LIMIT ?2"
+         LIMIT ?2",
     )?;
 
     let rows = stmt.query_map(rusqlite::params![fts_query, limit], |row| {
@@ -55,9 +59,7 @@ fn build_fts_query(query: &str) -> String {
         .split_whitespace()
         .map(|term| {
             // Escape special FTS5 characters
-            let escaped = term
-                .replace('"', "\"\"")
-                .replace(['*', '(', ')'], "");
+            let escaped = term.replace('"', "\"\"").replace(['*', '(', ')'], "");
 
             // Add prefix matching for last term
             if escaped.len() >= 2 {
@@ -97,7 +99,7 @@ pub fn search_similar(conn: &Connection, text: &str, limit: usize) -> Result<Vec
         "SELECT command_line FROM ci_commands
          WHERE command_line LIKE ?1 ESCAPE '\\'
          ORDER BY timestamp DESC
-         LIMIT ?2"
+         LIMIT ?2",
     )?;
 
     let rows = stmt.query_map(rusqlite::params![pattern, limit], |row| row.get(0))?;
@@ -111,7 +113,11 @@ pub fn search_similar(conn: &Connection, text: &str, limit: usize) -> Result<Vec
 }
 
 /// Searches for a specific base command with typo tolerance.
-pub fn search_base_command(conn: &Connection, typo: &str, limit: usize) -> Result<Vec<(String, f64)>, CIError> {
+pub fn search_base_command(
+    conn: &Connection,
+    typo: &str,
+    limit: usize,
+) -> Result<Vec<(String, f64)>, CIError> {
     let typo = typo.trim().to_lowercase();
     if typo.is_empty() {
         return Ok(Vec::new());
@@ -126,7 +132,7 @@ pub fn search_base_command(conn: &Connection, typo: &str, limit: usize) -> Resul
          WHERE ci_commands_fts MATCH ?1
          GROUP BY base_command
          ORDER BY score
-         LIMIT ?2"
+         LIMIT ?2",
     )?;
 
     let rows = stmt.query_map(rusqlite::params![fts_query, limit], |row| {
@@ -157,9 +163,8 @@ fn search_by_edit_distance(
     limit: usize,
 ) -> Result<Vec<(String, f64)>, CIError> {
     // Get all unique base commands
-    let mut stmt = conn.prepare(
-        "SELECT DISTINCT text FROM ci_tokens WHERE token_type = 'Command' LIMIT 1000"
-    )?;
+    let mut stmt = conn
+        .prepare("SELECT DISTINCT text FROM ci_tokens WHERE token_type = 'Command' LIMIT 1000")?;
 
     let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
 
@@ -199,16 +204,24 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
 
     let mut dp = vec![vec![0usize; n + 1]; m + 1];
 
+    // Initialize base cases: dp[i][0] = i (cost of deleting i chars)
+    // Using index directly as value is intentional for Levenshtein distance
+    #[allow(clippy::needless_range_loop)]
     for i in 0..=m {
         dp[i][0] = i;
     }
+    #[allow(clippy::needless_range_loop)]
     for j in 0..=n {
         dp[0][j] = j;
     }
 
     for i in 1..=m {
         for j in 1..=n {
-            let cost = if a_chars[i - 1] == b_chars[j - 1] { 0 } else { 1 };
+            let cost = if a_chars[i - 1] == b_chars[j - 1] {
+                0
+            } else {
+                1
+            };
             dp[i][j] = (dp[i - 1][j] + 1)
                 .min(dp[i][j - 1] + 1)
                 .min(dp[i - 1][j - 1] + cost);
@@ -263,7 +276,8 @@ mod tests {
             "INSERT INTO ci_tokens (id, text, token_type, first_seen, last_seen)
              VALUES (1, 'git', 'Command', ?1, ?1)",
             [now],
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO ci_commands (command_line, command_hash, token_ids, token_count, base_command_id, timestamp)
              VALUES ('git commit -m test', 'hash1', '[1]', 4, 1, ?1)",

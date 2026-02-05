@@ -172,12 +172,7 @@ impl MiniInput {
     ///
     /// Format: "Label: buffer|" with cursor positioned correctly.
     /// Uses simple ANSI styling without theme.
-    pub fn render<W: Write>(
-        &self,
-        out: &mut W,
-        cols: u16,
-        status: Option<&str>,
-    ) -> io::Result<()> {
+    pub fn render<W: Write>(&self, out: &mut W, cols: u16, status: Option<&str>) -> io::Result<()> {
         self.render_styled(out, cols, status, None, None, None)
     }
 
@@ -308,8 +303,14 @@ mod tests {
     fn test_typing() {
         let mut input = MiniInput::new("Search");
 
-        assert_eq!(input.handle_input(key(KeyCode::Char('h'))), MiniInputResult::Changed);
-        assert_eq!(input.handle_input(key(KeyCode::Char('i'))), MiniInputResult::Changed);
+        assert_eq!(
+            input.handle_input(key(KeyCode::Char('h'))),
+            MiniInputResult::Changed
+        );
+        assert_eq!(
+            input.handle_input(key(KeyCode::Char('i'))),
+            MiniInputResult::Changed
+        );
         assert_eq!(input.buffer, "hi");
         assert_eq!(input.cursor, 2);
     }
@@ -320,7 +321,10 @@ mod tests {
         input.buffer = "hello".to_string();
         input.cursor = 5;
 
-        assert_eq!(input.handle_input(key(KeyCode::Backspace)), MiniInputResult::Changed);
+        assert_eq!(
+            input.handle_input(key(KeyCode::Backspace)),
+            MiniInputResult::Changed
+        );
         assert_eq!(input.buffer, "hell");
         assert_eq!(input.cursor, 4);
     }
@@ -345,8 +349,14 @@ mod tests {
     fn test_submit_cancel() {
         let mut input = MiniInput::new("Search");
 
-        assert_eq!(input.handle_input(key(KeyCode::Enter)), MiniInputResult::Submit);
-        assert_eq!(input.handle_input(key(KeyCode::Esc)), MiniInputResult::Cancel);
+        assert_eq!(
+            input.handle_input(key(KeyCode::Enter)),
+            MiniInputResult::Submit
+        );
+        assert_eq!(
+            input.handle_input(key(KeyCode::Esc)),
+            MiniInputResult::Cancel
+        );
         assert_eq!(input.handle_input(ctrl_key('c')), MiniInputResult::Cancel);
     }
 

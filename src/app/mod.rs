@@ -34,9 +34,9 @@ use std::io::Write;
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, Receiver, SyncSender};
-use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -64,7 +64,7 @@ mod drain;
 mod scroll_view;
 mod transitions;
 
-use drain::{DrainGuard, DrainResult, DRAIN_CHANNEL_CAPACITY, pty_drain_loop};
+use drain::{DRAIN_CHANNEL_CAPACITY, DrainGuard, DrainResult, pty_drain_loop};
 
 /// Extracts the actual exit code from an ExitStatus.
 ///
@@ -88,7 +88,6 @@ const INJECTION_TIMEOUT: Duration = Duration::from_millis(500);
 /// This allows the loop to wake periodically to check `injection_start` and
 /// trigger the 500ms timeout path even when no PTY data arrives.
 const INJECTION_POLL_TIMEOUT: Duration = Duration::from_millis(50);
-
 
 /// RAII guard for cursor visibility.
 ///
@@ -119,7 +118,6 @@ impl Drop for CursorGuard {
         let _ = out.flush();
     }
 }
-
 
 /// Main application struct coordinating all Wrashpty components.
 ///
@@ -262,7 +260,7 @@ impl App {
 
         // Create the history store with SQLite backend
         let history_store = Arc::new(Mutex::new(
-            HistoryStore::new(session_token).context("Failed to create history store")?
+            HistoryStore::new(session_token).context("Failed to create history store")?,
         ));
 
         // Create reedline history from the store
@@ -386,7 +384,10 @@ impl App {
     /// We process ALL markers in the batch, handling state transitions correctly.
     fn run_initializing(&mut self) -> Result<()> {
         match self.pump.run_once()? {
-            PumpResult::MarkerDetected { markers, captured_bytes } => {
+            PumpResult::MarkerDetected {
+                markers,
+                captured_bytes,
+            } => {
                 // Feed captured bytes to scrollback (during init, captures shell startup)
                 self.capture_for_scrollback(&captured_bytes);
                 // Process ALL markers in the batch, updating state as we go.
@@ -413,10 +414,15 @@ impl App {
                             match marker {
                                 MarkerEvent::Precmd { exit_code } => {
                                     self.last_exit_code = exit_code;
-                                    debug!(exit_code, "Received PRECMD in Edit (batched during init)");
+                                    debug!(
+                                        exit_code,
+                                        "Received PRECMD in Edit (batched during init)"
+                                    );
                                 }
                                 MarkerEvent::Prompt => {
-                                    debug!("Received duplicate PROMPT in Edit (batched during init)");
+                                    debug!(
+                                        "Received duplicate PROMPT in Edit (batched during init)"
+                                    );
                                 }
                                 MarkerEvent::Preexec => {
                                     warn!("Unexpected PREEXEC in Edit (batched during init)");
@@ -464,15 +470,18 @@ impl App {
     fn run_passthrough(&mut self) -> Result<()> {
         // Enable stdin interception when scrollback is available and not in alt-screen
         // This allows filtering scroll keys (PgUp/PgDown) before forwarding to PTY
-        let should_intercept = self.scrollback_config.enabled
-            && !self.alt_screen_detector.is_in_alt_screen();
+        let should_intercept =
+            self.scrollback_config.enabled && !self.alt_screen_detector.is_in_alt_screen();
 
         if should_intercept != self.pump.is_stdin_intercepted() {
             self.pump.set_stdin_intercept(should_intercept);
         }
 
         match self.pump.run_once()? {
-            PumpResult::MarkerDetected { markers, captured_bytes } => {
+            PumpResult::MarkerDetected {
+                markers,
+                captured_bytes,
+            } => {
                 // Feed captured bytes to scrollback
                 self.capture_for_scrollback(&captured_bytes);
 
@@ -654,7 +663,10 @@ impl App {
             if let Ok((cols, _rows)) = TerminalGuard::get_size() {
                 let timestamp = chrono::Local::now().format("%H:%M").to_string();
                 let state = self.topbar_state(&timestamp);
-                if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &state) {
+                if let Err(e) = self
+                    .chrome
+                    .render_context_bar_with_notifications(cols, &state)
+                {
                     warn!("Failed to redraw context bar before prompt: {}", e);
                 }
             }
@@ -1071,7 +1083,9 @@ impl App {
     /// Returns an error if terminal operations fail.
     fn run_panel_mode<P: Panel>(&mut self, panel: &mut P) -> Result<PanelResult> {
         // Ensure raw mode is active - reedline may have toggled terminal modes
-        self.terminal_guard.ensure_raw_mode().context("Failed to ensure raw mode for panel")?;
+        self.terminal_guard
+            .ensure_raw_mode()
+            .context("Failed to ensure raw mode for panel")?;
 
         let (cols, rows) =
             TerminalGuard::get_size().context("Failed to get terminal size for panel")?;
@@ -1087,7 +1101,10 @@ impl App {
         // Clamp to ensure at least 1 row remains for the PTY
         let preferred = panel.preferred_height();
         let max_panel_height = rows.saturating_sub(1); // Leave at least 1 row for PTY
-        let panel_height = preferred.min(max_panel_height / 2).max(5).min(max_panel_height);
+        let panel_height = preferred
+            .min(max_panel_height / 2)
+            .max(5)
+            .min(max_panel_height);
 
         // Calculate effective rows and verify it's valid
         let effective_rows = rows.saturating_sub(panel_height);
@@ -1096,7 +1113,10 @@ impl App {
             return Ok(PanelResult::Dismiss);
         }
 
-        debug!(cols, rows, panel_height, effective_rows, preferred, "Entering panel mode");
+        debug!(
+            cols,
+            rows, panel_height, effective_rows, preferred, "Entering panel mode"
+        );
 
         // Expand panel area
         self.chrome
@@ -1181,8 +1201,6 @@ impl App {
             }
             out.flush()?;
         }
-
-        
 
         // Note: We don't disable raw mode here as wrashpty needs it for PTY handling
         // The TerminalGuard manages the overall raw mode state
@@ -1355,8 +1373,8 @@ impl App {
 
     /// Restores terminal state after panel closes without executing a command.
     fn restore_after_panel(&mut self) -> Result<()> {
-        let (cols, rows) = TerminalGuard::get_size()
-            .context("Failed to get terminal size after panel")?;
+        let (cols, rows) =
+            TerminalGuard::get_size().context("Failed to get terminal size after panel")?;
 
         // Re-establish scroll region for chrome
         if self.chrome.is_active() {
@@ -1367,7 +1385,10 @@ impl App {
         let timestamp = chrono::Local::now().format("%H:%M").to_string();
         let state = self.topbar_state(&timestamp);
 
-        if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &state) {
+        if let Err(e) = self
+            .chrome
+            .render_context_bar_with_notifications(cols, &state)
+        {
             warn!("Failed to redraw context bar after panel: {}", e);
         }
 
@@ -1447,7 +1468,10 @@ impl App {
             .pump
             .run_once_with_timeout(Some(INJECTION_POLL_TIMEOUT))?
         {
-            PumpResult::MarkerDetected { markers, captured_bytes } => {
+            PumpResult::MarkerDetected {
+                markers,
+                captured_bytes,
+            } => {
                 // Feed captured bytes to scrollback
                 self.capture_for_scrollback(&captured_bytes);
                 // Process ALL markers in the batch, updating state as we go.
@@ -1487,7 +1511,9 @@ impl App {
                                     debug!(exit_code, "Received PRECMD in Passthrough (batched)");
                                 }
                                 MarkerEvent::Prompt => {
-                                    debug!("Received PROMPT in Passthrough (batched) - transitioning to Edit");
+                                    debug!(
+                                        "Received PROMPT in Passthrough (batched) - transitioning to Edit"
+                                    );
                                     self.transition_to_edit();
                                     // We're now in Edit mode, done with this batch
                                     return Ok(());
@@ -1570,8 +1596,6 @@ impl App {
     // Scrollback capture and viewing methods are in scroll_view.rs
 }
 
-
-
 impl Drop for App {
     fn drop(&mut self) {
         info!("App cleanup");
@@ -1590,7 +1614,6 @@ impl Drop for App {
         // Terminal guard will restore terminal state via its Drop
     }
 }
-
 
 #[cfg(test)]
 mod tests;
