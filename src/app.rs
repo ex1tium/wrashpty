@@ -1880,17 +1880,20 @@ impl App {
                 ((offset * 100) / max_offset).min(100) as u8
             };
 
-            // Calculate first visible line (1-indexed from oldest)
-            let first_visible_line = total
-                .saturating_sub(offset)
-                .saturating_sub(viewport)
-                .saturating_add(1)
-                .max(1);
+            // Calculate current line - the last visible line at bottom of viewport
+            // At offset=0 (bottom), current_line = total (you're at the latest content)
+            // As you scroll up, current_line decreases
+            // At max_offset (top, where BEGIN shows), display line 1 for better UX
+            let current_line = if offset >= max_offset && total > 0 {
+                1 // At the very top (BEGIN visible), show line 1
+            } else {
+                total.saturating_sub(offset).max(1)
+            };
 
             Some(ScrollInfo {
                 percentage,
                 total_lines: total,
-                first_visible_line,
+                current_line,
             })
         } else {
             None
