@@ -1098,34 +1098,11 @@ impl App {
                     "open_panel" => {
                         self.open_panel()?;
                     }
-                    "scroll_up" => {
+                    "scroll_up" | "scroll_down" | "scroll_line_up" | "scroll_line_down" => {
+                        // Enter scroll view at the bottom (offset 0) - user can scroll from there
                         if self.can_scroll() {
-                            let lines = self.viewport_height();
-                            self.scroll_up(lines);
+                            self.scroll_state = crate::types::ScrollState::scrolled_at(0);
                             self.run_scroll_view()?;
-                        }
-                    }
-                    "scroll_down" => {
-                        if self.scroll_state.is_scrolled() {
-                            let lines = self.viewport_height();
-                            self.scroll_down(lines);
-                            if self.scroll_state.is_scrolled() {
-                                self.run_scroll_view()?;
-                            }
-                        }
-                    }
-                    "scroll_line_up" => {
-                        if self.can_scroll() {
-                            self.scroll_up(1);
-                            self.run_scroll_view()?;
-                        }
-                    }
-                    "scroll_line_down" => {
-                        if self.scroll_state.is_scrolled() {
-                            self.scroll_down(1);
-                            if self.scroll_state.is_scrolled() {
-                                self.run_scroll_view()?;
-                            }
                         }
                     }
                     _ => {
@@ -1828,16 +1805,21 @@ impl App {
 
         let current = self.scroll_state.offset();
         let new_offset = (current + lines).min(max_offset);
-        self.scroll_state = crate::types::ScrollState::with_offset(new_offset);
+        // Use scrolled_at to stay in scroll mode
+        self.scroll_state = crate::types::ScrollState::scrolled_at(new_offset);
 
         debug!(from = current, to = new_offset, "Scrolled up");
     }
 
     /// Scrolls the view down by the specified number of lines.
+    ///
+    /// Stays in scroll mode even at offset=0. Use `scroll_to_bottom()` to
+    /// exit scroll mode and return to live view.
     fn scroll_down(&mut self, lines: usize) {
         let current = self.scroll_state.offset();
         let new_offset = current.saturating_sub(lines);
-        self.scroll_state = crate::types::ScrollState::with_offset(new_offset);
+        // Use scrolled_at to stay in scroll mode even at offset=0
+        self.scroll_state = crate::types::ScrollState::scrolled_at(new_offset);
 
         debug!(from = current, to = new_offset, "Scrolled down");
     }
@@ -1852,7 +1834,8 @@ impl App {
             self.scrollback_buffer.len(),
             self.viewport_height(),
         );
-        self.scroll_state = crate::types::ScrollState::with_offset(max_offset);
+        // Use scrolled_at to stay in scroll mode
+        self.scroll_state = crate::types::ScrollState::scrolled_at(max_offset);
 
         debug!(offset = max_offset, "Scrolled to top");
     }
@@ -1976,7 +1959,8 @@ impl App {
                         ScrollAction::PageDown => {
                             if self.scroll_state.is_scrolled() {
                                 self.scroll_down(self.viewport_height());
-                                needs_render = self.scroll_state.is_scrolled();
+                                // Always render - we stay at offset=0 instead of auto-exiting
+                                needs_render = true;
                             } else {
                                 // At bottom - don't consume, forward to PTY
                                 // But we've already consumed it from remaining...
@@ -1992,7 +1976,8 @@ impl App {
                         ScrollAction::LineDown => {
                             if self.scroll_state.is_scrolled() {
                                 self.scroll_down(1);
-                                needs_render = self.scroll_state.is_scrolled();
+                                // Always render - we stay at offset=0 instead of auto-exiting
+                                needs_render = true;
                             }
                         }
                         ScrollAction::Home => {
@@ -2109,6 +2094,7 @@ impl App {
         let mut stdout = std::io::stdout();
 
         // Render scrollback content (starting at row 2 to preserve topbar)
+        // Show boundary markers (BEGIN/END) at buffer boundaries
         crate::scrollback::ScrollViewer::render_with_chrome(
             &mut stdout,
             &self.scrollback_buffer,
@@ -2116,6 +2102,7 @@ impl App {
             cols,
             rows,
             self.show_line_numbers,
+            true, // show_boundary_markers
         )?;
 
         // Render the topbar with scroll info
@@ -2138,29 +2125,40 @@ impl App {
     /// Clears the scrollback view and restores normal terminal display.
     ///
     /// Called when returning to live view from scrolled state.
-    fn clear_scrollback_view(&self) -> std::io::Result<()> {
+    /// Note: The topbar will be redrawn by the main edit loop before reedline
+    /// takes control, so we just need to restore scroll region and clear content.
+    fn clear_scrollback_view(&mut self) -> std::io::Result<()> {
         use std::io::Write;
 
         let mut stdout = std::io::stdout();
 
-        // Clear screen and move cursor home
-        write!(stdout, "\x1b[2J\x1b[H")?;
-
-        // If chrome is active, restore the scroll region and context bar
         if self.chrome.is_active() {
             if let Ok((cols, rows)) = TerminalGuard::get_size() {
-                // Re-setup scroll region
+                // Reset scroll region first (DECSTBM resets cursor to home)
                 if let Err(e) = self.chrome.setup_scroll_region(rows) {
                     warn!("Failed to restore scroll region: {}", e);
                 }
 
-                // Render context bar (no longer scrolled, so scroll=None)
+                // Clear the content area (rows 2 to N), leaving topbar row alone
+                // Position cursor at row 2 column 1
+                for row in 2..=rows {
+                    write!(stdout, "\x1b[{};1H\x1b[2K", row)?;
+                }
+                write!(stdout, "\x1b[2;1H")?;
+
+                // Draw topbar immediately so it's visible
                 let timestamp = chrono::Local::now().format("%H:%M").to_string();
                 let state = self.topbar_state(&timestamp);
                 if let Err(e) = self.chrome.render_context_bar(cols, &state) {
                     warn!("Failed to render context bar: {}", e);
                 }
+
+                // Move cursor back to row 2 for reedline prompt
+                write!(stdout, "\x1b[2;1H")?;
             }
+        } else {
+            // No chrome - just clear screen and go home
+            write!(stdout, "\x1b[2J\x1b[H")?;
         }
 
         stdout.flush()?;
@@ -2244,14 +2242,10 @@ impl App {
                         self.viewport_height() // PgDown: one page
                     };
                     self.scroll_down(lines);
-                    if self.scroll_state.is_scrolled() {
-                        if let Err(e) = self.render_scrollback_view() {
-                            warn!("Failed to render scrollback: {}", e);
-                            self.scroll_to_bottom();
-                            break;
-                        }
-                    } else {
-                        // Returned to live view
+                    // Always render - we stay at offset=0 instead of auto-exiting
+                    if let Err(e) = self.render_scrollback_view() {
+                        warn!("Failed to render scrollback: {}", e);
+                        self.scroll_to_bottom();
                         break;
                     }
                 }
@@ -2273,16 +2267,11 @@ impl App {
                     code: KeyCode::Down,
                     ..
                 }) => {
-                    // Down arrow: scroll down one line
+                    // Down arrow: scroll down one line (stays at offset=0 at bottom)
                     self.scroll_down(1);
-                    if self.scroll_state.is_scrolled() {
-                        if let Err(e) = self.render_scrollback_view() {
-                            warn!("Failed to render scrollback: {}", e);
-                            self.scroll_to_bottom();
-                            break;
-                        }
-                    } else {
-                        // Returned to live view
+                    if let Err(e) = self.render_scrollback_view() {
+                        warn!("Failed to render scrollback: {}", e);
+                        self.scroll_to_bottom();
                         break;
                     }
                 }
