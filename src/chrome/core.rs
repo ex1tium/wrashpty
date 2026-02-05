@@ -176,6 +176,8 @@ pub struct ScrollInfo {
     pub percentage: u8,
     /// Total lines in scrollback buffer.
     pub total_lines: usize,
+    /// First visible line number (1-indexed from oldest).
+    pub first_visible_line: usize,
 }
 
 impl Chrome {
@@ -566,8 +568,13 @@ impl Chrome {
         // Scroll indicator: priority 0 (always shown when active)
         if let Some(scroll_info) = ctx.scroll_info {
             let scroll_fg = Self::color_to_fg_ansi(self.theme.separator_fg);
-            // Format: ↑ SCROLL 45%
-            let scroll_content = format!("↑SCROLL {}%", scroll_info.percentage);
+            // Format: ▶ SCROLL | line/total | pct%
+            let scroll_content = format!(
+                "▶ SCROLL | {}/{} | {}%",
+                scroll_info.first_visible_line,
+                scroll_info.total_lines,
+                scroll_info.percentage
+            );
             let scroll_width = scroll_content.width();
             // Insert at position 0 to show before status icon
             left_segments.insert(0, ContextSegment {
