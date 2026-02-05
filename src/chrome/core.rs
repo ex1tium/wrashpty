@@ -148,8 +148,12 @@ pub struct Chrome {
 
 /// Context information for rendering the chrome bar.
 ///
-/// Contains all metadata needed to render a rich context bar showing
-/// command results, current location, and git status.
+/// Contains environment and session metadata needed to render a rich context bar.
+/// This struct holds *state* information (cwd, git, exit code), while `TopbarMode`
+/// holds *UI mode* information (scroll position, search state, etc.).
+///
+/// This separation allows the same context to be reused across different UI modes
+/// without modification, and makes it easy to add new modes in the future.
 pub struct ChromeContext<'a> {
     /// Current working directory.
     pub cwd: &'a Path,
@@ -165,8 +169,6 @@ pub struct ChromeContext<'a> {
     pub last_duration: Option<Duration>,
     /// Current timestamp string (HH:MM format).
     pub timestamp: &'a str,
-    /// Scroll position information (percentage from top, if scrolled).
-    pub scroll_info: Option<ScrollInfo>,
 }
 
 /// Information about scroll position for display in context bar.
@@ -178,6 +180,33 @@ pub struct ScrollInfo {
     pub total_lines: usize,
     /// First visible line number (1-indexed from oldest).
     pub first_visible_line: usize,
+}
+
+/// The current topbar mode overlay.
+///
+/// This enum represents UI modes that augment the base topbar with mode-specific
+/// information. The base segments (status, cwd, git, clock) are always shown;
+/// mode segments are prepended based on the active mode.
+///
+/// This design allows easy extension for future modes (search, filter, etc.)
+/// without modifying the core segment building logic.
+#[derive(Debug, Clone, Default)]
+pub enum TopbarMode {
+    /// Normal mode - no mode-specific overlay.
+    /// Just shows the base segments: status, cwd, git, clock.
+    #[default]
+    Normal,
+
+    /// Scroll mode - viewing scrollback history.
+    /// Shows scroll position indicator before base segments.
+    Scroll(ScrollInfo),
+
+    // Future modes can be added here:
+    // /// Search mode - searching within scrollback.
+    // Search { query: String, match_index: usize, total_matches: usize },
+    //
+    // /// Filter mode - grep/filter view.
+    // Filter { pattern: String, match_count: usize },
 }
 
 impl Chrome {
@@ -445,6 +474,7 @@ impl Chrome {
     ///
     /// This is the single render point for chrome - called once at transition
     /// to Edit mode before reedline takes control. The bar shows:
+    /// - Mode indicator (if not Normal) - e.g., scroll position
     /// - Success/failure indicator (✓/✗) - green/red
     /// - Command duration - yellow if >= 0.5s
     /// - Current directory - cyan
@@ -455,16 +485,22 @@ impl Chrome {
     ///
     /// * `cols` - Terminal width in columns
     /// * `ctx` - Context information to display
+    /// * `mode` - Current topbar mode (Normal, Scroll, etc.)
     ///
     /// # Errors
     ///
     /// Returns an error if escape sequences cannot be written to stdout.
-    pub fn render_context_bar(&self, cols: u16, ctx: &ChromeContext) -> io::Result<()> {
+    pub fn render_context_bar(
+        &self,
+        cols: u16,
+        ctx: &ChromeContext,
+        mode: &TopbarMode,
+    ) -> io::Result<()> {
         if !self.is_active() {
             return Ok(());
         }
 
-        let content = self.format_context_bar_colored(cols as usize, ctx);
+        let content = self.format_context_bar_colored(cols as usize, ctx, mode);
         let bar_bg = Self::color_to_bg_ansi(self.theme.bar_bg);
 
         let stdout = io::stdout();
@@ -481,6 +517,41 @@ impl Chrome {
 
         debug!("Context bar rendered");
         Ok(())
+    }
+
+    /// Builds mode-specific segments based on the current TopbarMode.
+    ///
+    /// This method adds segments to the beginning of left_segments based on
+    /// the active mode. New modes can be added by extending the match arms.
+    fn build_mode_segment(&self, mode: &TopbarMode, left_segments: &mut Vec<ContextSegment>) {
+        match mode {
+            TopbarMode::Normal => {
+                // No mode segment in normal mode
+            }
+            TopbarMode::Scroll(scroll_info) => {
+                let scroll_fg = Self::color_to_fg_ansi(self.theme.separator_fg);
+                // Format: ▶ SCROLL | line/total | pct%
+                let scroll_content = format!(
+                    "▶ SCROLL | {}/{} | {}%",
+                    scroll_info.first_visible_line,
+                    scroll_info.total_lines,
+                    scroll_info.percentage
+                );
+                let scroll_width = scroll_content.width();
+                // Insert at position 0 to show before status icon
+                left_segments.insert(
+                    0,
+                    ContextSegment {
+                        content: format!(" {}{} ", scroll_fg, scroll_content),
+                        display_width: scroll_width + 2, // " content "
+                        priority: 0,                     // Always show
+                        align: SegmentAlign::Left,
+                    },
+                );
+            }
+            // Future modes can be added here:
+            // TopbarMode::Search { query, match_index, total_matches } => { ... }
+        }
     }
 
     /// Converts a ratatui Color to ANSI foreground escape sequence.
@@ -538,9 +609,18 @@ impl Chrome {
     /// Uses priority-based truncation: when the bar is too wide, segments
     /// with higher priority numbers are removed first.
     ///
-    /// Layout: [status]▶[duration]▶[cwd]▶[git]▶ ... ▶[clock]
-    ///         └──────────── LEFT ───────────┘       └─RIGHT─┘
-    fn format_context_bar_colored(&self, max_width: usize, ctx: &ChromeContext) -> String {
+    /// Layout: [mode?]▶[status]▶[duration]▶[cwd]▶[git]▶ ... ▶[clock]
+    ///         └────────────── LEFT ──────────────┘       └─RIGHT─┘
+    ///
+    /// The mode segment (if any) is prepended to the left segments based on
+    /// the current `TopbarMode`. This allows new modes to be added without
+    /// modifying the base segment logic.
+    fn format_context_bar_colored(
+        &self,
+        max_width: usize,
+        ctx: &ChromeContext,
+        mode: &TopbarMode,
+    ) -> String {
         let bar_bg = Self::color_to_bg_ansi(self.theme.bar_bg);
         let sep_fg = Self::color_to_fg_ansi(self.theme.separator_fg);
         let separator = self.symbols.separator_right;
@@ -549,7 +629,10 @@ impl Chrome {
         let mut left_segments: Vec<ContextSegment> = Vec::new();
         let mut right_segments: Vec<ContextSegment> = Vec::new();
 
-        // === LEFT SEGMENTS ===
+        // === MODE SEGMENT (prepended based on TopbarMode) ===
+        self.build_mode_segment(mode, &mut left_segments);
+
+        // === BASE LEFT SEGMENTS ===
 
         // Status icon: priority 0 (always shown)
         let (status_icon, status_color) = if ctx.last_exit_code == 0 {
@@ -564,26 +647,6 @@ impl Chrome {
             priority: 0,
             align: SegmentAlign::Left,
         });
-
-        // Scroll indicator: priority 0 (always shown when active)
-        if let Some(scroll_info) = ctx.scroll_info {
-            let scroll_fg = Self::color_to_fg_ansi(self.theme.separator_fg);
-            // Format: ▶ SCROLL | line/total | pct%
-            let scroll_content = format!(
-                "▶ SCROLL | {}/{} | {}%",
-                scroll_info.first_visible_line,
-                scroll_info.total_lines,
-                scroll_info.percentage
-            );
-            let scroll_width = scroll_content.width();
-            // Insert at position 0 to show before status icon
-            left_segments.insert(0, ContextSegment {
-                content: format!(" {}{} ", scroll_fg, scroll_content),
-                display_width: scroll_width + 2, // " content "
-                priority: 0, // Always show
-                align: SegmentAlign::Left,
-            });
-        }
 
         // Duration: priority 3, shown only if >= 0.5s to avoid clutter
         if let Some(dur) = ctx.last_duration {
@@ -1187,6 +1250,7 @@ impl Chrome {
         &mut self,
         cols: u16,
         ctx: &ChromeContext,
+        mode: &TopbarMode,
     ) -> io::Result<()> {
         if !self.is_active() {
             return Ok(());
@@ -1199,7 +1263,7 @@ impl Chrome {
         if let Some(notif) = self.notifications.front().cloned() {
             self.render_notification(cols, &notif)
         } else {
-            self.render_context_bar(cols, ctx)
+            self.render_context_bar(cols, ctx, mode)
         }
     }
 
@@ -1329,7 +1393,6 @@ mod tests {
             last_command: Some("echo test"),
             last_duration: Some(Duration::from_millis(123)),
             timestamp: "14:32",
-            scroll_info: None,
         };
 
         let result = chrome.format_context_bar(80, &ctx);
@@ -1355,7 +1418,6 @@ mod tests {
             last_command: Some("false"),
             last_duration: Some(Duration::from_millis(50)),
             timestamp: "14:33",
-            scroll_info: None,
         };
 
         let result = chrome.format_context_bar(80, &ctx);
@@ -1376,7 +1438,6 @@ mod tests {
             last_command: None,
             last_duration: None,
             timestamp: "14:34",
-            scroll_info: None,
         };
 
         let result = chrome.format_context_bar(80, &ctx);
@@ -1398,7 +1459,6 @@ mod tests {
             last_command: Some("very long command"),
             last_duration: Some(Duration::from_secs(123)),
             timestamp: "14:32",
-            scroll_info: None,
         };
 
         let result = chrome.format_context_bar(40, &ctx);

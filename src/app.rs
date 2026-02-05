@@ -51,7 +51,7 @@ use tracing::{debug, info, warn};
 
 use crate::chrome::panel::{Panel, PanelResult};
 use crate::chrome::tabbed_panel::TabbedPanel;
-use crate::chrome::{Chrome, ChromeContext, NotificationStyle, SizeCheckResult};
+use crate::chrome::{Chrome, ChromeContext, NotificationStyle, ScrollInfo, SizeCheckResult, TopbarMode};
 use crate::config::Config;
 use crate::editor::{Editor, EditorResult};
 use crate::history_store::HistoryStore;
@@ -805,6 +805,7 @@ impl App {
         if self.chrome.is_active() {
             if let Ok((cols, _rows)) = TerminalGuard::get_size() {
                 let timestamp = chrono::Local::now().format("%H:%M").to_string();
+                let mode = self.topbar_mode();
                 let ctx = ChromeContext {
                     cwd: &self.current_cwd,
                     git_branch: self.git_branch.as_deref(),
@@ -813,9 +814,8 @@ impl App {
                     last_command: self.last_command.as_deref(),
                     last_duration: self.last_command_duration,
                     timestamp: &timestamp,
-                    scroll_info: self.get_scroll_info(),
                 };
-                if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &ctx) {
+                if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &ctx, &mode) {
                     warn!("Failed to redraw context bar before prompt: {}", e);
                 }
             }
@@ -1549,6 +1549,7 @@ impl App {
 
         // Redraw context bar
         let timestamp = chrono::Local::now().format("%H:%M").to_string();
+        let mode = self.topbar_mode();
         let ctx = ChromeContext {
             cwd: &self.current_cwd,
             git_branch: self.git_branch.as_deref(),
@@ -1557,10 +1558,9 @@ impl App {
             last_command: self.last_command.as_deref(),
             last_duration: self.last_command_duration,
             timestamp: &timestamp,
-            scroll_info: self.get_scroll_info(),
         };
 
-        if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &ctx) {
+        if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &ctx, &mode) {
             warn!("Failed to redraw context bar after panel: {}", e);
         }
 
@@ -1896,10 +1896,13 @@ impl App {
         }
     }
 
-    /// Returns scroll info for the context bar, if currently scrolled.
-    fn get_scroll_info(&self) -> Option<crate::chrome::ScrollInfo> {
+    /// Returns the current topbar mode based on UI state.
+    ///
+    /// The topbar mode determines what mode-specific information is shown
+    /// in the context bar (e.g., scroll position in Scroll mode).
+    fn topbar_mode(&self) -> TopbarMode {
         if !self.scroll_state.is_scrolled() {
-            return None;
+            return TopbarMode::Normal;
         }
 
         let offset = self.scroll_state.offset();
@@ -1924,11 +1927,28 @@ impl App {
             .saturating_add(1)
             .max(1);
 
-        Some(crate::chrome::ScrollInfo {
+        TopbarMode::Scroll(ScrollInfo {
             percentage,
             total_lines: total,
             first_visible_line,
         })
+    }
+
+    /// Creates a ChromeContext with current environment state.
+    ///
+    /// This helper reduces duplication when creating ChromeContext for
+    /// context bar rendering. The timestamp is passed in since it may
+    /// need to be consistent across multiple uses in the same render cycle.
+    fn chrome_context<'a>(&'a self, timestamp: &'a str) -> ChromeContext<'a> {
+        ChromeContext {
+            cwd: &self.current_cwd,
+            git_branch: self.git_branch.as_deref(),
+            git_dirty: self.git_dirty,
+            last_exit_code: self.last_exit_code,
+            last_command: self.last_command.as_deref(),
+            last_duration: self.last_command_duration,
+            timestamp,
+        }
     }
 
     /// Processes stdin bytes for scroll key handling.
@@ -2133,20 +2153,11 @@ impl App {
     fn render_scroll_topbar(&self, cols: u16) -> std::io::Result<()> {
         use std::io::Write;
 
-        let scroll_info = self.get_scroll_info();
         let timestamp = chrono::Local::now().format("%H:%M").to_string();
-        let ctx = ChromeContext {
-            cwd: &self.current_cwd,
-            git_branch: self.git_branch.as_deref(),
-            git_dirty: self.git_dirty,
-            last_exit_code: self.last_exit_code,
-            last_command: self.last_command.as_deref(),
-            last_duration: self.last_command_duration,
-            timestamp: &timestamp,
-            scroll_info,
-        };
+        let ctx = self.chrome_context(&timestamp);
+        let mode = self.topbar_mode();
 
-        self.chrome.render_context_bar(cols, &ctx)?;
+        self.chrome.render_context_bar(cols, &ctx, &mode)?;
         std::io::stdout().flush()
     }
 
@@ -2169,19 +2180,10 @@ impl App {
                     warn!("Failed to restore scroll region: {}", e);
                 }
 
-                // Render context bar
+                // Render context bar (no longer scrolled)
                 let timestamp = chrono::Local::now().format("%H:%M").to_string();
-                let ctx = ChromeContext {
-                    cwd: &self.current_cwd,
-                    git_branch: self.git_branch.as_deref(),
-                    git_dirty: self.git_dirty,
-                    last_exit_code: self.last_exit_code,
-                    last_command: self.last_command.as_deref(),
-                    last_duration: self.last_command_duration,
-                    timestamp: &timestamp,
-                    scroll_info: None, // No longer scrolled
-                };
-                if let Err(e) = self.chrome.render_context_bar(cols, &ctx) {
+                let ctx = self.chrome_context(&timestamp);
+                if let Err(e) = self.chrome.render_context_bar(cols, &ctx, &TopbarMode::Normal) {
                     warn!("Failed to render context bar: {}", e);
                 }
             }
@@ -2448,18 +2450,10 @@ impl App {
 
             // SINGLE RENDER POINT: Render context bar BEFORE reedline starts
             let timestamp = chrono::Local::now().format("%H:%M").to_string();
-            let ctx = ChromeContext {
-                cwd: &self.current_cwd,
-                git_branch: self.git_branch.as_deref(),
-                git_dirty: self.git_dirty,
-                last_exit_code: self.last_exit_code,
-                last_command: self.last_command.as_deref(),
-                last_duration: self.last_command_duration,
-                timestamp: &timestamp,
-                scroll_info: self.get_scroll_info(),
-            };
+            let ctx = self.chrome_context(&timestamp);
+            let mode = self.topbar_mode();
 
-            if let Err(e) = self.chrome.render_context_bar(cols, &ctx) {
+            if let Err(e) = self.chrome.render_context_bar(cols, &ctx, &mode) {
                 warn!("Failed to render context bar: {}", e);
             }
 
@@ -2734,6 +2728,7 @@ impl App {
 
                     // Redraw context bar for new dimensions
                     let timestamp = chrono::Local::now().format("%H:%M").to_string();
+                    let mode = self.topbar_mode();
                     let ctx = ChromeContext {
                         cwd: &self.current_cwd,
                         git_branch: self.git_branch.as_deref(),
@@ -2742,10 +2737,9 @@ impl App {
                         last_command: self.last_command.as_deref(),
                         last_duration: self.last_command_duration,
                         timestamp: &timestamp,
-                        scroll_info: self.get_scroll_info(),
                     };
 
-                    if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &ctx) {
+                    if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &ctx, &mode) {
                         warn!("Failed to redraw context bar on resize: {}", e);
                     }
                 }
@@ -2801,6 +2795,7 @@ impl App {
         // Render context bar immediately after enabling chrome
         if self.chrome.is_active() {
             let timestamp = chrono::Local::now().format("%H:%M").to_string();
+            let mode = self.topbar_mode();
             let ctx = ChromeContext {
                 cwd: &self.current_cwd,
                 git_branch: self.git_branch.as_deref(),
@@ -2809,10 +2804,9 @@ impl App {
                 last_command: self.last_command.as_deref(),
                 last_duration: self.last_command_duration,
                 timestamp: &timestamp,
-                scroll_info: self.get_scroll_info(),
             };
 
-            if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &ctx) {
+            if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &ctx, &mode) {
                 warn!("Failed to render context bar after toggle: {}", e);
             }
         }
