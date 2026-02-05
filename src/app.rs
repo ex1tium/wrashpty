@@ -2005,6 +2005,317 @@ impl App {
         }
     }
 
+    /// Runs the incremental search mode (Ctrl+S).
+    ///
+    /// Returns true if search was performed (user may have scrolled to a match),
+    /// false if cancelled.
+    fn run_search_mode(&mut self) -> Result<bool> {
+        use crate::chrome::segments::{color_to_bg_ansi, color_to_fg_ansi};
+        use crate::scrollback::features::SearchState;
+        use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+
+        let mut search = SearchState::new();
+        let mut input = crate::scrollback::MiniInput::with_hint("Search", "pattern");
+
+        // Get theme colors for consistent topbar styling
+        let theme = self.chrome.theme();
+        let bg_ansi = color_to_bg_ansi(theme.bar_bg);
+        let label_ansi = color_to_fg_ansi(theme.text_secondary);
+        let text_ansi = color_to_fg_ansi(theme.text_primary);
+
+        // Track if we found any matches
+        let mut scrolled_to_match = false;
+
+        loop {
+            // Render search input with match count status
+            let (cols, _) = TerminalGuard::get_size()?;
+            let status = search.status();
+            let status_ref = if status.is_empty() {
+                None
+            } else {
+                Some(status.as_str())
+            };
+            input.render_styled(
+                &mut std::io::stdout(),
+                cols,
+                status_ref,
+                Some(&bg_ansi),
+                Some(&label_ansi),
+                Some(&text_ansi),
+            )?;
+
+            // Wait for input
+            if event::poll(std::time::Duration::from_millis(100))? {
+                if let Event::Key(key) = event::read()? {
+                    // Only handle press events
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
+
+                    // Handle Up/Down arrows for match navigation while in search mode
+                    match key.code {
+                        KeyCode::Down => {
+                            // Next match (down = forward in buffer)
+                            search.next_match();
+                            if let Some(m) = search.current() {
+                                self.scroll_to_line(m.line + 1); // Convert 0-indexed to 1-indexed
+                                scrolled_to_match = true;
+                            }
+                            // Re-render scrollback with highlights
+                            self.render_scrollback_with_search(&search)?;
+                            continue;
+                        }
+                        KeyCode::Up => {
+                            // Previous match (up = backward in buffer)
+                            search.prev_match();
+                            if let Some(m) = search.current() {
+                                self.scroll_to_line(m.line + 1);
+                                scrolled_to_match = true;
+                            }
+                            self.render_scrollback_with_search(&search)?;
+                            continue;
+                        }
+                        _ => {}
+                    }
+
+                    match input.handle_input(key) {
+                        crate::scrollback::MiniInputResult::Submit => {
+                            // Exit search mode, keep current position
+                            return Ok(scrolled_to_match);
+                        }
+                        crate::scrollback::MiniInputResult::Cancel => {
+                            return Ok(false);
+                        }
+                        crate::scrollback::MiniInputResult::Changed => {
+                            // Update search query and re-search
+                            search.query = input.text().to_string();
+                            search.cursor = input.cursor;
+
+                            // Calculate viewport position for "nearest match" selection
+                            let total = self.scrollback_buffer.len();
+                            let viewport = self.viewport_height();
+                            let offset = self.scroll_state.offset();
+                            let first_visible = total
+                                .saturating_sub(offset)
+                                .saturating_sub(viewport)
+                                .max(0);
+
+                            // Perform incremental search
+                            search.perform_search(&self.scrollback_buffer, first_visible);
+
+                            // Jump to current match if any
+                            if let Some(m) = search.current() {
+                                self.scroll_to_line(m.line + 1);
+                                scrolled_to_match = true;
+                            }
+
+                            // Re-render with highlights
+                            self.render_scrollback_with_search(&search)?;
+                        }
+                        crate::scrollback::MiniInputResult::Continue => {
+                            // Keep editing, no change to query
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Renders scrollback view with search highlights.
+    fn render_scrollback_with_search(
+        &self,
+        search: &crate::scrollback::features::SearchState,
+    ) -> Result<()> {
+        use std::io::Write;
+
+        let (cols, rows) = TerminalGuard::get_size()?;
+        let offset = self.scroll_state.offset();
+        let mut out = std::io::stdout();
+
+        // Render using the search-aware viewer
+        crate::scrollback::ScrollViewer::render_with_search(
+            &mut out,
+            &self.scrollback_buffer,
+            offset,
+            cols,
+            rows,
+            self.viewer_state.show_line_numbers(),
+            self.viewer_state.show_timestamps(),
+            true, // show boundary markers
+            search,
+            self.chrome.theme(),
+        )?;
+
+        out.flush()?;
+        Ok(())
+    }
+
+    /// Runs the filter mode (Ctrl+F).
+    ///
+    /// In filter mode, only lines matching the pattern are displayed.
+    /// The user can scroll through filtered results.
+    /// Returns true if user navigated to a position, false if cancelled.
+    fn run_filter_mode(&mut self) -> Result<bool> {
+        use crate::chrome::segments::{color_to_bg_ansi, color_to_fg_ansi};
+        use crate::scrollback::features::FilterState;
+        use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+
+        let mut filter = FilterState::new();
+        let mut input = crate::scrollback::MiniInput::with_hint("Filter", "pattern");
+
+        // Get theme colors for consistent topbar styling
+        let theme = self.chrome.theme();
+        let bg_ansi = color_to_bg_ansi(theme.bar_bg);
+        let label_ansi = color_to_fg_ansi(theme.text_secondary);
+        let text_ansi = color_to_fg_ansi(theme.text_primary);
+
+        // Track filter-specific scroll offset
+        let mut filter_offset: usize = 0;
+        let mut navigated = false;
+
+        loop {
+            // Render filter input with match count status
+            let (cols, _) = TerminalGuard::get_size()?;
+            let status = filter.status();
+            let status_ref = if status.is_empty() {
+                None
+            } else {
+                Some(status.as_str())
+            };
+            input.render_styled(
+                &mut std::io::stdout(),
+                cols,
+                status_ref,
+                Some(&bg_ansi),
+                Some(&label_ansi),
+                Some(&text_ansi),
+            )?;
+
+            // Wait for input
+            if event::poll(std::time::Duration::from_millis(100))? {
+                if let Event::Key(key) = event::read()? {
+                    // Only handle press events
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
+
+                    // Handle navigation keys while in filter mode
+                    match key.code {
+                        KeyCode::PageUp => {
+                            // Scroll up in filtered view
+                            let viewport = self.viewport_height();
+                            filter_offset = filter_offset.saturating_add(viewport);
+                            let max = crate::scrollback::ScrollViewer::max_offset(
+                                filter.match_count(),
+                                viewport,
+                            );
+                            filter_offset = filter_offset.min(max);
+                            self.render_scrollback_with_filter(&filter, filter_offset)?;
+                            navigated = true;
+                            continue;
+                        }
+                        KeyCode::PageDown => {
+                            // Scroll down in filtered view
+                            let viewport = self.viewport_height();
+                            filter_offset = filter_offset.saturating_sub(viewport);
+                            self.render_scrollback_with_filter(&filter, filter_offset)?;
+                            navigated = true;
+                            continue;
+                        }
+                        KeyCode::Up => {
+                            filter_offset = filter_offset.saturating_add(1);
+                            let max = crate::scrollback::ScrollViewer::max_offset(
+                                filter.match_count(),
+                                self.viewport_height(),
+                            );
+                            filter_offset = filter_offset.min(max);
+                            self.render_scrollback_with_filter(&filter, filter_offset)?;
+                            navigated = true;
+                            continue;
+                        }
+                        KeyCode::Down => {
+                            filter_offset = filter_offset.saturating_sub(1);
+                            self.render_scrollback_with_filter(&filter, filter_offset)?;
+                            navigated = true;
+                            continue;
+                        }
+                        KeyCode::Home => {
+                            let max = crate::scrollback::ScrollViewer::max_offset(
+                                filter.match_count(),
+                                self.viewport_height(),
+                            );
+                            filter_offset = max;
+                            self.render_scrollback_with_filter(&filter, filter_offset)?;
+                            navigated = true;
+                            continue;
+                        }
+                        KeyCode::End => {
+                            filter_offset = 0;
+                            self.render_scrollback_with_filter(&filter, filter_offset)?;
+                            navigated = true;
+                            continue;
+                        }
+                        _ => {}
+                    }
+
+                    match input.handle_input(key) {
+                        crate::scrollback::MiniInputResult::Submit => {
+                            // Exit filter mode, restore full view at current position
+                            return Ok(navigated);
+                        }
+                        crate::scrollback::MiniInputResult::Cancel => {
+                            return Ok(false);
+                        }
+                        crate::scrollback::MiniInputResult::Changed => {
+                            // Update filter pattern and re-filter
+                            filter.pattern = input.text().to_string();
+                            filter.cursor = input.cursor;
+
+                            // Perform incremental filtering
+                            filter.perform_filter(&self.scrollback_buffer);
+
+                            // Reset to bottom of filtered view
+                            filter_offset = 0;
+
+                            // Re-render with filter
+                            self.render_scrollback_with_filter(&filter, filter_offset)?;
+                        }
+                        crate::scrollback::MiniInputResult::Continue => {
+                            // Keep editing, no change to pattern
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Renders scrollback view with filter active (only matching lines).
+    fn render_scrollback_with_filter(
+        &self,
+        filter: &crate::scrollback::features::FilterState,
+        filter_offset: usize,
+    ) -> Result<()> {
+        use std::io::Write;
+
+        let (cols, rows) = TerminalGuard::get_size()?;
+        let mut out = std::io::stdout();
+
+        // Render using the filter-aware viewer
+        crate::scrollback::ScrollViewer::render_with_filter(
+            &mut out,
+            &self.scrollback_buffer,
+            filter,
+            filter_offset,
+            cols,
+            rows,
+            self.viewer_state.show_line_numbers(),
+            self.viewer_state.show_timestamps(),
+        )?;
+
+        out.flush()?;
+        Ok(())
+    }
+
     /// Scrolls to show a specific line number (1-indexed).
     fn scroll_to_line(&mut self, line_num: usize) {
         let total = self.scrollback_buffer.len();
@@ -2263,6 +2574,8 @@ impl App {
     /// This replaces the terminal content with scrollback buffer content
     /// while preserving the topbar with scroll information.
     fn render_scrollback_view(&mut self) -> std::io::Result<()> {
+        use std::io::Write;
+
         let (cols, rows) = match TerminalGuard::get_size() {
             Ok(size) => size,
             Err(_) => return Ok(()), // Can't render without size
@@ -2271,6 +2584,13 @@ impl App {
         let offset = self.scroll_state.offset();
         let mut stdout = std::io::stdout();
 
+        // Adjust content rows if help bar is shown
+        let content_rows = if self.viewer_state.show_help_bar() {
+            rows.saturating_sub(1) // Reserve last row for help bar
+        } else {
+            rows
+        };
+
         // Render scrollback content (starting at row 2 to preserve topbar)
         // Show boundary markers (BEGIN/END) at buffer boundaries
         crate::scrollback::ScrollViewer::render_with_chrome(
@@ -2278,15 +2598,28 @@ impl App {
             &self.scrollback_buffer,
             offset,
             cols,
-            rows,
+            content_rows,
             self.viewer_state.show_line_numbers(),
             self.viewer_state.show_timestamps(),
             true, // show_boundary_markers
+            Some(self.chrome.theme()),
         )?;
+
+        // Render help bar if enabled
+        if self.viewer_state.show_help_bar() {
+            crate::scrollback::features::HelpBar::render(
+                &mut stdout,
+                &self.viewer_state.mode,
+                cols,
+                rows,
+                self.chrome.theme(),
+            )?;
+        }
 
         // Render the topbar with scroll info
         self.render_scroll_topbar(cols)?;
 
+        stdout.flush()?;
         Ok(())
     }
 
@@ -2559,6 +2892,56 @@ impl App {
                     }
                 }
                 Event::Key(KeyEvent {
+                    code: KeyCode::Char('s'),
+                    modifiers,
+                    ..
+                }) if modifiers.contains(KeyModifiers::CONTROL) => {
+                    // Ctrl+S: incremental search
+                    match self.run_search_mode() {
+                        Ok(_) => {
+                            // Re-render without search highlights
+                            if let Err(e) = self.render_scrollback_view() {
+                                warn!("Failed to render scrollback: {}", e);
+                                self.scroll_to_bottom();
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Search mode error: {}", e);
+                            if let Err(e) = self.render_scrollback_view() {
+                                warn!("Failed to render scrollback: {}", e);
+                                self.scroll_to_bottom();
+                                break;
+                            }
+                        }
+                    }
+                }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Char('f'),
+                    modifiers,
+                    ..
+                }) if modifiers.contains(KeyModifiers::CONTROL) => {
+                    // Ctrl+F: filter mode
+                    match self.run_filter_mode() {
+                        Ok(_) => {
+                            // Re-render full view
+                            if let Err(e) = self.render_scrollback_view() {
+                                warn!("Failed to render scrollback: {}", e);
+                                self.scroll_to_bottom();
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Filter mode error: {}", e);
+                            if let Err(e) = self.render_scrollback_view() {
+                                warn!("Failed to render scrollback: {}", e);
+                                self.scroll_to_bottom();
+                                break;
+                            }
+                        }
+                    }
+                }
+                Event::Key(KeyEvent {
                     code: KeyCode::Char('g'),
                     modifiers,
                     ..
@@ -2589,6 +2972,22 @@ impl App {
                                 break;
                             }
                         }
+                    }
+                }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Char('?'),
+                    ..
+                }) | Event::Key(KeyEvent {
+                    code: KeyCode::F(1),
+                    ..
+                }) => {
+                    // Toggle help bar
+                    self.viewer_state.toggle_help_bar();
+                    debug!(show_help = self.viewer_state.show_help_bar(), "Toggled help bar");
+                    if let Err(e) = self.render_scrollback_view() {
+                        warn!("Failed to render scrollback: {}", e);
+                        self.scroll_to_bottom();
+                        break;
                     }
                 }
                 Event::Key(KeyEvent {
