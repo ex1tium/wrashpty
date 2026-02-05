@@ -79,7 +79,19 @@ impl RenderedSegment {
     }
 }
 
-/// Calculates display width of a string, excluding ANSI escape codes.
+/// Calculates the display width of a string, excluding ANSI escape codes.
+///
+/// `strip_ansi_width` only strips SGR (Select Graphic Rendition) sequences—
+/// i.e., escape sequences of the form `\x1b[...m`. It does **not** handle
+/// other CSI sequences such as cursor movement (`\x1b[H`), line clearing
+/// (`\x1b[K`), or scrolling commands. This limitation is intentional: the
+/// topbar exclusively uses SGR codes for color/style, so a minimal parser
+/// is sufficient and avoids unnecessary complexity.
+///
+/// If broader ANSI sequence support is ever needed (e.g., content that may
+/// contain cursor or erase codes), consider using a full ANSI-stripping
+/// library like `strip-ansi-escapes`, or extending this parser to consume
+/// all CSI sequences (those matching `\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]`).
 fn strip_ansi_width(s: &str) -> usize {
     let mut width = 0;
     let mut in_escape = false;
