@@ -14,9 +14,11 @@ use super::features::{FilterState, GoToLineState, SearchState, YankState};
 /// Each mode has its own input handling and rendering behavior.
 /// Transitions happen via keybindings (Ctrl+S for Search, etc.)
 #[derive(Debug, Clone, PartialEq)]
+#[derive(Default)]
 pub enum ScrollViewMode {
     /// Normal scrollback navigation (default behavior).
     /// Keys: PgUp/PgDown, Home/End, Ctrl+U/D, arrows
+    #[default]
     Normal,
 
     /// Incremental search with match highlighting.
@@ -39,11 +41,6 @@ pub enum ScrollViewMode {
     GoToLine(GoToLineState),
 }
 
-impl Default for ScrollViewMode {
-    fn default() -> Self {
-        Self::Normal
-    }
-}
 
 impl ScrollViewMode {
     /// Returns true if currently in Normal mode.

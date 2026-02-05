@@ -174,11 +174,7 @@ impl SearchState {
                 .iter()
                 .enumerate()
                 .min_by_key(|(_, m)| {
-                    if m.line >= near_line {
-                        m.line - near_line
-                    } else {
-                        near_line - m.line
-                    }
+                    m.line.abs_diff(near_line)
                 })
                 .map(|(idx, _)| idx)
                 .unwrap_or(0);
@@ -286,11 +282,7 @@ impl SearchState {
                 .iter()
                 .enumerate()
                 .min_by_key(|(_, m)| {
-                    if m.line >= near_line {
-                        m.line - near_line
-                    } else {
-                        near_line - m.line
-                    }
+                    m.line.abs_diff(near_line)
                 })
                 .map(|(idx, _)| idx)
                 .unwrap_or(0);

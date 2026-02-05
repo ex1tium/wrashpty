@@ -432,12 +432,11 @@ impl HelpParser {
         }
 
         // Also check for = or < > indicators
-        if trimmed.contains('=') || trimmed.contains('<') || trimmed.contains('[') {
-            if !takes_value {
+        if (trimmed.contains('=') || trimmed.contains('<') || trimmed.contains('['))
+            && !takes_value {
                 takes_value = true;
                 value_type = ValueType::String;
             }
-        }
 
         // Extract description (everything after the flag definition)
         // Usually separated by multiple spaces
@@ -481,7 +480,7 @@ impl HelpParser {
         // Check for choice values: {a,b,c} or (a|b|c)
         if let Some(caps) = PATTERNS.choice_values.captures(line) {
             let choices: Vec<String> = caps[1]
-                .split(|c| c == ',' || c == '|')
+                .split([',', '|'])
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
