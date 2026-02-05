@@ -83,16 +83,19 @@ impl ScrollViewer {
         let begin_cost = if show_begin && buffer_fills_viewport { 1 } else { 0 };
         let content_rows = rows.saturating_sub(end_cost).saturating_sub(begin_cost);
 
-        // Calculate first visible line number (1-indexed)
-        let first_visible_line = total
-            .saturating_sub(offset)
-            .saturating_sub(content_rows)
-            .saturating_add(1)
-            .max(1);
-
-        // When showing BEGIN with full viewport, we skip line 1 (BEGIN represents it)
-        let skip_lines = if show_begin && buffer_fills_viewport { 1 } else { 0 };
-        let display_first_line = first_visible_line + skip_lines;
+        // Get lines to display and calculate first visible line number
+        // When at top (BEGIN showing), fetch from line 1 using get_range
+        // Otherwise use offset-based get_from_bottom
+        let (first_visible_line, lines): (usize, Vec<_>) = if show_begin {
+            (1, buffer.get_range(0, content_rows).collect())
+        } else {
+            let first = total
+                .saturating_sub(offset)
+                .saturating_sub(content_rows)
+                .saturating_add(1)
+                .max(1);
+            (first, buffer.get_from_bottom(offset, content_rows).collect())
+        };
 
         // Hide cursor during render
         write!(out, "\x1b[?25l")?;
@@ -119,15 +122,9 @@ impl ScrollViewer {
             current_row += 1;
         }
 
-        // Get lines to display
-        let lines: Vec<_> = buffer
-            .get_from_bottom(offset, content_rows + skip_lines)
-            .skip(skip_lines)
-            .collect();
-
         for (i, line) in lines.iter().enumerate() {
             let screen_row = current_row;
-            let line_number = display_first_line + i;
+            let line_number = first_visible_line + i;
 
             // Move to line position
             write!(out, "\x1b[{};1H", screen_row)?;
