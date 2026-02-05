@@ -51,7 +51,7 @@ use tracing::{debug, info, warn};
 
 use crate::chrome::panel::{Panel, PanelResult};
 use crate::chrome::tabbed_panel::TabbedPanel;
-use crate::chrome::{Chrome, ChromeContext, NotificationStyle, ScrollInfo, SizeCheckResult, TopbarMode};
+use crate::chrome::{Chrome, GitInfo, NotificationStyle, ScrollInfo, SizeCheckResult, TopbarState};
 use crate::config::Config;
 use crate::editor::{Editor, EditorResult};
 use crate::history_store::HistoryStore;
@@ -805,17 +805,8 @@ impl App {
         if self.chrome.is_active() {
             if let Ok((cols, _rows)) = TerminalGuard::get_size() {
                 let timestamp = chrono::Local::now().format("%H:%M").to_string();
-                let mode = self.topbar_mode();
-                let ctx = ChromeContext {
-                    cwd: &self.current_cwd,
-                    git_branch: self.git_branch.as_deref(),
-                    git_dirty: self.git_dirty,
-                    last_exit_code: self.last_exit_code,
-                    last_command: self.last_command.as_deref(),
-                    last_duration: self.last_command_duration,
-                    timestamp: &timestamp,
-                };
-                if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &ctx, &mode) {
+                let state = self.topbar_state(&timestamp);
+                if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &state) {
                     warn!("Failed to redraw context bar before prompt: {}", e);
                 }
             }
@@ -1549,18 +1540,9 @@ impl App {
 
         // Redraw context bar
         let timestamp = chrono::Local::now().format("%H:%M").to_string();
-        let mode = self.topbar_mode();
-        let ctx = ChromeContext {
-            cwd: &self.current_cwd,
-            git_branch: self.git_branch.as_deref(),
-            git_dirty: self.git_dirty,
-            last_exit_code: self.last_exit_code,
-            last_command: self.last_command.as_deref(),
-            last_duration: self.last_command_duration,
-            timestamp: &timestamp,
-        };
+        let state = self.topbar_state(&timestamp);
 
-        if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &ctx, &mode) {
+        if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &state) {
             warn!("Failed to redraw context bar after panel: {}", e);
         }
 
@@ -1896,58 +1878,51 @@ impl App {
         }
     }
 
-    /// Returns the current topbar mode based on UI state.
+    /// Creates a TopbarState with current environment and UI state.
     ///
-    /// The topbar mode determines what mode-specific information is shown
-    /// in the context bar (e.g., scroll position in Scroll mode).
-    fn topbar_mode(&self) -> TopbarMode {
-        if !self.scroll_state.is_scrolled() {
-            return TopbarMode::Normal;
-        }
+    /// This combines environment state (cwd, git, exit code) with UI mode
+    /// state (scroll position) into a unified state for the segment system.
+    fn topbar_state(&self, timestamp: &str) -> TopbarState {
+        // Calculate scroll info if scrolled
+        let scroll = if self.scroll_state.is_scrolled() {
+            let offset = self.scroll_state.offset();
+            let total = self.scrollback_buffer.len();
+            let viewport = self.viewport_height();
+            let max_offset = crate::scrollback::ScrollViewer::max_offset(total, viewport);
 
-        let offset = self.scroll_state.offset();
-        let total = self.scrollback_buffer.len();
-        let viewport = self.viewport_height();
-        let max_offset = crate::scrollback::ScrollViewer::max_offset(total, viewport);
+            // Calculate percentage (0 = at bottom, 100 = at top)
+            let percentage = if max_offset == 0 {
+                0
+            } else {
+                ((offset * 100) / max_offset).min(100) as u8
+            };
 
-        // Calculate percentage (0 = at bottom, 100 = at top)
-        let percentage = if max_offset == 0 {
-            0
+            // Calculate first visible line (1-indexed from oldest)
+            let first_visible_line = total
+                .saturating_sub(offset)
+                .saturating_sub(viewport)
+                .saturating_add(1)
+                .max(1);
+
+            Some(ScrollInfo {
+                percentage,
+                total_lines: total,
+                first_visible_line,
+            })
         } else {
-            ((offset * 100) / max_offset).min(100) as u8
+            None
         };
 
-        // Calculate first visible line (1-indexed from oldest)
-        // Buffer stores lines oldest-first (index 0 = oldest = line 1)
-        // get_from_bottom(offset, viewport) returns lines from (total - offset - viewport) to (total - offset)
-        // So first visible line number is (total - offset - viewport + 1), clamped to 1
-        let first_visible_line = total
-            .saturating_sub(offset)
-            .saturating_sub(viewport)
-            .saturating_add(1)
-            .max(1);
-
-        TopbarMode::Scroll(ScrollInfo {
-            percentage,
-            total_lines: total,
-            first_visible_line,
-        })
-    }
-
-    /// Creates a ChromeContext with current environment state.
-    ///
-    /// This helper reduces duplication when creating ChromeContext for
-    /// context bar rendering. The timestamp is passed in since it may
-    /// need to be consistent across multiple uses in the same render cycle.
-    fn chrome_context<'a>(&'a self, timestamp: &'a str) -> ChromeContext<'a> {
-        ChromeContext {
-            cwd: &self.current_cwd,
-            git_branch: self.git_branch.as_deref(),
-            git_dirty: self.git_dirty,
-            last_exit_code: self.last_exit_code,
-            last_command: self.last_command.as_deref(),
+        TopbarState {
+            cwd: self.current_cwd.clone(),
+            git: GitInfo {
+                branch: self.git_branch.clone(),
+                dirty: self.git_dirty,
+            },
+            exit_code: self.last_exit_code,
             last_duration: self.last_command_duration,
-            timestamp,
+            timestamp: timestamp.to_string(),
+            scroll,
         }
     }
 
@@ -2154,10 +2129,9 @@ impl App {
         use std::io::Write;
 
         let timestamp = chrono::Local::now().format("%H:%M").to_string();
-        let ctx = self.chrome_context(&timestamp);
-        let mode = self.topbar_mode();
+        let state = self.topbar_state(&timestamp);
 
-        self.chrome.render_context_bar(cols, &ctx, &mode)?;
+        self.chrome.render_context_bar(cols, &state)?;
         std::io::stdout().flush()
     }
 
@@ -2180,10 +2154,10 @@ impl App {
                     warn!("Failed to restore scroll region: {}", e);
                 }
 
-                // Render context bar (no longer scrolled)
+                // Render context bar (no longer scrolled, so scroll=None)
                 let timestamp = chrono::Local::now().format("%H:%M").to_string();
-                let ctx = self.chrome_context(&timestamp);
-                if let Err(e) = self.chrome.render_context_bar(cols, &ctx, &TopbarMode::Normal) {
+                let state = self.topbar_state(&timestamp);
+                if let Err(e) = self.chrome.render_context_bar(cols, &state) {
                     warn!("Failed to render context bar: {}", e);
                 }
             }
@@ -2450,10 +2424,9 @@ impl App {
 
             // SINGLE RENDER POINT: Render context bar BEFORE reedline starts
             let timestamp = chrono::Local::now().format("%H:%M").to_string();
-            let ctx = self.chrome_context(&timestamp);
-            let mode = self.topbar_mode();
+            let state = self.topbar_state(&timestamp);
 
-            if let Err(e) = self.chrome.render_context_bar(cols, &ctx, &mode) {
+            if let Err(e) = self.chrome.render_context_bar(cols, &state) {
                 warn!("Failed to render context bar: {}", e);
             }
 
@@ -2728,18 +2701,9 @@ impl App {
 
                     // Redraw context bar for new dimensions
                     let timestamp = chrono::Local::now().format("%H:%M").to_string();
-                    let mode = self.topbar_mode();
-                    let ctx = ChromeContext {
-                        cwd: &self.current_cwd,
-                        git_branch: self.git_branch.as_deref(),
-                        git_dirty: self.git_dirty,
-                        last_exit_code: self.last_exit_code,
-                        last_command: self.last_command.as_deref(),
-                        last_duration: self.last_command_duration,
-                        timestamp: &timestamp,
-                    };
+                    let state = self.topbar_state(&timestamp);
 
-                    if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &ctx, &mode) {
+                    if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &state) {
                         warn!("Failed to redraw context bar on resize: {}", e);
                     }
                 }
@@ -2795,18 +2759,9 @@ impl App {
         // Render context bar immediately after enabling chrome
         if self.chrome.is_active() {
             let timestamp = chrono::Local::now().format("%H:%M").to_string();
-            let mode = self.topbar_mode();
-            let ctx = ChromeContext {
-                cwd: &self.current_cwd,
-                git_branch: self.git_branch.as_deref(),
-                git_dirty: self.git_dirty,
-                last_exit_code: self.last_exit_code,
-                last_command: self.last_command.as_deref(),
-                last_duration: self.last_command_duration,
-                timestamp: &timestamp,
-            };
+            let state = self.topbar_state(&timestamp);
 
-            if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &ctx, &mode) {
+            if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &state) {
                 warn!("Failed to render context bar after toggle: {}", e);
             }
         }
