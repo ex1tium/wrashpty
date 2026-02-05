@@ -269,8 +269,8 @@ impl Panel for TabbedPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::theme::AMBER_THEME;
+    use super::*;
 
     #[test]
     fn test_tabbed_panel_new() {

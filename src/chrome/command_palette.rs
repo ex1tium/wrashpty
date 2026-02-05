@@ -50,7 +50,6 @@ impl CommandSource {
             CommandSource::UserDefined => "U",
         }
     }
-
 }
 
 /// An item in the command palette.
@@ -374,7 +373,10 @@ impl Panel for CommandPalettePanel {
 
         // Render filter input
         let filter_text = if self.filter.is_empty() {
-            Span::styled("Type to filter...", Style::default().fg(self.theme.text_secondary))
+            Span::styled(
+                "Type to filter...",
+                Style::default().fg(self.theme.text_secondary),
+            )
         } else {
             Span::styled(&self.filter, Style::default().fg(self.theme.text_primary))
         };
@@ -510,8 +512,8 @@ impl Panel for CommandPalettePanel {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::theme::AMBER_THEME;
+    use super::*;
 
     #[test]
     fn test_command_palette_new() {

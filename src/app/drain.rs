@@ -5,12 +5,12 @@
 //! a drain thread that continuously reads PTY output into a bounded channel.
 
 use std::os::unix::io::{BorrowedFd, RawFd};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError};
-use std::sync::Arc;
 use std::thread::JoinHandle;
 
-use nix::poll::{poll, PollFd, PollFlags};
+use nix::poll::{PollFd, PollFlags, poll};
 use nix::unistd::read;
 
 /// Poll interval for background PTY drain during Edit mode (milliseconds).

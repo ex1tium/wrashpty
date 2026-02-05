@@ -13,8 +13,7 @@ use super::features::{FilterState, GoToLineState, SearchState, YankState};
 ///
 /// Each mode has its own input handling and rendering behavior.
 /// Transitions happen via keybindings (Ctrl+S for Search, etc.)
-#[derive(Debug, Clone, PartialEq)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum ScrollViewMode {
     /// Normal scrollback navigation (default behavior).
     /// Keys: PgUp/PgDown, Home/End, Ctrl+U/D, arrows
@@ -41,7 +40,6 @@ pub enum ScrollViewMode {
     GoToLine(GoToLineState),
 }
 
-
 impl ScrollViewMode {
     /// Returns true if currently in Normal mode.
     pub fn is_normal(&self) -> bool {
@@ -50,10 +48,7 @@ impl ScrollViewMode {
 
     /// Returns true if in any input mode (Search, Filter, GoToLine).
     pub fn is_input_mode(&self) -> bool {
-        matches!(
-            self,
-            Self::Search(_) | Self::Filter(_) | Self::GoToLine(_)
-        )
+        matches!(self, Self::Search(_) | Self::Filter(_) | Self::GoToLine(_))
     }
 
     /// Returns true if in selection mode (Yank).

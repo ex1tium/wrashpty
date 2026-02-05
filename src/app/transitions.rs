@@ -13,7 +13,7 @@ use tracing::{debug, info, warn};
 use crate::terminal::TerminalGuard;
 use crate::types::{Mode, SignalEvent};
 
-use super::{exit_code_from_status, App};
+use super::{App, exit_code_from_status};
 
 impl App {
     // =========================================================================
@@ -41,7 +41,9 @@ impl App {
             if let Ok(mut store) = self.history_store.lock() {
                 let exit_status = Some(self.last_exit_code);
                 let cwd = Some(self.current_cwd.clone());
-                if let Err(e) = store.update_last_command(exit_status, self.last_command_duration, cwd) {
+                if let Err(e) =
+                    store.update_last_command(exit_status, self.last_command_duration, cwd)
+                {
                     warn!("Failed to update history metadata: {}", e);
                 }
                 // Learn from the command completion
@@ -164,7 +166,9 @@ impl App {
 
         // Ensure raw mode is active - reedline may have toggled terminal modes.
         // This is critical for control character passthrough (Ctrl+C -> 0x03, not SIGINT).
-        self.terminal_guard.ensure_raw_mode().context("Failed to ensure raw mode for Passthrough")?;
+        self.terminal_guard
+            .ensure_raw_mode()
+            .context("Failed to ensure raw mode for Passthrough")?;
 
         // Get terminal size
         let (cols, rows) =
@@ -226,7 +230,9 @@ impl App {
 
         // Ensure raw mode is active - reedline may have toggled terminal modes.
         // This is critical for control character passthrough during command injection.
-        self.terminal_guard.ensure_raw_mode().context("Failed to ensure raw mode for Injecting")?;
+        self.terminal_guard
+            .ensure_raw_mode()
+            .context("Failed to ensure raw mode for Injecting")?;
 
         // Sync PTY size - terminal may have been resized during Edit mode
         let (cols, rows) =
@@ -363,7 +369,10 @@ impl App {
                     let timestamp = chrono::Local::now().format("%H:%M").to_string();
                     let state = self.topbar_state(&timestamp);
 
-                    if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &state) {
+                    if let Err(e) = self
+                        .chrome
+                        .render_context_bar_with_notifications(cols, &state)
+                    {
                         warn!("Failed to redraw context bar on resize: {}", e);
                     }
                 }
@@ -421,7 +430,10 @@ impl App {
             let timestamp = chrono::Local::now().format("%H:%M").to_string();
             let state = self.topbar_state(&timestamp);
 
-            if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &state) {
+            if let Err(e) = self
+                .chrome
+                .render_context_bar_with_notifications(cols, &state)
+            {
                 warn!("Failed to render context bar after toggle: {}", e);
             }
         }

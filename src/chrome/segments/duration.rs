@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use unicode_width::UnicodeWidthStr;
 
-use super::{color_to_fg_ansi, RenderedSegment, SegmentAlign, TopbarSegment, TopbarState};
+use super::{RenderedSegment, SegmentAlign, TopbarSegment, TopbarState, color_to_fg_ansi};
 use crate::chrome::symbols::Symbols;
 use crate::chrome::theme::Theme;
 

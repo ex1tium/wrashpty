@@ -321,10 +321,10 @@ mod tests {
     fn test_perform_filter_within() {
         let mut buffer = ScrollbackBuffer::with_capacity(100, 1000);
         buffer.push_line(b"error: first failure".to_vec()); // 0
-        buffer.push_line(b"info: all good".to_vec());       // 1
+        buffer.push_line(b"info: all good".to_vec()); // 1
         buffer.push_line(b"error: second failure".to_vec()); // 2
-        buffer.push_line(b"warning: something".to_vec());    // 3
-        buffer.push_line(b"error: third failure".to_vec());  // 4
+        buffer.push_line(b"warning: something".to_vec()); // 3
+        buffer.push_line(b"error: third failure".to_vec()); // 4
 
         // Base set: only lines 0, 2, 4 (the error lines)
         let base_lines = vec![0, 2, 4];

@@ -213,8 +213,8 @@ impl Panel for HelpPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::theme::AMBER_THEME;
+    use super::*;
 
     #[test]
     fn test_help_panel_new() {

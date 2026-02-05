@@ -93,7 +93,8 @@ fn enrich_with_success_rates(conn: &Connection, suggestions: &mut [Suggestion]) 
                     &variants::canonicalize_for_lookup(&suggestion.text),
                 ) {
                     // Check that the better variant has a higher success rate
-                    if let Ok(Some(better_rate)) = variants::get_success_rate(conn, &better_variant) {
+                    if let Ok(Some(better_rate)) = variants::get_success_rate(conn, &better_variant)
+                    {
                         if better_rate > rate {
                             debug!(
                                 original = %suggestion.text,
@@ -179,16 +180,10 @@ fn suggest_from_hierarchy(conn: &Connection, context: &SuggestionContext) -> Vec
     let position = context.preceding_tokens.len();
 
     // Get parent token (last preceding token)
-    let parent_token = context
-        .preceding_tokens
-        .last()
-        .map(|t| t.text.as_str());
+    let parent_token = context.preceding_tokens.last().map(|t| t.text.as_str());
 
     // Get base command (first token)
-    let base_command = context
-        .preceding_tokens
-        .first()
-        .map(|t| t.text.as_str());
+    let base_command = context.preceding_tokens.first().map(|t| t.text.as_str());
 
     // Query hierarchy for tokens at this position
     let learned = patterns::suggest_from_hierarchy(conn, position, parent_token, base_command, 30);
@@ -235,7 +230,11 @@ fn suggest_from_hierarchy(conn: &Connection, context: &SuggestionContext) -> Vec
 }
 
 /// Suggests flag values (supplementary source for flag-value positions).
-fn suggest_flag_values(conn: &Connection, context: &SuggestionContext, flag: &str) -> Vec<Suggestion> {
+fn suggest_flag_values(
+    conn: &Connection,
+    context: &SuggestionContext,
+    flag: &str,
+) -> Vec<Suggestion> {
     let mut suggestions = Vec::new();
 
     // Get base command and subcommand
@@ -508,7 +507,11 @@ mod tests {
 
         let mut suggestions = vec![
             Suggestion::new("cargo build", SuggestionSource::LearnedSequence, 1.0),
-            Suggestion::new("cargo build --broken", SuggestionSource::LearnedSequence, 1.0),
+            Suggestion::new(
+                "cargo build --broken",
+                SuggestionSource::LearnedSequence,
+                1.0,
+            ),
         ];
 
         enrich_with_success_rates(&conn, &mut suggestions);
@@ -566,7 +569,11 @@ mod tests {
         let context = SuggestionContext {
             preceding_tokens: vec![
                 AnalyzedToken::new("git", crate::chrome::command_edit::TokenType::Command, 0),
-                AnalyzedToken::new("remote", crate::chrome::command_edit::TokenType::Subcommand, 1),
+                AnalyzedToken::new(
+                    "remote",
+                    crate::chrome::command_edit::TokenType::Subcommand,
+                    1,
+                ),
                 AnalyzedToken::new("add", crate::chrome::command_edit::TokenType::Argument, 2),
             ],
             partial: String::new(),
@@ -636,7 +643,11 @@ mod tests {
         let context = SuggestionContext {
             preceding_tokens: vec![
                 AnalyzedToken::new("git", crate::chrome::command_edit::TokenType::Command, 0),
-                AnalyzedToken::new("remote", crate::chrome::command_edit::TokenType::Subcommand, 1),
+                AnalyzedToken::new(
+                    "remote",
+                    crate::chrome::command_edit::TokenType::Subcommand,
+                    1,
+                ),
                 AnalyzedToken::new("add", crate::chrome::command_edit::TokenType::Argument, 2),
             ],
             partial: String::new(),
@@ -648,6 +659,10 @@ mod tests {
 
         // Should get 'origin' as a suggestion
         let texts: Vec<&str> = suggestions.iter().map(|s| s.text.as_str()).collect();
-        assert!(texts.contains(&"origin"), "Expected 'origin' in suggestions, got: {:?}", texts);
+        assert!(
+            texts.contains(&"origin"),
+            "Expected 'origin' in suggestions, got: {:?}",
+            texts
+        );
     }
 }

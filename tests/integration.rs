@@ -396,15 +396,7 @@ mod edit_mode_tests {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    // Placeholder for future rexpect-based integration tests
-    #[test]
-    fn placeholder() {
-        // This test will be replaced with actual integration tests
-        assert!(true);
-    }
-}
+// Placeholder module removed - see pump_tests for actual integration tests
 
 #[cfg(test)]
 mod pump_tests {

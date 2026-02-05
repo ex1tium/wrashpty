@@ -12,7 +12,10 @@ pub const SCHEMA_VERSION: i32 = 1;
 ///
 /// All tables use the `ci_` prefix to avoid conflicts with reedline's tables.
 pub fn create_schema(conn: &Connection) -> Result<(), CIError> {
-    info!("Creating Command Intelligence schema (version {})", SCHEMA_VERSION);
+    info!(
+        "Creating Command Intelligence schema (version {})",
+        SCHEMA_VERSION
+    );
 
     // Check current schema version
     let current_version = get_schema_version(conn)?;

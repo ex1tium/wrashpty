@@ -66,6 +66,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn test_line_number_parsing() {
         let mut state = GoToLineState::default();
 

@@ -84,8 +84,16 @@ impl ScrollViewer {
         // Calculate how many content rows available
         // Markers only "cost" a row when buffer would otherwise fill the viewport
         let buffer_fills_viewport = total >= rows;
-        let end_cost = if show_end && buffer_fills_viewport { 1 } else { 0 };
-        let begin_cost = if show_begin && buffer_fills_viewport { 1 } else { 0 };
+        let end_cost = if show_end && buffer_fills_viewport {
+            1
+        } else {
+            0
+        };
+        let begin_cost = if show_begin && buffer_fills_viewport {
+            1
+        } else {
+            0
+        };
         let content_rows = rows.saturating_sub(end_cost).saturating_sub(begin_cost);
 
         // Get lines to display and calculate first visible line number
@@ -99,7 +107,10 @@ impl ScrollViewer {
                 .saturating_sub(content_rows)
                 .saturating_add(1)
                 .max(1);
-            (first, buffer.get_from_bottom(offset, content_rows).collect())
+            (
+                first,
+                buffer.get_from_bottom(offset, content_rows).collect(),
+            )
         };
 
         // Hide cursor during render
@@ -109,8 +120,11 @@ impl ScrollViewer {
         // Format: "  42 │ " = num_width + 3 (space + │ + space)
         let line_num_width = if options.show_line_numbers {
             let max_line = total;
-            let num_width =
-                if max_line == 0 { 1 } else { (max_line as f64).log10().floor() as usize + 1 };
+            let num_width = if max_line == 0 {
+                1
+            } else {
+                (max_line as f64).log10().floor() as usize + 1
+            };
             num_width.max(4) + 3 // +3 for " │ " (space + separator + space)
         } else {
             0
@@ -160,7 +174,12 @@ impl ScrollViewer {
             // Format: "  42 │ " with spaces around separator for easier copy-paste
             if options.show_line_numbers {
                 write!(out, "\x1b[2m")?; // Dim
-                write!(out, "{:>width$} │ ", line_number, width = line_num_width - 3)?;
+                write!(
+                    out,
+                    "{:>width$} │ ",
+                    line_number,
+                    width = line_num_width - 3
+                )?;
                 write!(out, "\x1b[22m")?; // Reset dim
             }
 
@@ -374,9 +393,19 @@ impl ScrollViewer {
 
         // Calculate marker row costs
         let buffer_fills_viewport = total >= content_rows;
-        let end_cost = if show_end && buffer_fills_viewport { 1 } else { 0 };
-        let begin_cost = if show_begin && buffer_fills_viewport { 1 } else { 0 };
-        let available_rows = content_rows.saturating_sub(end_cost).saturating_sub(begin_cost);
+        let end_cost = if show_end && buffer_fills_viewport {
+            1
+        } else {
+            0
+        };
+        let begin_cost = if show_begin && buffer_fills_viewport {
+            1
+        } else {
+            0
+        };
+        let available_rows = content_rows
+            .saturating_sub(end_cost)
+            .saturating_sub(begin_cost);
 
         // Get lines to display and calculate first visible line number
         let (first_visible_line, lines): (usize, Vec<_>) = if show_begin {
@@ -387,14 +416,20 @@ impl ScrollViewer {
                 .saturating_sub(available_rows)
                 .saturating_add(1)
                 .max(1);
-            (first, buffer.get_from_bottom(offset, available_rows).collect())
+            (
+                first,
+                buffer.get_from_bottom(offset, available_rows).collect(),
+            )
         };
 
         // Calculate gutter widths
         let line_num_width = if show_line_numbers {
             let max_line = total;
-            let num_width =
-                if max_line == 0 { 1 } else { (max_line as f64).log10().floor() as usize + 1 };
+            let num_width = if max_line == 0 {
+                1
+            } else {
+                (max_line as f64).log10().floor() as usize + 1
+            };
             num_width.max(4) + 3
         } else {
             0
@@ -415,7 +450,13 @@ impl ScrollViewer {
         // Render BEGIN marker if at top (with theme styling)
         if show_begin {
             write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
-            Self::render_boundary_marker_styled(out, cols as usize, gutter_width, "BEGIN", Some(theme))?;
+            Self::render_boundary_marker_styled(
+                out,
+                cols as usize,
+                gutter_width,
+                "BEGIN",
+                Some(theme),
+            )?;
             current_row += 1;
         }
 
@@ -438,7 +479,12 @@ impl ScrollViewer {
 
             // Render line number gutter if enabled
             if show_line_numbers {
-                write!(out, "\x1b[2m{:>width$} │ \x1b[22m", line_number, width = line_num_width - 3)?;
+                write!(
+                    out,
+                    "\x1b[2m{:>width$} │ \x1b[22m",
+                    line_number,
+                    width = line_num_width - 3
+                )?;
             }
 
             // Get matches for this line
@@ -476,7 +522,13 @@ impl ScrollViewer {
         // Render END marker if at bottom (with theme styling)
         if show_end {
             write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
-            Self::render_boundary_marker_styled(out, cols as usize, gutter_width, "END", Some(theme))?;
+            Self::render_boundary_marker_styled(
+                out,
+                cols as usize,
+                gutter_width,
+                "END",
+                Some(theme),
+            )?;
             current_row += 1;
         }
 
@@ -584,8 +636,11 @@ impl ScrollViewer {
         let total = buffer.len();
         let line_num_width = if show_line_numbers {
             let max_line = total;
-            let num_width =
-                if max_line == 0 { 1 } else { (max_line as f64).log10().floor() as usize + 1 };
+            let num_width = if max_line == 0 {
+                1
+            } else {
+                (max_line as f64).log10().floor() as usize + 1
+            };
             num_width.max(4) + 3
         } else {
             0
@@ -624,7 +679,12 @@ impl ScrollViewer {
 
             // Render line number gutter if enabled
             if show_line_numbers {
-                write!(out, "\x1b[2m{:>width$} │ \x1b[22m", line_number, width = line_num_width - 3)?;
+                write!(
+                    out,
+                    "\x1b[2m{:>width$} │ \x1b[22m",
+                    line_number,
+                    width = line_num_width - 3
+                )?;
             }
 
             // Write line content
@@ -697,8 +757,11 @@ impl ScrollViewer {
         let total = buffer.len();
         let line_num_width = if show_line_numbers {
             let max_line = total;
-            let num_width =
-                if max_line == 0 { 1 } else { (max_line as f64).log10().floor() as usize + 1 };
+            let num_width = if max_line == 0 {
+                1
+            } else {
+                (max_line as f64).log10().floor() as usize + 1
+            };
             num_width.max(4) + 3
         } else {
             0
@@ -740,7 +803,12 @@ impl ScrollViewer {
 
             // Render line number gutter if enabled
             if show_line_numbers {
-                write!(out, "\x1b[2m{:>width$} │ \x1b[22m", line_number, width = line_num_width - 3)?;
+                write!(
+                    out,
+                    "\x1b[2m{:>width$} │ \x1b[22m",
+                    line_number,
+                    width = line_num_width - 3
+                )?;
             }
 
             // Get search matches for this line
@@ -761,7 +829,8 @@ impl ScrollViewer {
                     line.content(),
                     content_cols,
                     &line_matches,
-                    current_match.map(|m| m.line == *original_idx && m.start == line_matches[0].start),
+                    current_match
+                        .map(|m| m.line == *original_idx && m.start == line_matches[0].start),
                     theme,
                 )?;
             }
@@ -899,9 +968,18 @@ mod tests {
         let mut output = Vec::new();
 
         // 5 total rows, row 1 reserved for topbar, so 4 content rows
-        let stats =
-            ScrollViewer::render_with_chrome(&mut output, &buffer, 0, 80, 5, false, false, false, None)
-                .unwrap();
+        let stats = ScrollViewer::render_with_chrome(
+            &mut output,
+            &buffer,
+            0,
+            80,
+            5,
+            false,
+            false,
+            false,
+            None,
+        )
+        .unwrap();
         assert_eq!(stats.lines_rendered, 4);
         assert_eq!(stats.first_visible_line, 2); // lines 2,3,4,5 visible (offset 0)
 
@@ -915,9 +993,18 @@ mod tests {
         let buffer = create_test_buffer(&["hello", "world"]);
         let mut output = Vec::new();
 
-        let stats =
-            ScrollViewer::render_with_chrome(&mut output, &buffer, 0, 80, 5, true, false, false, None)
-                .unwrap();
+        let stats = ScrollViewer::render_with_chrome(
+            &mut output,
+            &buffer,
+            0,
+            80,
+            5,
+            true,
+            false,
+            false,
+            None,
+        )
+        .unwrap();
         assert_eq!(stats.lines_rendered, 2);
 
         let output_str = String::from_utf8_lossy(&output);
@@ -931,16 +1018,34 @@ mod tests {
         let mut output = Vec::new();
 
         // At bottom (offset 0), viewing 3 lines: should show lines 8,9,10
-        let stats =
-            ScrollViewer::render_with_chrome(&mut output, &buffer, 0, 80, 4, false, false, false, None)
-                .unwrap();
+        let stats = ScrollViewer::render_with_chrome(
+            &mut output,
+            &buffer,
+            0,
+            80,
+            4,
+            false,
+            false,
+            false,
+            None,
+        )
+        .unwrap();
         assert_eq!(stats.first_visible_line, 8);
 
         // Scrolled up 3 lines: should show lines 5,6,7
         output.clear();
-        let stats =
-            ScrollViewer::render_with_chrome(&mut output, &buffer, 3, 80, 4, false, false, false, None)
-                .unwrap();
+        let stats = ScrollViewer::render_with_chrome(
+            &mut output,
+            &buffer,
+            3,
+            80,
+            4,
+            false,
+            false,
+            false,
+            None,
+        )
+        .unwrap();
         assert_eq!(stats.first_visible_line, 5);
     }
 
@@ -950,9 +1055,18 @@ mod tests {
         let mut output = Vec::new();
 
         // Buffer smaller than viewport (2 lines in 5 rows), at bottom - should show END
-        let stats =
-            ScrollViewer::render_with_chrome(&mut output, &buffer, 0, 80, 5, false, false, true, None)
-                .unwrap();
+        let stats = ScrollViewer::render_with_chrome(
+            &mut output,
+            &buffer,
+            0,
+            80,
+            5,
+            false,
+            false,
+            true,
+            None,
+        )
+        .unwrap();
         assert_eq!(stats.lines_rendered, 2);
 
         let output_str = String::from_utf8_lossy(&output);
@@ -961,9 +1075,18 @@ mod tests {
         // At top (max offset), should show BEGIN
         output.clear();
         let max_off = ScrollViewer::max_offset(2, 4); // 0 since buffer < viewport
-        let _stats =
-            ScrollViewer::render_with_chrome(&mut output, &buffer, max_off, 80, 5, false, false, true, None)
-                .unwrap();
+        let _stats = ScrollViewer::render_with_chrome(
+            &mut output,
+            &buffer,
+            max_off,
+            80,
+            5,
+            false,
+            false,
+            true,
+            None,
+        )
+        .unwrap();
 
         let output_str = String::from_utf8_lossy(&output);
         // When buffer is smaller than viewport, BEGIN should show at top

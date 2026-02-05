@@ -148,11 +148,9 @@ pub fn get_or_create_token(
 
     // Try to get existing token
     let existing: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM ci_tokens WHERE text = ?1",
-            [text],
-            |row| row.get(0),
-        )
+        .query_row("SELECT id FROM ci_tokens WHERE text = ?1", [text], |row| {
+            row.get(0)
+        })
         .ok();
 
     let id = if let Some(id) = existing {
@@ -233,7 +231,8 @@ mod tests {
                 cwd TEXT
             )",
             [],
-        ).unwrap();
+        )
+        .unwrap();
 
         // Create intelligence schema
         super::super::db_schema::create_schema(&conn).unwrap();
@@ -249,11 +248,9 @@ mod tests {
         learn_command(&mut conn, &mut cache, "git commit -m 'test'", Some(0), None).unwrap();
 
         // Verify tokens were created
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM ci_tokens",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM ci_tokens", [], |row| row.get(0))
+            .unwrap();
         assert!(count >= 4);
     }
 
@@ -269,31 +266,56 @@ mod tests {
             [now],
         ).unwrap();
 
-        let session_db_id: i64 = conn.query_row(
-            "SELECT id FROM ci_sessions WHERE session_id = 'test-session'",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let session_db_id: i64 = conn
+            .query_row(
+                "SELECT id FROM ci_sessions WHERE session_id = 'test-session'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
 
-        learn_command(&mut conn, &mut cache, "git status", Some(0), Some(session_db_id)).unwrap();
+        learn_command(
+            &mut conn,
+            &mut cache,
+            "git status",
+            Some(0),
+            Some(session_db_id),
+        )
+        .unwrap();
 
         // Verify command was created with session_id
-        let cmd_session_id: Option<i64> = conn.query_row(
-            "SELECT session_id FROM ci_commands WHERE command_line = 'git status'",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let cmd_session_id: Option<i64> = conn
+            .query_row(
+                "SELECT session_id FROM ci_commands WHERE command_line = 'git status'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(cmd_session_id, Some(session_db_id));
     }
 
     #[test]
     fn test_token_cache() {
-        let mut conn = setup_test_db();
+        let conn = setup_test_db();
         let mut cache = HashMap::new();
 
         let now = chrono::Utc::now().timestamp();
-        let id1 = get_or_create_token(&mut conn, &mut cache, "git", crate::chrome::command_edit::TokenType::Command, now).unwrap();
-        let id2 = get_or_create_token(&mut conn, &mut cache, "git", crate::chrome::command_edit::TokenType::Command, now).unwrap();
+        let id1 = get_or_create_token(
+            &conn,
+            &mut cache,
+            "git",
+            crate::chrome::command_edit::TokenType::Command,
+            now,
+        )
+        .unwrap();
+        let id2 = get_or_create_token(
+            &conn,
+            &mut cache,
+            "git",
+            crate::chrome::command_edit::TokenType::Command,
+            now,
+        )
+        .unwrap();
 
         assert_eq!(id1, id2);
         assert!(cache.contains_key("git"));

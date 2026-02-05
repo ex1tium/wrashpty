@@ -4,7 +4,7 @@
 
 use unicode_width::UnicodeWidthStr;
 
-use super::{color_to_bg_ansi, color_to_fg_ansi, RenderedSegment, TopbarSegment, TopbarState};
+use super::{RenderedSegment, TopbarSegment, TopbarState, color_to_bg_ansi, color_to_fg_ansi};
 use crate::chrome::symbols::Symbols;
 use crate::chrome::theme::Theme;
 
