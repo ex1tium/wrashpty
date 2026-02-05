@@ -648,25 +648,54 @@ impl FileBrowserPanel {
             }
         };
 
-        // Calculate suggestion alignment offset based on selected section
-        let suggestion_offset = match state.selected_section {
-            FileEditSection::Prefix => 3, // Initial "   " padding
-            FileEditSection::Filename => 3 + prefix_display.len() + 1, // After prefix + space
+        // Calculate suggestion alignment offset and selected position for scrolling
+        let (suggestion_offset, selected_x_start, selected_x_end) = match state.selected_section {
+            FileEditSection::Prefix => {
+                let start = 3; // Initial "   " padding
+                let end = start + prefix_display.chars().count();
+                (start, start, end)
+            }
+            FileEditSection::Filename => {
+                let start = 3 + prefix_display.chars().count() + 1; // After prefix + space
+                let end = start + state.filename.chars().count();
+                (start, start, end)
+            }
             FileEditSection::Suffix => {
                 // Start after filename
-                let mut offset = 3 + prefix_display.len() + 1 + state.filename.len() + 1;
+                let mut offset = 3 + prefix_display.chars().count() + 1 + state.filename.chars().count() + 1;
+                let start = offset;
                 // Add width of suffix tokens before the selected position
                 for (i, token) in state.suffix_tokens.iter().enumerate() {
                     if i < state.selected_index {
-                        offset += token.len() + 1; // token + space
+                        if i == state.selected_index {
+                            offset += 1; // "⟦" before edit buffer
+                        }
+                        offset += token.chars().count() + 1; // token + space (or ⟦token⟧ + space)
                     }
                 }
+                // Calculate end position for the selected token/edit slot
+                let edit_text = if state.edit_buffer.is_empty() { "_" } else { &state.edit_buffer };
+                let end = offset + 1 + edit_text.chars().count() + 1; // ⟦ + text + ⟧
                 // Add opening bracket for the edit slot
                 offset += 1; // "⟦"
-                offset
+                (offset, start, end)
             }
         };
-        let suggestion_padding = " ".repeat(suggestion_offset);
+
+        // Calculate horizontal scroll offset to keep selected content visible
+        let viewport_width = chunks[3].width as usize;
+        let left_context = viewport_width / 3; // Show ~1/3 of viewport with previous tokens
+        let right_margin = 8; // Small margin on right edge
+        let scroll_offset = if selected_x_end > viewport_width.saturating_sub(right_margin) {
+            // Selected content is past right edge - scroll right, keeping previous tokens visible
+            selected_x_start.saturating_sub(left_context)
+        } else {
+            0
+        };
+
+        // Adjust suggestion padding for scroll offset
+        let adjusted_suggestion_offset = suggestion_offset.saturating_sub(scroll_offset);
+        let suggestion_padding = " ".repeat(adjusted_suggestion_offset);
 
         // Previous suggestion (dim)
         if let Some(prev_sugg) = state.prev_suggestion() {
@@ -730,7 +759,9 @@ impl FileBrowserPanel {
         }
 
         let command_line = Line::from(spans);
-        Paragraph::new(command_line).render(chunks[3], buffer);
+        Paragraph::new(command_line)
+            .scroll((0, scroll_offset as u16))
+            .render(chunks[3], buffer);
 
         // Next suggestion (dim)
         if let Some(next_sugg) = state.next_suggestion() {

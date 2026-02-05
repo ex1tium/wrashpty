@@ -118,17 +118,23 @@ pub fn token_type_style(token_type: TokenType, theme: &Theme) -> Style {
     }
 }
 
-/// Returns a superscript digit for display (¹²³...²⁰).
-pub fn superscript_digit(n: usize) -> &'static str {
-    const SUPERSCRIPTS: [&str; 20] = [
-        "¹", "²", "³", "⁴", "⁵", "⁶", "⁷", "⁸", "⁹", "¹⁰",
-        "¹¹", "¹²", "¹³", "¹⁴", "¹⁵", "¹⁶", "¹⁷", "¹⁸", "¹⁹", "²⁰",
-    ];
-    if (1..=20).contains(&n) {
-        SUPERSCRIPTS[n - 1]
-    } else {
-        "·"
+/// Returns a superscript representation of any positive number.
+/// Converts each digit to its Unicode superscript equivalent.
+pub fn superscript_number(n: usize) -> String {
+    const SUPERSCRIPT_DIGITS: [char; 10] = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
+
+    if n == 0 {
+        return "⁰".to_string();
     }
+
+    n.to_string()
+        .chars()
+        .map(|c| {
+            c.to_digit(10)
+                .map(|d| SUPERSCRIPT_DIGITS[d as usize])
+                .unwrap_or(c)
+        })
+        .collect()
 }
 
 // ============================================================================
@@ -1173,11 +1179,14 @@ mod tests {
     }
 
     #[test]
-    fn test_superscript_digit() {
-        assert_eq!(superscript_digit(1), "¹");
-        assert_eq!(superscript_digit(10), "¹⁰");
-        assert_eq!(superscript_digit(20), "²⁰");
-        assert_eq!(superscript_digit(21), "·");
+    fn test_superscript_number() {
+        assert_eq!(superscript_number(0), "⁰");
+        assert_eq!(superscript_number(1), "¹");
+        assert_eq!(superscript_number(10), "¹⁰");
+        assert_eq!(superscript_number(20), "²⁰");
+        assert_eq!(superscript_number(21), "²¹");
+        assert_eq!(superscript_number(99), "⁹⁹");
+        assert_eq!(superscript_number(123), "¹²³");
     }
 
     #[test]
