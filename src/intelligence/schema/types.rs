@@ -18,6 +18,7 @@ pub enum SchemaSource {
 
 /// Value type for flags and arguments.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default)]
 pub enum ValueType {
     /// Boolean flag (no value)
     Bool,
@@ -38,14 +39,10 @@ pub enum ValueType {
     /// One of specific choices
     Choice(Vec<String>),
     /// Unknown/any type
+    #[default]
     Any,
 }
 
-impl Default for ValueType {
-    fn default() -> Self {
-        Self::Any
-    }
-}
 
 /// Schema for a command flag.
 #[derive(Debug, Clone, Serialize, Deserialize)]
