@@ -31,7 +31,7 @@ impl TopbarSegment for ScrollSegment {
         let scroll_fg = color_to_fg_ansi(theme.separator_fg);
         let scroll_content = format!(
             "▶ SCROLL | {}/{} | {}%",
-            scroll_info.first_visible_line, scroll_info.total_lines, scroll_info.percentage
+            scroll_info.current_line, scroll_info.total_lines, scroll_info.percentage
         );
         let scroll_width = scroll_content.width();
 
@@ -80,7 +80,7 @@ mod tests {
         state.scroll = Some(ScrollInfo {
             percentage: 45,
             total_lines: 1000,
-            first_visible_line: 450,
+            current_line: 450,
         });
 
         let rendered = ScrollSegment.render(&state, theme, symbols, "▶");

@@ -118,8 +118,10 @@ pub struct ScrollInfo {
     pub percentage: u8,
     /// Total lines in scrollback buffer.
     pub total_lines: usize,
-    /// First visible line number (1-indexed from oldest).
-    pub first_visible_line: usize,
+    /// Current line number - the last visible line at bottom of viewport (1-indexed).
+    /// At offset=0 (bottom), this equals total_lines.
+    /// As you scroll up, this decreases.
+    pub current_line: usize,
 }
 
 /// Git repository information for display.

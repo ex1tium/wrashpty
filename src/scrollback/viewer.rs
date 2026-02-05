@@ -67,19 +67,35 @@ impl ScrollViewer {
         let start_row = options.start_row.max(1) as usize;
         let total = buffer.len();
 
+        // Calculate boundary conditions
+        let max_offset = Self::max_offset(total, rows);
+        let is_at_bottom = offset == 0;
+        let is_at_top = offset >= max_offset && total > 0;
+
+        // Determine if we need to show markers
+        let show_end = options.show_end_marker && is_at_bottom && total > 0;
+        let show_begin = options.show_begin_marker && is_at_top && total > 0;
+
+        // Calculate how many content rows available
+        // Markers only "cost" a row when buffer would otherwise fill the viewport
+        let buffer_fills_viewport = total >= rows;
+        let end_cost = if show_end && buffer_fills_viewport { 1 } else { 0 };
+        let begin_cost = if show_begin && buffer_fills_viewport { 1 } else { 0 };
+        let content_rows = rows.saturating_sub(end_cost).saturating_sub(begin_cost);
+
         // Calculate first visible line number (1-indexed)
         let first_visible_line = total
             .saturating_sub(offset)
-            .saturating_sub(rows)
+            .saturating_sub(content_rows)
             .saturating_add(1)
             .max(1);
 
+        // When showing BEGIN with full viewport, we skip line 1 (BEGIN represents it)
+        let skip_lines = if show_begin && buffer_fills_viewport { 1 } else { 0 };
+        let display_first_line = first_visible_line + skip_lines;
+
         // Hide cursor during render
         write!(out, "\x1b[?25l")?;
-
-        // Get lines to display
-        let lines: Vec<_> = buffer.get_from_bottom(offset, rows).collect();
-        let mut rendered = 0;
 
         // Calculate gutter width if showing line numbers
         // Format: "  42 │ " = num_width + 3 (space + │ + space)
@@ -93,9 +109,25 @@ impl ScrollViewer {
         };
         let content_cols = (cols as usize).saturating_sub(gutter_width);
 
+        let mut current_row = start_row;
+        let mut rendered = 0;
+
+        // Render BEGIN marker if at top
+        if show_begin {
+            write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
+            Self::render_boundary_marker(out, cols as usize, gutter_width, "BEGIN")?;
+            current_row += 1;
+        }
+
+        // Get lines to display
+        let lines: Vec<_> = buffer
+            .get_from_bottom(offset, content_rows + skip_lines)
+            .skip(skip_lines)
+            .collect();
+
         for (i, line) in lines.iter().enumerate() {
-            let screen_row = start_row + i;
-            let line_number = first_visible_line + i;
+            let screen_row = current_row;
+            let line_number = display_first_line + i;
 
             // Move to line position
             write!(out, "\x1b[{};1H", screen_row)?;
@@ -125,39 +157,21 @@ impl ScrollViewer {
                 write!(out, "\x1b[7m>\x1b[27m")?; // Reverse video '>'
             }
 
+            current_row += 1;
             rendered += 1;
         }
 
-        // Handle boundary markers and remaining rows
-        let max_offset = Self::max_offset(total, rows);
-        let is_at_bottom = offset == 0;
-        let is_at_top = offset >= max_offset && total > 0;
+        // Render END marker if at bottom
+        if show_end {
+            write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
+            Self::render_boundary_marker(out, cols as usize, gutter_width, "END")?;
+            current_row += 1;
+        }
 
         // Clear any remaining rows
-        for i in rendered..rows {
-            let screen_row = start_row + i;
-            write!(out, "\x1b[{};1H\x1b[2K", screen_row)?;
-        }
-
-        // Show END marker on the last row when at bottom of buffer
-        // This appears after content if there's space, otherwise on the last viewport row
-        if options.show_end_marker && is_at_bottom && total > 0 {
-            let marker_row = if rendered < rows {
-                // Empty space exists - put marker right after content
-                start_row + rendered
-            } else {
-                // Content fills viewport - marker goes on last row
-                start_row + rows - 1
-            };
-            write!(out, "\x1b[{};1H\x1b[2K", marker_row)?;
-            Self::render_boundary_marker(out, cols as usize, gutter_width, "END")?;
-        }
-
-        // Show BEGIN marker on the first row when at top of buffer
-        // This appears before content if there's space, otherwise on the first viewport row
-        if options.show_begin_marker && is_at_top && total > 0 {
-            write!(out, "\x1b[{};1H\x1b[2K", start_row)?;
-            Self::render_boundary_marker(out, cols as usize, gutter_width, "BEGIN")?;
+        while current_row < start_row + rows {
+            write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
+            current_row += 1;
         }
 
         // Show cursor
