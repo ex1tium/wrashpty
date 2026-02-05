@@ -364,8 +364,8 @@ pub struct App {
     alt_screen_detector: crate::scrollback::AltScreenDetector,
     /// Current scroll state (Live or Scrolled with offset).
     scroll_state: crate::types::ScrollState,
-    /// Whether to show line numbers in scrollback view (toggled with Ctrl+L).
-    show_line_numbers: bool,
+    /// Viewer state for scroll view modes and display settings.
+    viewer_state: crate::scrollback::ViewerState,
 }
 
 impl App {
@@ -478,7 +478,7 @@ impl App {
             capture_state,
             alt_screen_detector,
             scroll_state: crate::types::ScrollState::Live,
-            show_line_numbers: false,
+            viewer_state: crate::scrollback::ViewerState::new(),
         })
     }
 
@@ -654,6 +654,9 @@ impl App {
                 for marker in markers {
                     match self.mode {
                         Mode::Passthrough => {
+                            // Record boundary for navigation before processing
+                            self.record_command_boundary(&marker);
+
                             match marker {
                                 MarkerEvent::Precmd { exit_code } => {
                                     self.last_exit_code = exit_code;
@@ -1606,6 +1609,9 @@ impl App {
                 // This handles the case where [PREEXEC, PRECMD, PROMPT] arrive
                 // together when a command fails quickly.
                 for marker in markers {
+                    // Record boundary for navigation
+                    self.record_command_boundary(&marker);
+
                     match self.mode {
                         Mode::Injecting => {
                             match marker {
@@ -1844,6 +1850,175 @@ impl App {
     fn scroll_to_bottom(&mut self) {
         self.scroll_state = crate::types::ScrollState::Live;
         debug!("Scrolled to bottom (live view)");
+    }
+
+    /// Records a marker event for command boundary navigation.
+    ///
+    /// Call this when a marker is detected during PTY output processing.
+    /// The boundary is recorded at the current buffer length.
+    fn record_command_boundary(&mut self, event: &crate::types::MarkerEvent) {
+        let line_index = self.scrollback_buffer.len();
+        self.viewer_state.boundaries.record_marker(event, line_index);
+    }
+
+    /// Jumps to the previous command boundary (Ctrl+P in scroll view).
+    fn jump_to_prev_command(&mut self) {
+        let total = self.scrollback_buffer.len();
+        if total == 0 {
+            return;
+        }
+
+        let offset = self.scroll_state.offset();
+        let viewport = self.viewport_height();
+        let max_offset = crate::scrollback::ScrollViewer::max_offset(total, viewport);
+
+        // Calculate first visible line (1-indexed, at top of viewport)
+        // offset=0 means we see the newest lines at bottom
+        // first_visible = total - offset - viewport + 1 (clamped to 1)
+        let first_visible = total
+            .saturating_sub(offset)
+            .saturating_sub(viewport)
+            .saturating_add(1)
+            .max(1);
+
+        debug!(
+            total,
+            offset,
+            first_visible,
+            command_count = self.viewer_state.boundaries.command_count(),
+            "Looking for previous command"
+        );
+
+        // Find command that starts before our current first visible line
+        if let Some(boundary) = self.viewer_state.boundaries.prev_command(first_visible) {
+            // Boundary points to where output STARTS, add 1 to skip the prompt/command line
+            // that was captured before the Preexec marker
+            let target_line = boundary.saturating_add(1);
+            // Calculate offset to show target_line near the top of viewport
+            // offset = total - (target_line + viewport - 1) = total - target_line - viewport + 1
+            let new_offset = total.saturating_sub(target_line).saturating_sub(viewport).saturating_add(1);
+            self.scroll_state = crate::types::ScrollState::scrolled_at(new_offset.min(max_offset));
+            debug!(boundary, target_line, new_offset, "Jumped to previous command");
+        } else {
+            debug!("No previous command found");
+        }
+    }
+
+    /// Jumps to the next command boundary (Ctrl+N in scroll view).
+    fn jump_to_next_command(&mut self) {
+        let total = self.scrollback_buffer.len();
+        if total == 0 {
+            return;
+        }
+
+        let offset = self.scroll_state.offset();
+        let viewport = self.viewport_height();
+
+        // Calculate first visible line (1-indexed)
+        let first_visible = total
+            .saturating_sub(offset)
+            .saturating_sub(viewport)
+            .saturating_add(1)
+            .max(1);
+
+        debug!(
+            total,
+            offset,
+            first_visible,
+            command_count = self.viewer_state.boundaries.command_count(),
+            "Looking for next command"
+        );
+
+        // Find command that starts after our current first visible line
+        if let Some(boundary) = self.viewer_state.boundaries.next_command(first_visible) {
+            // Boundary points to where output STARTS, add 1 to skip the prompt/command line
+            let target_line = boundary.saturating_add(1);
+            // Calculate offset to show target_line near the top of viewport
+            let new_offset = total.saturating_sub(target_line).saturating_sub(viewport).saturating_add(1);
+            self.scroll_state = crate::types::ScrollState::scrolled_at(new_offset.max(0));
+            debug!(target_line, new_offset, "Jumped to next command");
+        } else {
+            debug!("No next command found");
+        }
+    }
+
+    /// Runs the go-to-line mini-input mode.
+    ///
+    /// Returns Ok(true) if user submitted a valid line number,
+    /// Ok(false) if user cancelled.
+    fn run_goto_line_mode(&mut self) -> Result<bool> {
+        use crate::chrome::segments::{color_to_bg_ansi, color_to_fg_ansi};
+        use crossterm::event::{self, Event, KeyEventKind};
+
+        let mut input = crate::scrollback::MiniInput::with_hint("Go to line", "line number");
+        let total = self.scrollback_buffer.len();
+
+        // Get theme colors for consistent topbar styling
+        let theme = self.chrome.theme();
+        let bg_ansi = color_to_bg_ansi(theme.bar_bg);
+        let label_ansi = color_to_fg_ansi(theme.text_secondary);
+        let text_ansi = color_to_fg_ansi(theme.text_primary);
+
+        loop {
+            // Render the mini-input with topbar styling
+            let (cols, _) = TerminalGuard::get_size()?;
+            let status = format!("/{}", total);
+            input.render_styled(
+                &mut std::io::stdout(),
+                cols,
+                Some(&status),
+                Some(&bg_ansi),
+                Some(&label_ansi),
+                Some(&text_ansi),
+            )?;
+
+            // Wait for input
+            if event::poll(std::time::Duration::from_millis(100))? {
+                if let Event::Key(key) = event::read()? {
+                    // Only handle press events
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
+
+                    match input.handle_input(key) {
+                        crate::scrollback::MiniInputResult::Submit => {
+                            // Parse and jump to line
+                            if let Ok(line_num) = input.text().parse::<usize>() {
+                                if line_num > 0 && line_num <= total {
+                                    self.scroll_to_line(line_num);
+                                    return Ok(true);
+                                }
+                            }
+                            // Invalid input, just return without changing position
+                            return Ok(false);
+                        }
+                        crate::scrollback::MiniInputResult::Cancel => {
+                            return Ok(false);
+                        }
+                        crate::scrollback::MiniInputResult::Continue
+                        | crate::scrollback::MiniInputResult::Changed => {
+                            // Keep editing
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Scrolls to show a specific line number (1-indexed).
+    fn scroll_to_line(&mut self, line_num: usize) {
+        let total = self.scrollback_buffer.len();
+        let viewport = self.viewport_height();
+        let max_offset = crate::scrollback::ScrollViewer::max_offset(total, viewport);
+
+        // Calculate offset to show line_num near the top of viewport
+        // offset = total - line_at_bottom
+        // line_at_bottom = line_num + viewport - 1 (to show line_num at top)
+        let line_at_bottom = line_num.saturating_add(viewport).saturating_sub(1);
+        let offset = total.saturating_sub(line_at_bottom);
+
+        self.scroll_state = crate::types::ScrollState::scrolled_at(offset.min(max_offset));
+        debug!(line_num, offset, "Scrolled to line");
     }
 
     /// Returns the viewport height for scroll calculations.
@@ -2104,7 +2279,8 @@ impl App {
             offset,
             cols,
             rows,
-            self.show_line_numbers,
+            self.viewer_state.show_line_numbers(),
+            self.viewer_state.show_timestamps(),
             true, // show_boundary_markers
         )?;
 
@@ -2304,8 +2480,8 @@ impl App {
                     ..
                 }) if modifiers.contains(KeyModifiers::CONTROL) => {
                     // Ctrl+L: toggle line numbers
-                    self.show_line_numbers = !self.show_line_numbers;
-                    debug!(show_line_numbers = self.show_line_numbers, "Toggled line numbers");
+                    self.viewer_state.toggle_line_numbers();
+                    debug!(show_line_numbers = self.viewer_state.show_line_numbers(), "Toggled line numbers");
                     if let Err(e) = self.render_scrollback_view() {
                         warn!("Failed to render scrollback: {}", e);
                         self.scroll_to_bottom();
@@ -2340,6 +2516,79 @@ impl App {
                         warn!("Failed to render scrollback: {}", e);
                         self.scroll_to_bottom();
                         break;
+                    }
+                }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Char('t'),
+                    modifiers,
+                    ..
+                }) if modifiers.contains(KeyModifiers::CONTROL) => {
+                    // Ctrl+T: toggle timestamp gutter
+                    self.viewer_state.toggle_timestamps();
+                    debug!(show_timestamps = self.viewer_state.show_timestamps(), "Toggled timestamps");
+                    if let Err(e) = self.render_scrollback_view() {
+                        warn!("Failed to render scrollback: {}", e);
+                        self.scroll_to_bottom();
+                        break;
+                    }
+                }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Char('p'),
+                    modifiers,
+                    ..
+                }) if modifiers.contains(KeyModifiers::CONTROL) => {
+                    // Ctrl+P: jump to previous command boundary
+                    self.jump_to_prev_command();
+                    if let Err(e) = self.render_scrollback_view() {
+                        warn!("Failed to render scrollback: {}", e);
+                        self.scroll_to_bottom();
+                        break;
+                    }
+                }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Char('n'),
+                    modifiers,
+                    ..
+                }) if modifiers.contains(KeyModifiers::CONTROL) => {
+                    // Ctrl+N: jump to next command boundary
+                    self.jump_to_next_command();
+                    if let Err(e) = self.render_scrollback_view() {
+                        warn!("Failed to render scrollback: {}", e);
+                        self.scroll_to_bottom();
+                        break;
+                    }
+                }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Char('g'),
+                    modifiers,
+                    ..
+                }) if modifiers.contains(KeyModifiers::CONTROL) => {
+                    // Ctrl+G: go to line
+                    match self.run_goto_line_mode() {
+                        Ok(true) => {
+                            // User submitted a line number, re-render
+                            if let Err(e) = self.render_scrollback_view() {
+                                warn!("Failed to render scrollback: {}", e);
+                                self.scroll_to_bottom();
+                                break;
+                            }
+                        }
+                        Ok(false) => {
+                            // User cancelled, just re-render
+                            if let Err(e) = self.render_scrollback_view() {
+                                warn!("Failed to render scrollback: {}", e);
+                                self.scroll_to_bottom();
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Go-to-line mode error: {}", e);
+                            if let Err(e) = self.render_scrollback_view() {
+                                warn!("Failed to render scrollback: {}", e);
+                                self.scroll_to_bottom();
+                                break;
+                            }
+                        }
                     }
                 }
                 Event::Key(KeyEvent {

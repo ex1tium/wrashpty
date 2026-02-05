@@ -15,6 +15,8 @@ pub struct RenderOptions {
     pub start_row: u16,
     /// Whether to show line numbers in left gutter.
     pub show_line_numbers: bool,
+    /// Whether to show relative timestamps in left gutter.
+    pub show_timestamps: bool,
     /// Show "END" marker when at the bottom of the buffer.
     pub show_end_marker: bool,
     /// Show "BEGIN" marker when at the top of the buffer.
@@ -100,9 +102,9 @@ impl ScrollViewer {
         // Hide cursor during render
         write!(out, "\x1b[?25l")?;
 
-        // Calculate gutter width if showing line numbers
+        // Calculate gutter width for line numbers
         // Format: "  42 │ " = num_width + 3 (space + │ + space)
-        let gutter_width = if options.show_line_numbers {
+        let line_num_width = if options.show_line_numbers {
             let max_line = total;
             let num_width =
                 if max_line == 0 { 1 } else { (max_line as f64).log10().floor() as usize + 1 };
@@ -110,7 +112,16 @@ impl ScrollViewer {
         } else {
             0
         };
+
+        // Calculate timestamp gutter width
+        // Format: " 5m │ " = 6 chars minimum (time + unit + space + │ + space)
+        let timestamp_width = if options.show_timestamps { 7 } else { 0 };
+
+        let gutter_width = line_num_width + timestamp_width;
         let content_cols = (cols as usize).saturating_sub(gutter_width);
+
+        // Get current time for relative timestamp calculation
+        let now = std::time::Instant::now();
 
         let mut current_row = start_row;
         let mut rendered = 0;
@@ -132,11 +143,21 @@ impl ScrollViewer {
             // Clear line
             write!(out, "\x1b[2K")?;
 
+            // Render timestamp gutter if enabled
+            // Format: " 5m │ " showing relative time since capture
+            if options.show_timestamps {
+                let elapsed = now.duration_since(line.timestamp());
+                let time_str = Self::format_relative_time(elapsed);
+                write!(out, "\x1b[2m")?; // Dim
+                write!(out, "{:>4} │ ", time_str)?;
+                write!(out, "\x1b[22m")?; // Reset dim
+            }
+
             // Render line number gutter if enabled
             // Format: "  42 │ " with spaces around separator for easier copy-paste
             if options.show_line_numbers {
                 write!(out, "\x1b[2m")?; // Dim
-                write!(out, "{:>width$} │ ", line_number, width = gutter_width - 3)?;
+                write!(out, "{:>width$} │ ", line_number, width = line_num_width - 3)?;
                 write!(out, "\x1b[22m")?; // Reset dim
             }
 
@@ -179,6 +200,22 @@ impl ScrollViewer {
             lines_rendered: rendered,
             first_visible_line,
         })
+    }
+
+    /// Formats a duration as a relative time string.
+    ///
+    /// Returns strings like "0s", "5s", "2m", "1h", "3d".
+    fn format_relative_time(duration: std::time::Duration) -> String {
+        let secs = duration.as_secs();
+        if secs < 60 {
+            format!("{}s", secs)
+        } else if secs < 3600 {
+            format!("{}m", secs / 60)
+        } else if secs < 86400 {
+            format!("{}h", secs / 3600)
+        } else {
+            format!("{}d", secs / 86400)
+        }
     }
 
     /// Renders a centered boundary marker (BEGIN/END).
@@ -229,6 +266,7 @@ impl ScrollViewer {
     /// * `cols` - Terminal width
     /// * `rows` - Total terminal rows (content will use rows 2..rows)
     /// * `show_line_numbers` - Whether to show line number gutter
+    /// * `show_timestamps` - Whether to show relative timestamp gutter
     /// * `show_boundary_markers` - Whether to show BEGIN/END markers at buffer boundaries
     pub fn render_with_chrome<W: Write>(
         out: &mut W,
@@ -237,12 +275,14 @@ impl ScrollViewer {
         cols: u16,
         rows: u16,
         show_line_numbers: bool,
+        show_timestamps: bool,
         show_boundary_markers: bool,
     ) -> io::Result<RenderStats> {
         let content_rows = rows.saturating_sub(1); // Reserve row 1 for topbar
         let options = RenderOptions {
             start_row: 2,
             show_line_numbers,
+            show_timestamps,
             show_end_marker: show_boundary_markers,
             show_begin_marker: show_boundary_markers,
         };
@@ -357,7 +397,8 @@ mod tests {
 
         // 5 total rows, row 1 reserved for topbar, so 4 content rows
         let stats =
-            ScrollViewer::render_with_chrome(&mut output, &buffer, 0, 80, 5, false, false).unwrap();
+            ScrollViewer::render_with_chrome(&mut output, &buffer, 0, 80, 5, false, false, false)
+                .unwrap();
         assert_eq!(stats.lines_rendered, 4);
         assert_eq!(stats.first_visible_line, 2); // lines 2,3,4,5 visible (offset 0)
 
@@ -372,7 +413,8 @@ mod tests {
         let mut output = Vec::new();
 
         let stats =
-            ScrollViewer::render_with_chrome(&mut output, &buffer, 0, 80, 5, true, false).unwrap();
+            ScrollViewer::render_with_chrome(&mut output, &buffer, 0, 80, 5, true, false, false)
+                .unwrap();
         assert_eq!(stats.lines_rendered, 2);
 
         let output_str = String::from_utf8_lossy(&output);
@@ -387,13 +429,15 @@ mod tests {
 
         // At bottom (offset 0), viewing 3 lines: should show lines 8,9,10
         let stats =
-            ScrollViewer::render_with_chrome(&mut output, &buffer, 0, 80, 4, false, false).unwrap();
+            ScrollViewer::render_with_chrome(&mut output, &buffer, 0, 80, 4, false, false, false)
+                .unwrap();
         assert_eq!(stats.first_visible_line, 8);
 
         // Scrolled up 3 lines: should show lines 5,6,7
         output.clear();
         let stats =
-            ScrollViewer::render_with_chrome(&mut output, &buffer, 3, 80, 4, false, false).unwrap();
+            ScrollViewer::render_with_chrome(&mut output, &buffer, 3, 80, 4, false, false, false)
+                .unwrap();
         assert_eq!(stats.first_visible_line, 5);
     }
 
@@ -404,7 +448,8 @@ mod tests {
 
         // Buffer smaller than viewport (2 lines in 5 rows), at bottom - should show END
         let stats =
-            ScrollViewer::render_with_chrome(&mut output, &buffer, 0, 80, 5, false, true).unwrap();
+            ScrollViewer::render_with_chrome(&mut output, &buffer, 0, 80, 5, false, false, true)
+                .unwrap();
         assert_eq!(stats.lines_rendered, 2);
 
         let output_str = String::from_utf8_lossy(&output);
@@ -414,7 +459,7 @@ mod tests {
         output.clear();
         let max_off = ScrollViewer::max_offset(2, 4); // 0 since buffer < viewport
         let _stats =
-            ScrollViewer::render_with_chrome(&mut output, &buffer, max_off, 80, 5, false, true)
+            ScrollViewer::render_with_chrome(&mut output, &buffer, max_off, 80, 5, false, false, true)
                 .unwrap();
 
         let output_str = String::from_utf8_lossy(&output);
