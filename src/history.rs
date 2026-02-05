@@ -273,38 +273,41 @@ pub fn dedupe_bash_history() -> anyhow::Result<usize> {
     }
 
     if removed > 0 {
-        // Write to a temporary file first for atomic replacement
-        let temp_path = history_path.with_extension("tmp");
+        // Write to a temporary file first for atomic replacement.
+        // Use NamedTempFile for RAII cleanup - if any operation fails before persist(),
+        // the temp file is automatically removed when dropped.
+        let parent_dir = history_path
+            .parent()
+            .unwrap_or(std::path::Path::new("."));
+        let mut temp_file = tempfile::NamedTempFile::new_in(parent_dir)
+            .with_context(|| format!("Failed to create temp file in {}", parent_dir.display()))?;
 
         // Get original file permissions if it exists
         let permissions = fs::metadata(&history_path).ok().map(|m| m.permissions());
 
         // Write deduplicated history to temp file
-        {
-            let mut file = fs::File::create(&temp_path)
-                .with_context(|| format!("Failed to create temp file {}", temp_path.display()))?;
-
-            for line in &deduped {
-                writeln!(file, "{}", line)
-                    .with_context(|| format!("Failed to write to temp file {}", temp_path.display()))?;
-            }
-
-            // Flush and sync to ensure all data is written to disk
-            file.flush()
-                .with_context(|| format!("Failed to flush temp file {}", temp_path.display()))?;
-            file.sync_all()
-                .with_context(|| format!("Failed to sync temp file {}", temp_path.display()))?;
+        for line in &deduped {
+            writeln!(temp_file, "{}", line).context("Failed to write to temp file")?;
         }
+
+        // Flush and sync to ensure all data is written to disk
+        temp_file.flush().context("Failed to flush temp file")?;
+        temp_file
+            .as_file()
+            .sync_all()
+            .context("Failed to sync temp file")?;
 
         // Preserve original permissions if we captured them
         if let Some(perms) = permissions {
-            fs::set_permissions(&temp_path, perms)
-                .with_context(|| format!("Failed to set permissions on temp file {}", temp_path.display()))?;
+            fs::set_permissions(temp_file.path(), perms)
+                .context("Failed to set permissions on temp file")?;
         }
 
-        // Atomically rename temp file to history file
-        fs::rename(&temp_path, &history_path)
-            .with_context(|| format!("Failed to rename {} to {}", temp_path.display(), history_path.display()))?;
+        // Atomically persist temp file to history file.
+        // This consumes the NamedTempFile, preventing automatic deletion on success.
+        temp_file
+            .persist(&history_path)
+            .with_context(|| format!("Failed to persist temp file to {}", history_path.display()))?;
 
         info!(removed, "Deduplicated bash_history");
     }

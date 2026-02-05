@@ -4,6 +4,7 @@
 //! and recursively probing subcommands.
 
 use std::collections::HashSet;
+use std::io::Read;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 use tracing::{debug, info};
@@ -51,36 +52,47 @@ pub fn probe_command_help(command: &str) -> Option<String> {
 
         match spawn_result {
             Ok(mut child) => {
+                // Take ownership of pipes before wait_timeout() reaps the child
+                let mut stdout_pipe = child.stdout.take();
+                let mut stderr_pipe = child.stderr.take();
+
                 let timeout = Duration::from_millis(HELP_TIMEOUT_MS);
                 match child.wait_timeout(timeout) {
                     Ok(Some(_status)) => {
-                        // Process completed within timeout, collect output
-                        match child.wait_with_output() {
-                            Ok(output) => {
-                                // Some commands output help to stderr
-                                let stdout = String::from_utf8_lossy(&output.stdout);
-                                let stderr = String::from_utf8_lossy(&output.stderr);
+                        // Process completed within timeout, read from pipes directly
+                        let mut stdout_buf = Vec::new();
+                        let mut stderr_buf = Vec::new();
 
-                                let help_text = if stdout.len() > stderr.len() {
-                                    stdout.to_string()
-                                } else {
-                                    stderr.to_string()
-                                };
+                        if let Some(ref mut pipe) = stdout_pipe {
+                            if let Err(e) = pipe.read_to_end(&mut stdout_buf) {
+                                debug!(command = ?cmd_parts, error = %e, "Failed to read stdout");
+                            }
+                        }
+                        if let Some(ref mut pipe) = stderr_pipe {
+                            if let Err(e) = pipe.read_to_end(&mut stderr_buf) {
+                                debug!(command = ?cmd_parts, error = %e, "Failed to read stderr");
+                            }
+                        }
 
-                                // Validate it looks like help output
-                                if is_help_output(&help_text) {
-                                    debug!(
-                                        command = command,
-                                        help_flag = help_flag,
-                                        length = help_text.len(),
-                                        "Got help output"
-                                    );
-                                    return Some(help_text);
-                                }
-                            }
-                            Err(e) => {
-                                debug!(command = ?cmd_parts, error = %e, "Failed to collect help output");
-                            }
+                        // Some commands output help to stderr
+                        let stdout = String::from_utf8_lossy(&stdout_buf);
+                        let stderr = String::from_utf8_lossy(&stderr_buf);
+
+                        let help_text = if stdout.len() > stderr.len() {
+                            stdout.to_string()
+                        } else {
+                            stderr.to_string()
+                        };
+
+                        // Validate it looks like help output
+                        if is_help_output(&help_text) {
+                            debug!(
+                                command = command,
+                                help_flag = help_flag,
+                                length = help_text.len(),
+                                "Got help output"
+                            );
+                            return Some(help_text);
                         }
                     }
                     Ok(None) => {
