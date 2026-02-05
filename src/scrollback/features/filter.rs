@@ -1,5 +1,7 @@
 //! Filter state for showing only matching lines in scrollback.
 
+use crate::scrollback::buffer::ScrollbackBuffer;
+
 /// State for filter mode.
 ///
 /// When active, only lines matching the filter pattern are displayed.
@@ -54,6 +56,91 @@ impl FilterState {
             format!("{} lines", self.matching_lines.len())
         }
     }
+
+    /// Performs filtering on the buffer and populates matching_lines.
+    ///
+    /// This is called incrementally as the user types. It finds all
+    /// lines that contain the filter pattern.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer` - The scrollback buffer to filter
+    pub fn perform_filter(&mut self, buffer: &ScrollbackBuffer) {
+        self.clear_matches();
+
+        if self.pattern.is_empty() {
+            return;
+        }
+
+        // Convert pattern for case-insensitive matching if needed
+        let pattern_lower = if self.case_sensitive {
+            None
+        } else {
+            Some(self.pattern.to_lowercase())
+        };
+        let search_pattern = pattern_lower.as_deref().unwrap_or(&self.pattern);
+
+        // Find all matching lines
+        for (line_idx, line) in buffer.iter().enumerate() {
+            let content = line.content();
+            let content_str = String::from_utf8_lossy(content);
+            let search_str = if self.case_sensitive {
+                content_str.to_string()
+            } else {
+                content_str.to_lowercase()
+            };
+
+            if search_str.contains(search_pattern) {
+                self.matching_lines.push(line_idx);
+            }
+        }
+    }
+
+    /// Returns an iterator of (line_index, line) for filtered lines.
+    ///
+    /// Use this to render only the matching lines while preserving
+    /// their original line numbers.
+    pub fn filtered_lines<'a>(
+        &'a self,
+        buffer: &'a ScrollbackBuffer,
+    ) -> impl Iterator<Item = (usize, &'a crate::scrollback::buffer::ScrollLine)> {
+        self.matching_lines
+            .iter()
+            .filter_map(move |&idx| buffer.get(idx).map(|line| (idx, line)))
+    }
+
+    /// Returns visible lines within a viewport range for filtered display.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer` - The scrollback buffer
+    /// * `offset` - Lines from bottom (in filtered view)
+    /// * `count` - Number of lines to retrieve
+    ///
+    /// # Returns
+    ///
+    /// Vector of (original_line_index, ScrollLine) pairs.
+    pub fn get_filtered_range<'a>(
+        &'a self,
+        buffer: &'a ScrollbackBuffer,
+        offset: usize,
+        count: usize,
+    ) -> Vec<(usize, &'a crate::scrollback::buffer::ScrollLine)> {
+        let total = self.matching_lines.len();
+        if offset >= total {
+            return Vec::new();
+        }
+
+        let end_from_start = total.saturating_sub(offset);
+        let start_from_start = end_from_start.saturating_sub(count);
+
+        self.matching_lines
+            .iter()
+            .skip(start_from_start)
+            .take(count.min(end_from_start - start_from_start))
+            .filter_map(|&idx| buffer.get(idx).map(|line| (idx, line)))
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -90,5 +177,99 @@ mod tests {
 
         state.matching_lines = vec![1, 5, 10];
         assert_eq!(state.status(), "3 lines");
+    }
+
+    #[test]
+    fn test_perform_filter_basic() {
+        let mut buffer = ScrollbackBuffer::with_capacity(100, 1000);
+        buffer.push_line(b"error: something failed".to_vec());
+        buffer.push_line(b"info: all good".to_vec());
+        buffer.push_line(b"error: another failure".to_vec());
+        buffer.push_line(b"warning: maybe".to_vec());
+
+        let mut state = FilterState::new();
+        state.pattern = "error".to_string();
+        state.perform_filter(&buffer);
+
+        assert_eq!(state.match_count(), 2);
+        assert!(state.line_visible(0));
+        assert!(!state.line_visible(1));
+        assert!(state.line_visible(2));
+        assert!(!state.line_visible(3));
+    }
+
+    #[test]
+    fn test_perform_filter_case_insensitive() {
+        let mut buffer = ScrollbackBuffer::with_capacity(100, 1000);
+        buffer.push_line(b"ERROR: uppercase".to_vec());
+        buffer.push_line(b"error: lowercase".to_vec());
+        buffer.push_line(b"Error: mixed".to_vec());
+
+        let mut state = FilterState::new();
+        state.pattern = "error".to_string();
+        state.case_sensitive = false; // default
+        state.perform_filter(&buffer);
+
+        assert_eq!(state.match_count(), 3);
+    }
+
+    #[test]
+    fn test_perform_filter_case_sensitive() {
+        let mut buffer = ScrollbackBuffer::with_capacity(100, 1000);
+        buffer.push_line(b"ERROR: uppercase".to_vec());
+        buffer.push_line(b"error: lowercase".to_vec());
+
+        let mut state = FilterState::new();
+        state.pattern = "ERROR".to_string();
+        state.case_sensitive = true;
+        state.perform_filter(&buffer);
+
+        assert_eq!(state.match_count(), 1);
+        assert!(state.line_visible(0));
+        assert!(!state.line_visible(1));
+    }
+
+    #[test]
+    fn test_perform_filter_empty_pattern() {
+        let mut buffer = ScrollbackBuffer::with_capacity(100, 1000);
+        buffer.push_line(b"line 1".to_vec());
+        buffer.push_line(b"line 2".to_vec());
+
+        let mut state = FilterState::new();
+        state.perform_filter(&buffer);
+
+        assert!(state.matching_lines.is_empty());
+    }
+
+    #[test]
+    fn test_get_filtered_range() {
+        let mut buffer = ScrollbackBuffer::with_capacity(100, 1000);
+        for i in 0..10 {
+            let content = if i % 2 == 0 {
+                format!("line {} match", i)
+            } else {
+                format!("line {} no", i)
+            };
+            buffer.push_line(content.into_bytes());
+        }
+
+        let mut state = FilterState::new();
+        state.pattern = "match".to_string();
+        state.perform_filter(&buffer);
+
+        // Should have 5 matching lines: 0, 2, 4, 6, 8
+        assert_eq!(state.match_count(), 5);
+
+        // Get last 2 lines (offset 0, count 2)
+        let lines = state.get_filtered_range(&buffer, 0, 2);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].0, 6); // Original line index
+        assert_eq!(lines[1].0, 8);
+
+        // Get first 2 lines (max offset)
+        let lines = state.get_filtered_range(&buffer, 3, 2);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].0, 0);
+        assert_eq!(lines[1].0, 2);
     }
 }

@@ -5,10 +5,12 @@
 
 mod filter;
 mod goto;
+mod help;
 mod search;
 mod yank;
 
 pub use filter::FilterState;
 pub use goto::GoToLineState;
-pub use search::{SearchDirection, SearchState};
+pub use help::HelpBar;
+pub use search::{SearchDirection, SearchMatch, SearchState};
 pub use yank::{SelectionMode, YankState};

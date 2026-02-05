@@ -1,5 +1,7 @@
 //! Search state and logic for incremental search in scrollback.
 
+use crate::scrollback::buffer::ScrollbackBuffer;
+
 /// Direction for search navigation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SearchDirection {
@@ -106,6 +108,101 @@ impl SearchState {
         self.matches.clear();
         self.current_match = None;
     }
+
+    /// Performs search on the buffer and populates matches.
+    ///
+    /// This is called incrementally as the user types. It finds all
+    /// occurrences of the query in the buffer and sets the current
+    /// match to the one nearest to the given viewport position.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer` - The scrollback buffer to search
+    /// * `near_line` - Line to find nearest match to (for initial selection)
+    pub fn perform_search(&mut self, buffer: &ScrollbackBuffer, near_line: usize) {
+        self.clear_matches();
+
+        if self.query.is_empty() {
+            return;
+        }
+
+        // Convert query for case-insensitive search if needed
+        let query_lower = if self.case_sensitive {
+            None
+        } else {
+            Some(self.query.to_lowercase())
+        };
+        let search_pattern = query_lower.as_deref().unwrap_or(&self.query);
+
+        // Search all lines in buffer
+        for (line_idx, line) in buffer.iter().enumerate() {
+            let content = line.content();
+
+            // Convert content to string for searching (lossy for non-UTF8)
+            let content_str = String::from_utf8_lossy(content);
+            let search_str = if self.case_sensitive {
+                content_str.to_string()
+            } else {
+                content_str.to_lowercase()
+            };
+
+            // Find all occurrences in this line
+            let mut start_pos = 0;
+            while let Some(found_pos) = search_str[start_pos..].find(search_pattern) {
+                let absolute_start = start_pos + found_pos;
+                let absolute_end = absolute_start + search_pattern.len();
+
+                self.matches.push(SearchMatch {
+                    line: line_idx,
+                    start: absolute_start,
+                    end: absolute_end,
+                });
+
+                // Move past this match to find next
+                start_pos = absolute_start + 1;
+                if start_pos >= search_str.len() {
+                    break;
+                }
+            }
+        }
+
+        // Select nearest match to the viewport position
+        if !self.matches.is_empty() {
+            // Find match closest to near_line
+            let nearest_idx = self
+                .matches
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, m)| {
+                    if m.line >= near_line {
+                        m.line - near_line
+                    } else {
+                        near_line - m.line
+                    }
+                })
+                .map(|(idx, _)| idx)
+                .unwrap_or(0);
+
+            self.current_match = Some(nearest_idx);
+        }
+    }
+
+    /// Returns matches on a specific line for highlighting.
+    pub fn matches_on_line(&self, line_idx: usize) -> impl Iterator<Item = &SearchMatch> {
+        self.matches.iter().filter(move |m| m.line == line_idx)
+    }
+
+    /// Jumps to the match nearest to the given line, preferring forward direction.
+    pub fn jump_to_nearest(&mut self, from_line: usize) {
+        if self.matches.is_empty() {
+            return;
+        }
+
+        // Find first match at or after from_line
+        let forward_idx = self.matches.iter().position(|m| m.line >= from_line);
+
+        self.current_match = Some(forward_idx.unwrap_or(0));
+    }
 }
 
 #[cfg(test)]
@@ -157,5 +254,116 @@ mod tests {
         state.matches.push(SearchMatch { line: 0, start: 0, end: 4 });
         state.current_match = Some(0);
         assert_eq!(state.status(), "1/1");
+    }
+
+    #[test]
+    fn test_perform_search_basic() {
+        let mut buffer = ScrollbackBuffer::with_capacity(100, 1000);
+        buffer.push_line(b"hello world".to_vec());
+        buffer.push_line(b"another line".to_vec());
+        buffer.push_line(b"hello again".to_vec());
+
+        let mut state = SearchState::new();
+        state.query = "hello".to_string();
+        state.perform_search(&buffer, 0);
+
+        assert_eq!(state.matches.len(), 2);
+        assert_eq!(state.matches[0].line, 0);
+        assert_eq!(state.matches[0].start, 0);
+        assert_eq!(state.matches[0].end, 5);
+        assert_eq!(state.matches[1].line, 2);
+        assert!(state.current_match.is_some());
+    }
+
+    #[test]
+    fn test_perform_search_case_insensitive() {
+        let mut buffer = ScrollbackBuffer::with_capacity(100, 1000);
+        buffer.push_line(b"Hello World".to_vec());
+        buffer.push_line(b"HELLO AGAIN".to_vec());
+
+        let mut state = SearchState::new();
+        state.query = "hello".to_string();
+        state.case_sensitive = false; // default
+        state.perform_search(&buffer, 0);
+
+        assert_eq!(state.matches.len(), 2);
+    }
+
+    #[test]
+    fn test_perform_search_case_sensitive() {
+        let mut buffer = ScrollbackBuffer::with_capacity(100, 1000);
+        buffer.push_line(b"Hello World".to_vec());
+        buffer.push_line(b"hello again".to_vec());
+
+        let mut state = SearchState::new();
+        state.query = "Hello".to_string();
+        state.case_sensitive = true;
+        state.perform_search(&buffer, 0);
+
+        assert_eq!(state.matches.len(), 1);
+        assert_eq!(state.matches[0].line, 0);
+    }
+
+    #[test]
+    fn test_perform_search_multiple_matches_per_line() {
+        let mut buffer = ScrollbackBuffer::with_capacity(100, 1000);
+        buffer.push_line(b"test test test".to_vec());
+
+        let mut state = SearchState::new();
+        state.query = "test".to_string();
+        state.perform_search(&buffer, 0);
+
+        assert_eq!(state.matches.len(), 3);
+        assert_eq!(state.matches[0].start, 0);
+        assert_eq!(state.matches[1].start, 5);
+        assert_eq!(state.matches[2].start, 10);
+    }
+
+    #[test]
+    fn test_perform_search_empty_query() {
+        let mut buffer = ScrollbackBuffer::with_capacity(100, 1000);
+        buffer.push_line(b"hello world".to_vec());
+
+        let mut state = SearchState::new();
+        state.perform_search(&buffer, 0);
+
+        assert!(state.matches.is_empty());
+        assert!(state.current_match.is_none());
+    }
+
+    #[test]
+    fn test_matches_on_line() {
+        let mut state = SearchState::new();
+        state.matches = vec![
+            SearchMatch { line: 0, start: 0, end: 4 },
+            SearchMatch { line: 0, start: 10, end: 14 },
+            SearchMatch { line: 2, start: 5, end: 9 },
+        ];
+
+        let line0_matches: Vec<_> = state.matches_on_line(0).collect();
+        assert_eq!(line0_matches.len(), 2);
+
+        let line1_matches: Vec<_> = state.matches_on_line(1).collect();
+        assert_eq!(line1_matches.len(), 0);
+
+        let line2_matches: Vec<_> = state.matches_on_line(2).collect();
+        assert_eq!(line2_matches.len(), 1);
+    }
+
+    #[test]
+    fn test_nearest_match_selection() {
+        let mut buffer = ScrollbackBuffer::with_capacity(100, 1000);
+        for i in 0..10 {
+            buffer.push_line(format!("line {} test", i).into_bytes());
+        }
+
+        let mut state = SearchState::new();
+        state.query = "test".to_string();
+        state.perform_search(&buffer, 5); // Near line 5
+
+        // Should select match closest to line 5
+        assert!(state.current_match.is_some());
+        let current = state.current().unwrap();
+        assert_eq!(current.line, 5);
     }
 }
