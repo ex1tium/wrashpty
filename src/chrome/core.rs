@@ -448,26 +448,6 @@ impl Chrome {
         Ok(())
     }
 
-    /// Truncates a string to fit within the specified display width.
-    ///
-    /// Handles Unicode characters correctly by using display width rather
-    /// than byte or character count.
-    fn truncate_to_width(s: &str, max_width: usize) -> &str {
-        let mut current_width = 0;
-        let mut last_valid_idx = 0;
-
-        for (idx, ch) in s.char_indices() {
-            let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-            if current_width + ch_width > max_width {
-                break;
-            }
-            current_width += ch_width;
-            last_valid_idx = idx + ch.len_utf8();
-        }
-
-        &s[..last_valid_idx]
-    }
-
     /// Clears the content area (the scroll region) and positions cursor.
     ///
     /// Clears rows 2 through N (the scroll region area) and positions the cursor
