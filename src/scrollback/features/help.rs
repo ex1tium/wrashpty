@@ -18,10 +18,10 @@ impl HelpBar {
                 "PgUp/Dn:scroll  Home/End:top/bot  Ctrl+S:search  Ctrl+F:filter  Ctrl+G:goto  Ctrl+L:lines  Ctrl+T:time  ?:hide"
             }
             ScrollViewMode::Search(_) => {
-                "Enter:confirm  Esc:cancel  Up/Down:prev/next match"
+                "Enter:confirm  Esc:cancel  Up/Down:prev/next match  Ctrl+F:filter"
             }
             ScrollViewMode::Filter(_) => {
-                "Enter:confirm  Esc:cancel  PgUp/Dn:scroll  Home/End:top/bot"
+                "Enter:confirm  Esc:cancel  Ctrl+S:search  PgUp/Dn:scroll  Home/End:top/bot"
             }
             ScrollViewMode::Yank(_) => {
                 "v:toggle line  y/Enter:copy  Esc:cancel  Arrows:move"

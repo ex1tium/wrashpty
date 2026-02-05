@@ -2052,6 +2052,31 @@ impl App {
                         continue;
                     }
 
+                    // Handle Ctrl+F: Enter filter-within-search mode
+                    if key.code == KeyCode::Char('f')
+                        && key
+                            .modifiers
+                            .contains(crossterm::event::KeyModifiers::CONTROL)
+                    {
+                        if search.has_matches() {
+                            // Cache search results for filter mode
+                            let search_lines = search.matched_line_indices();
+                            self.viewer_state.last_search_lines = Some(search_lines);
+
+                            // Run filter mode with search results as base
+                            match self.run_filter_mode() {
+                                Ok(_navigated) => {
+                                    // Re-render search view after returning from filter
+                                    self.render_scrollback_with_search(&search)?;
+                                }
+                                Err(e) => {
+                                    warn!("Filter within search failed: {}", e);
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
                     // Handle Up/Down arrows for match navigation while in search mode
                     match key.code {
                         KeyCode::Down => {
@@ -2080,10 +2105,19 @@ impl App {
 
                     match input.handle_input(key) {
                         crate::scrollback::MiniInputResult::Submit => {
+                            // Store search results for filter+search combination
+                            if search.has_matches() {
+                                self.viewer_state.last_search_lines =
+                                    Some(search.matched_line_indices());
+                            } else {
+                                self.viewer_state.last_search_lines = None;
+                            }
                             // Exit search mode, keep current position
                             return Ok(scrolled_to_match);
                         }
                         crate::scrollback::MiniInputResult::Cancel => {
+                            // Clear search results on cancel
+                            self.viewer_state.last_search_lines = None;
                             return Ok(false);
                         }
                         crate::scrollback::MiniInputResult::Changed => {
@@ -2161,17 +2195,35 @@ impl App {
         use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 
         let mut filter = FilterState::new();
-        let mut input = crate::scrollback::MiniInput::with_hint("Filter", "pattern");
+
+        // Check if we have search results to use as base filter
+        let using_search_results = self.viewer_state.last_search_lines.is_some();
+        let hint = if using_search_results {
+            "filter search results"
+        } else {
+            "pattern"
+        };
+        let mut input = crate::scrollback::MiniInput::with_hint("Filter", hint);
+
+        // Pre-populate filter with search results if available
+        if let Some(ref lines) = self.viewer_state.last_search_lines {
+            filter.matching_lines = lines.clone();
+        }
+
+        // Track filter-specific scroll offset
+        let mut filter_offset: usize = 0;
+        let mut navigated = false;
+
+        // Initial render if we have pre-populated results
+        if using_search_results && !filter.matching_lines.is_empty() {
+            self.render_scrollback_with_filter(&filter, filter_offset)?;
+        }
 
         // Get theme colors for consistent topbar styling
         let theme = self.chrome.theme();
         let bg_ansi = color_to_bg_ansi(theme.bar_bg);
         let label_ansi = color_to_fg_ansi(theme.text_secondary);
         let text_ansi = color_to_fg_ansi(theme.text_primary);
-
-        // Track filter-specific scroll offset
-        let mut filter_offset: usize = 0;
-        let mut navigated = false;
 
         loop {
             // Render filter input with match count status
@@ -2255,6 +2307,26 @@ impl App {
                             navigated = true;
                             continue;
                         }
+                        KeyCode::Char('s') if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                            // Ctrl+S: Enter search-within-filter mode
+                            if filter.has_matches() {
+                                // Run search within the filtered lines
+                                match self.run_search_within_filter_mode(&filter, filter_offset) {
+                                    Ok((new_offset, did_navigate)) => {
+                                        filter_offset = new_offset;
+                                        if did_navigate {
+                                            navigated = true;
+                                        }
+                                        // Re-render filter view after returning from search
+                                        self.render_scrollback_with_filter(&filter, filter_offset)?;
+                                    }
+                                    Err(e) => {
+                                        warn!("Search within filter failed: {}", e);
+                                    }
+                                }
+                            }
+                            continue;
+                        }
                         _ => {}
                     }
 
@@ -2271,8 +2343,24 @@ impl App {
                             filter.pattern = input.text().to_string();
                             filter.cursor = input.cursor;
 
-                            // Perform incremental filtering
-                            filter.perform_filter(&self.scrollback_buffer);
+                            if using_search_results {
+                                // Filter within search results
+                                if filter.pattern.is_empty() {
+                                    // Restore original search results
+                                    if let Some(ref lines) = self.viewer_state.last_search_lines {
+                                        filter.matching_lines = lines.clone();
+                                    }
+                                } else {
+                                    // Filter search results by additional pattern
+                                    filter.perform_filter_within(
+                                        &self.scrollback_buffer,
+                                        self.viewer_state.last_search_lines.as_ref().unwrap(),
+                                    );
+                                }
+                            } else {
+                                // Normal filtering - search entire buffer
+                                filter.perform_filter(&self.scrollback_buffer);
+                            }
 
                             // Reset to bottom of filtered view
                             filter_offset = 0;
@@ -2310,6 +2398,180 @@ impl App {
             rows,
             self.viewer_state.show_line_numbers(),
             self.viewer_state.show_timestamps(),
+        )?;
+
+        out.flush()?;
+        Ok(())
+    }
+
+    /// Runs search mode within a filtered view (Ctrl+S while in filter mode).
+    ///
+    /// Searches only within the lines that passed the filter.
+    /// Returns (new_filter_offset, navigated_to_match).
+    fn run_search_within_filter_mode(
+        &mut self,
+        filter: &crate::scrollback::features::FilterState,
+        initial_offset: usize,
+    ) -> Result<(usize, bool)> {
+        use crate::chrome::segments::{color_to_bg_ansi, color_to_fg_ansi};
+        use crate::scrollback::features::SearchState;
+        use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+
+        let mut search = SearchState::new();
+        let mut input = crate::scrollback::MiniInput::with_hint("Search", "in filtered");
+
+        // Get theme colors for consistent topbar styling
+        let theme = self.chrome.theme();
+        let bg_ansi = color_to_bg_ansi(theme.bar_bg);
+        let label_ansi = color_to_fg_ansi(theme.text_secondary);
+        let text_ansi = color_to_fg_ansi(theme.text_primary);
+
+        let mut filter_offset = initial_offset;
+        let mut scrolled_to_match = false;
+
+        loop {
+            // Render search input with match count status
+            let (cols, _) = TerminalGuard::get_size()?;
+            let status = search.status();
+            let status_ref = if status.is_empty() {
+                None
+            } else {
+                Some(status.as_str())
+            };
+            input.render_styled(
+                &mut std::io::stdout(),
+                cols,
+                status_ref,
+                Some(&bg_ansi),
+                Some(&label_ansi),
+                Some(&text_ansi),
+            )?;
+
+            // Wait for input
+            if event::poll(std::time::Duration::from_millis(100))? {
+                if let Event::Key(key) = event::read()? {
+                    // Only handle press events
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
+
+                    // Handle Up/Down arrows for match navigation
+                    match key.code {
+                        KeyCode::Down => {
+                            // Next match
+                            search.next_match();
+                            if let Some(m) = search.current() {
+                                // Calculate filter offset to show this match
+                                filter_offset = self.filter_offset_for_line(filter, m.line);
+                                scrolled_to_match = true;
+                            }
+                            self.render_scrollback_with_filter_and_search(filter, filter_offset, &search)?;
+                            continue;
+                        }
+                        KeyCode::Up => {
+                            // Previous match
+                            search.prev_match();
+                            if let Some(m) = search.current() {
+                                filter_offset = self.filter_offset_for_line(filter, m.line);
+                                scrolled_to_match = true;
+                            }
+                            self.render_scrollback_with_filter_and_search(filter, filter_offset, &search)?;
+                            continue;
+                        }
+                        _ => {}
+                    }
+
+                    match input.handle_input(key) {
+                        crate::scrollback::MiniInputResult::Submit => {
+                            // Exit search mode, keep current filter offset
+                            return Ok((filter_offset, scrolled_to_match));
+                        }
+                        crate::scrollback::MiniInputResult::Cancel => {
+                            return Ok((initial_offset, false));
+                        }
+                        crate::scrollback::MiniInputResult::Changed => {
+                            // Update search query and re-search within filtered lines
+                            search.query = input.text().to_string();
+                            search.cursor = input.cursor;
+
+                            // Get first visible line in filtered view for "nearest match" selection
+                            let first_visible = if let Some(&first_idx) = filter.matching_lines.first() {
+                                first_idx
+                            } else {
+                                0
+                            };
+
+                            // Perform search only within filtered lines
+                            search.perform_search_within(
+                                &self.scrollback_buffer,
+                                &filter.matching_lines,
+                                first_visible,
+                            );
+
+                            // Jump to current match if any
+                            if let Some(m) = search.current() {
+                                filter_offset = self.filter_offset_for_line(filter, m.line);
+                                scrolled_to_match = true;
+                            }
+
+                            // Re-render with highlights
+                            self.render_scrollback_with_filter_and_search(filter, filter_offset, &search)?;
+                        }
+                        crate::scrollback::MiniInputResult::Continue => {
+                            // Keep editing, no change to query
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Calculates filter offset to show a specific line (by original buffer index).
+    fn filter_offset_for_line(
+        &self,
+        filter: &crate::scrollback::features::FilterState,
+        line_idx: usize,
+    ) -> usize {
+        // Find position of line_idx in matching_lines
+        if let Some(pos) = filter.matching_lines.iter().position(|&idx| idx == line_idx) {
+            // Convert position to offset from bottom
+            let total = filter.matching_lines.len();
+            let viewport = self.viewport_height();
+            // We want this line visible, calculate offset
+            // Position from bottom = total - pos - 1
+            // But we want it somewhere in the middle of viewport
+            let pos_from_bottom = total.saturating_sub(pos + 1);
+            // Offset to show this line near center
+            pos_from_bottom.saturating_sub(viewport / 2)
+        } else {
+            0
+        }
+    }
+
+    /// Renders scrollback with filter AND search active.
+    fn render_scrollback_with_filter_and_search(
+        &self,
+        filter: &crate::scrollback::features::FilterState,
+        filter_offset: usize,
+        search: &crate::scrollback::features::SearchState,
+    ) -> Result<()> {
+        use std::io::Write;
+
+        let (cols, rows) = TerminalGuard::get_size()?;
+        let mut out = std::io::stdout();
+
+        // Render using the combined filter+search viewer
+        crate::scrollback::ScrollViewer::render_with_filter_and_search(
+            &mut out,
+            &self.scrollback_buffer,
+            filter,
+            filter_offset,
+            cols,
+            rows,
+            self.viewer_state.show_line_numbers(),
+            self.viewer_state.show_timestamps(),
+            search,
+            self.chrome.theme(),
         )?;
 
         out.flush()?;
@@ -2380,6 +2642,10 @@ impl App {
                 percentage,
                 total_lines: total,
                 current_line,
+                search_active: matches!(self.viewer_state.mode, crate::scrollback::ScrollViewMode::Search(_)),
+                filter_active: matches!(self.viewer_state.mode, crate::scrollback::ScrollViewMode::Filter(_)),
+                timestamps_on: self.viewer_state.show_timestamps(),
+                line_numbers_on: self.viewer_state.show_line_numbers(),
             })
         } else {
             None

@@ -203,6 +203,101 @@ impl SearchState {
 
         self.current_match = Some(forward_idx.unwrap_or(0));
     }
+
+    /// Returns a sorted, deduplicated list of line indices that have matches.
+    ///
+    /// Used by filter mode to show only lines with search results.
+    pub fn matched_line_indices(&self) -> Vec<usize> {
+        let mut lines: Vec<usize> = self.matches.iter().map(|m| m.line).collect();
+        lines.sort_unstable();
+        lines.dedup();
+        lines
+    }
+
+    /// Performs search only within a subset of lines (e.g., filtered lines).
+    ///
+    /// This is used for filter+search combination where search only looks
+    /// at lines that passed the filter.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer` - The scrollback buffer to search
+    /// * `within_lines` - Line indices to search within
+    /// * `near_line` - Line to find nearest match to (for initial selection)
+    pub fn perform_search_within(
+        &mut self,
+        buffer: &ScrollbackBuffer,
+        within_lines: &[usize],
+        near_line: usize,
+    ) {
+        self.clear_matches();
+
+        if self.query.is_empty() {
+            return;
+        }
+
+        // Convert query for case-insensitive search if needed
+        let query_lower = if self.case_sensitive {
+            None
+        } else {
+            Some(self.query.to_lowercase())
+        };
+        let search_pattern = query_lower.as_deref().unwrap_or(&self.query);
+
+        // Search only within the specified lines
+        for &line_idx in within_lines {
+            if let Some(line) = buffer.get(line_idx) {
+                let content = line.content();
+
+                // Convert content to string for searching (lossy for non-UTF8)
+                let content_str = String::from_utf8_lossy(content);
+                let search_str = if self.case_sensitive {
+                    content_str.to_string()
+                } else {
+                    content_str.to_lowercase()
+                };
+
+                // Find all occurrences in this line
+                let mut start_pos = 0;
+                while let Some(found_pos) = search_str[start_pos..].find(search_pattern) {
+                    let absolute_start = start_pos + found_pos;
+                    let absolute_end = absolute_start + search_pattern.len();
+
+                    self.matches.push(SearchMatch {
+                        line: line_idx,
+                        start: absolute_start,
+                        end: absolute_end,
+                    });
+
+                    // Move past this match to find next
+                    start_pos = absolute_start + 1;
+                    if start_pos >= search_str.len() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Select nearest match to the viewport position
+        if !self.matches.is_empty() {
+            // Find match closest to near_line
+            let nearest_idx = self
+                .matches
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, m)| {
+                    if m.line >= near_line {
+                        m.line - near_line
+                    } else {
+                        near_line - m.line
+                    }
+                })
+                .map(|(idx, _)| idx)
+                .unwrap_or(0);
+
+            self.current_match = Some(nearest_idx);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -365,5 +460,47 @@ mod tests {
         assert!(state.current_match.is_some());
         let current = state.current().unwrap();
         assert_eq!(current.line, 5);
+    }
+
+    #[test]
+    fn test_matched_line_indices() {
+        let mut state = SearchState::new();
+        // Add matches on lines 0, 0 (duplicate), 5, 10, 5 (duplicate)
+        state.matches = vec![
+            SearchMatch { line: 0, start: 0, end: 4 },
+            SearchMatch { line: 0, start: 10, end: 14 },
+            SearchMatch { line: 5, start: 0, end: 4 },
+            SearchMatch { line: 10, start: 0, end: 4 },
+            SearchMatch { line: 5, start: 10, end: 14 },
+        ];
+
+        let lines = state.matched_line_indices();
+        // Should be sorted and deduplicated
+        assert_eq!(lines, vec![0, 5, 10]);
+    }
+
+    #[test]
+    fn test_perform_search_within() {
+        let mut buffer = ScrollbackBuffer::with_capacity(100, 1000);
+        buffer.push_line(b"error: first timeout".to_vec());   // 0
+        buffer.push_line(b"info: all good".to_vec());          // 1
+        buffer.push_line(b"error: second failure".to_vec());   // 2
+        buffer.push_line(b"warning: timeout warning".to_vec()); // 3
+        buffer.push_line(b"error: third timeout".to_vec());    // 4
+
+        // Only search within lines 0, 2, 4 (the error lines)
+        let within_lines = vec![0, 2, 4];
+
+        let mut state = SearchState::new();
+        state.query = "timeout".to_string();
+        state.perform_search_within(&buffer, &within_lines, 0);
+
+        // Should find "timeout" only in lines 0 and 4 (not line 3 which isn't in within_lines)
+        assert_eq!(state.matches.len(), 2);
+        assert_eq!(state.matches[0].line, 0);
+        assert_eq!(state.matches[1].line, 4);
+
+        // Verify current match is set
+        assert!(state.current_match.is_some());
     }
 }

@@ -661,6 +661,137 @@ impl ScrollViewer {
         })
     }
 
+    /// Renders scrollback with filter AND search active (filtered lines with highlights).
+    ///
+    /// This combines filter mode (showing only matching lines) with search
+    /// highlighting (visual highlights for search matches within filtered lines).
+    ///
+    /// # Arguments
+    ///
+    /// * `out` - Writer to render to
+    /// * `buffer` - The scrollback buffer
+    /// * `filter` - Filter state with matching lines
+    /// * `filter_offset` - Scroll offset within filtered lines
+    /// * `cols` - Terminal width
+    /// * `rows` - Total terminal rows
+    /// * `show_line_numbers` - Whether to show line number gutter
+    /// * `show_timestamps` - Whether to show relative timestamp gutter
+    /// * `search` - Search state with matches to highlight
+    /// * `theme` - Theme for highlight colors
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_with_filter_and_search<W: Write>(
+        out: &mut W,
+        buffer: &ScrollbackBuffer,
+        filter: &FilterState,
+        filter_offset: usize,
+        cols: u16,
+        rows: u16,
+        show_line_numbers: bool,
+        show_timestamps: bool,
+        search: &SearchState,
+        theme: &Theme,
+    ) -> io::Result<RenderStats> {
+        let content_rows = rows.saturating_sub(1) as usize; // Reserve row 1 for topbar
+
+        // Calculate gutter widths based on original buffer
+        let total = buffer.len();
+        let line_num_width = if show_line_numbers {
+            let max_line = total;
+            let num_width =
+                if max_line == 0 { 1 } else { (max_line as f64).log10().floor() as usize + 1 };
+            num_width.max(4) + 3
+        } else {
+            0
+        };
+        let timestamp_width = if show_timestamps { 7 } else { 0 };
+        let gutter_width = line_num_width + timestamp_width;
+        let content_cols = (cols as usize).saturating_sub(gutter_width);
+
+        // Get current time for relative timestamp calculation
+        let now = std::time::Instant::now();
+
+        // Hide cursor during render
+        write!(out, "\x1b[?25l")?;
+
+        let mut current_row = 2; // Start at row 2 (after topbar)
+        let mut rendered = 0;
+
+        // Get filtered lines for the current viewport
+        let lines = filter.get_filtered_range(buffer, filter_offset, content_rows);
+
+        // Track first visible line
+        let first_visible_line = lines.first().map(|(idx, _)| *idx + 1).unwrap_or(1);
+
+        // Get current search match for special highlighting
+        let current_match = search.current();
+
+        for (original_idx, line) in &lines {
+            let line_number = *original_idx + 1; // Convert to 1-indexed
+
+            // Move to line position and clear
+            write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
+
+            // Render timestamp gutter if enabled
+            if show_timestamps {
+                let elapsed = now.duration_since(line.timestamp());
+                let time_str = Self::format_relative_time(elapsed);
+                write!(out, "\x1b[2m{:>4} │ \x1b[22m", time_str)?;
+            }
+
+            // Render line number gutter if enabled
+            if show_line_numbers {
+                write!(out, "\x1b[2m{:>width$} │ \x1b[22m", line_number, width = line_num_width - 3)?;
+            }
+
+            // Get search matches for this line
+            let line_matches: Vec<_> = search.matches_on_line(*original_idx).collect();
+
+            if line_matches.is_empty() {
+                // No matches - render line normally
+                let content = line.content();
+                if content.len() <= content_cols {
+                    out.write_all(content)?;
+                } else {
+                    out.write_all(&content[..content_cols])?;
+                }
+            } else {
+                // Render line with search highlights
+                Self::render_line_with_highlights(
+                    out,
+                    line.content(),
+                    content_cols,
+                    &line_matches,
+                    current_match.map(|m| m.line == *original_idx && m.start == line_matches[0].start),
+                    theme,
+                )?;
+            }
+
+            // If line was truncated in storage, show indicator
+            if line.is_truncated() {
+                write!(out, "\x1b[7m>\x1b[27m")?;
+            }
+
+            current_row += 1;
+            rendered += 1;
+        }
+
+        // Clear remaining rows
+        let start_row = 2;
+        while current_row < start_row + content_rows {
+            write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
+            current_row += 1;
+        }
+
+        // Show cursor
+        write!(out, "\x1b[?25h")?;
+        out.flush()?;
+
+        Ok(RenderStats {
+            lines_rendered: rendered,
+            first_visible_line,
+        })
+    }
+
     /// Calculates the maximum valid scroll offset.
     ///
     /// # Arguments
