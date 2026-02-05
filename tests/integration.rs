@@ -841,10 +841,13 @@ mod pump_pty_tests {
         let events: MarkerVec =
             smallvec![MarkerEvent::Precmd { exit_code: 0 }, MarkerEvent::Prompt];
 
-        let result = PumpResult::MarkerDetected(events);
+        let result = PumpResult::MarkerDetected {
+            markers: events,
+            captured_bytes: vec![],
+        };
 
         match result {
-            PumpResult::MarkerDetected(v) => {
+            PumpResult::MarkerDetected { markers: v, .. } => {
                 assert_eq!(v.len(), 2);
                 assert_eq!(v[0], MarkerEvent::Precmd { exit_code: 0 });
                 assert_eq!(v[1], MarkerEvent::Prompt);

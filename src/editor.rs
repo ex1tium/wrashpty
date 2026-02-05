@@ -177,6 +177,28 @@ impl Editor {
             ReedlineEvent::ExecuteHostCommand(format!("{}open_panel", HOST_COMMAND_PREFIX)),
         );
 
+        // Add scrollback keybindings - these return control to the host
+        keybindings.add_binding(
+            KeyModifiers::NONE,
+            KeyCode::PageUp,
+            ReedlineEvent::ExecuteHostCommand(format!("{}scroll_up", HOST_COMMAND_PREFIX)),
+        );
+        keybindings.add_binding(
+            KeyModifiers::NONE,
+            KeyCode::PageDown,
+            ReedlineEvent::ExecuteHostCommand(format!("{}scroll_down", HOST_COMMAND_PREFIX)),
+        );
+        keybindings.add_binding(
+            KeyModifiers::SHIFT,
+            KeyCode::PageUp,
+            ReedlineEvent::ExecuteHostCommand(format!("{}scroll_line_up", HOST_COMMAND_PREFIX)),
+        );
+        keybindings.add_binding(
+            KeyModifiers::SHIFT,
+            KeyCode::PageDown,
+            ReedlineEvent::ExecuteHostCommand(format!("{}scroll_line_down", HOST_COMMAND_PREFIX)),
+        );
+
         // Create reedline with history, completions, menu, and autosuggestions
         // Note: Ctrl+R history search and Up/Down prefix filtering are provided
         // by reedline's default keybindings when history is configured.
