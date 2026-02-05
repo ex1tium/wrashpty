@@ -144,4 +144,25 @@ impl ScrollState {
             Self::Scrolled { offset }
         }
     }
+
+    /// Creates a Scrolled state at the given offset, even if offset is 0.
+    ///
+    /// Use this when you want to stay in scroll view mode at the bottom
+    /// of the buffer (offset=0) rather than returning to Live state.
+    #[inline]
+    pub fn scrolled_at(offset: usize) -> Self {
+        Self::Scrolled { offset }
+    }
+
+    /// Returns true if at the bottom of the scroll view (offset = 0).
+    #[inline]
+    pub fn is_at_bottom(&self) -> bool {
+        matches!(self, Self::Scrolled { offset: 0 } | Self::Live)
+    }
+
+    /// Returns true if at the given max offset (top of buffer).
+    #[inline]
+    pub fn is_at_top(&self, max_offset: usize) -> bool {
+        self.offset() >= max_offset
+    }
 }
