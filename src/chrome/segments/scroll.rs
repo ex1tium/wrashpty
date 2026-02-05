@@ -24,7 +24,7 @@ impl TopbarSegment for ScrollSegment {
         state: &TopbarState,
         theme: &Theme,
         _symbols: &Symbols,
-        _separator: &str,
+        separator: &str,
     ) -> Option<RenderedSegment> {
         let scroll_info = state.scroll.as_ref()?;
 
@@ -57,7 +57,8 @@ impl TopbarSegment for ScrollSegment {
         };
 
         let scroll_content = format!(
-            "▶ SCROLL | {}/{} | {}%{}",
+            "{} SCROLL | {}/{} | {}%{}",
+            separator,
             scroll_info.current_line,
             scroll_info.total_lines,
             scroll_info.percentage,

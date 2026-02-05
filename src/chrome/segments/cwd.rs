@@ -28,8 +28,8 @@ impl TopbarSegment for CwdSegment {
         let cwd_str = state
             .cwd
             .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("/");
+            .map(|n| n.to_string_lossy())
+            .unwrap_or_else(|| std::borrow::Cow::Borrowed("/"));
 
         let sep_fg = color_to_fg_ansi(theme.separator_fg);
         let cwd_fg = color_to_fg_ansi(theme.cwd_fg);

@@ -74,13 +74,14 @@ impl TopbarSegment for DurationSegment {
 
 /// Formats a duration into a human-readable string.
 fn format_duration(dur: Duration) -> String {
-    let secs = dur.as_secs_f64();
-    if secs >= 60.0 {
-        let mins = (secs / 60.0).floor() as u32;
-        let remaining_secs = secs % 60.0;
-        format!("{}m{:.0}s", mins, remaining_secs)
+    // Round total seconds first to avoid "1m60s" from floating point edge cases
+    let total_secs = dur.as_secs_f64().round() as u64;
+    if total_secs >= 60 {
+        let mins = total_secs / 60;
+        let remaining_secs = total_secs % 60;
+        format!("{}m{}s", mins, remaining_secs)
     } else {
-        format!("{:.1}s", secs)
+        format!("{:.1}s", dur.as_secs_f64())
     }
 }
 

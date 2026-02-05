@@ -34,15 +34,19 @@ impl GoToLineState {
     /// Appends a character to input (only digits allowed).
     pub fn push_char(&mut self, c: char) {
         if c.is_ascii_digit() {
-            self.input.insert(self.cursor, c);
-            self.cursor += 1;
+            // Clamp cursor to valid range before insert
+            let cursor = self.cursor.min(self.input.len());
+            self.input.insert(cursor, c);
+            self.cursor = cursor + 1;
         }
     }
 
     /// Removes character before cursor.
     pub fn backspace(&mut self) {
-        if self.cursor > 0 {
-            self.cursor -= 1;
+        // Clamp cursor to valid range
+        let cursor = self.cursor.min(self.input.len());
+        if cursor > 0 {
+            self.cursor = cursor - 1;
             self.input.remove(self.cursor);
         }
     }

@@ -226,19 +226,35 @@ impl MiniInput {
         // Show buffer (or hint if empty)
         if self.buffer.is_empty() {
             if let Some(hint) = self.hint {
-                // Hint in dim
-                write!(out, "\x1b[2m{}\x1b[22m", &hint[..hint.len().min(available)])?;
+                // Hint in dim - truncate at character boundary
+                let truncated: String = hint.chars().take(available).collect();
+                write!(out, "\x1b[2m{}\x1b[22m", truncated)?;
             }
         } else {
             // Truncate if too long (show end of buffer if cursor is at end)
-            let display = if self.buffer.len() <= available {
-                &self.buffer
-            } else if self.cursor >= available {
-                // Show window around cursor
-                let start = self.cursor.saturating_sub(available / 2);
-                &self.buffer[start..self.buffer.len().min(start + available)]
+            // Use character indices, not byte indices to avoid UTF-8 boundary issues
+            let char_count = self.buffer.chars().count();
+            let display = if char_count <= available {
+                self.buffer.clone()
             } else {
-                &self.buffer[..available]
+                // Find cursor position in characters
+                let cursor_char_pos = self.buffer[..self.cursor.min(self.buffer.len())]
+                    .chars()
+                    .count();
+
+                if cursor_char_pos >= available {
+                    // Show window around cursor
+                    let start_char = cursor_char_pos.saturating_sub(available / 2);
+                    let end_char = (start_char + available).min(char_count);
+                    self.buffer
+                        .chars()
+                        .skip(start_char)
+                        .take(end_char - start_char)
+                        .collect()
+                } else {
+                    // Show from beginning
+                    self.buffer.chars().take(available).collect()
+                }
             };
             write!(out, "{}{}", text_fg, display)?;
         }
@@ -252,8 +268,11 @@ impl MiniInput {
         // Reset styling before cursor positioning
         write!(out, "{}", reset)?;
 
-        // Position cursor
-        let cursor_col = prompt_len + self.cursor.min(available) + 1;
+        // Position cursor (use character count, not byte offset)
+        let cursor_char_pos = self.buffer[..self.cursor.min(self.buffer.len())]
+            .chars()
+            .count();
+        let cursor_col = prompt_len + cursor_char_pos.min(available) + 1;
         write!(out, "\x1b[1;{}H", cursor_col)?;
 
         // Show cursor
