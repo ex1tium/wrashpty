@@ -9,6 +9,30 @@ use super::buffer::ScrollbackBuffer;
 use super::features::{FilterState, SearchState};
 use crate::chrome::theme::Theme;
 
+/// Finds the largest valid UTF-8 boundary <= max_len in content.
+///
+/// Returns the byte index to safely slice content[..index] without
+/// splitting a multi-byte UTF-8 character.
+fn safe_utf8_truncate(content: &[u8], max_len: usize) -> usize {
+    if max_len >= content.len() {
+        return content.len();
+    }
+
+    // Start from max_len and work backward to find a valid UTF-8 boundary
+    let mut end = max_len;
+    while end > 0 {
+        // Check if this is a valid UTF-8 start byte or ASCII
+        let byte = content[end - 1];
+        if byte < 0x80 || byte >= 0xC0 {
+            // ASCII byte or UTF-8 start byte - this is a valid boundary after it
+            break;
+        }
+        // This is a UTF-8 continuation byte (0x80-0xBF), keep going back
+        end -= 1;
+    }
+    end
+}
+
 /// Rendering options for scrollback viewer.
 #[derive(Debug, Clone, Default)]
 pub struct RenderOptions {
@@ -188,8 +212,9 @@ impl ScrollViewer {
             if content.len() <= content_cols {
                 out.write_all(content)?;
             } else {
-                // Truncate to available width (simplistic - doesn't account for ANSI)
-                out.write_all(&content[..content_cols])?;
+                // Truncate to available width, respecting UTF-8 boundaries
+                let safe_len = safe_utf8_truncate(content, content_cols);
+                out.write_all(&content[..safe_len])?;
             }
 
             // If line was truncated in storage, show indicator
@@ -496,7 +521,9 @@ impl ScrollViewer {
                 if content.len() <= content_cols {
                     out.write_all(content)?;
                 } else {
-                    out.write_all(&content[..content_cols])?;
+                    // Truncate respecting UTF-8 boundaries
+                    let safe_len = safe_utf8_truncate(content, content_cols);
+                    out.write_all(&content[..safe_len])?;
                 }
             } else {
                 // Render line with search highlights
@@ -550,10 +577,12 @@ impl ScrollViewer {
     }
 
     /// Renders a line with search match highlighting.
+    ///
+    /// Uses safe string slicing via `.get()` to handle potential index mismatches.
     fn render_line_with_highlights<W: Write>(
         out: &mut W,
         content: &[u8],
-        max_cols: usize,
+        _max_cols: usize,
         matches: &[&super::features::SearchMatch],
         is_current: Option<bool>,
         theme: &Theme,
@@ -568,10 +597,15 @@ impl ScrollViewer {
         sorted_matches.sort_by_key(|m| m.start);
 
         for search_match in sorted_matches {
-            // Write text before match
-            if search_match.start > pos {
-                let before = &content_str[pos..search_match.start.min(content_str.len())];
-                write!(out, "{}", before)?;
+            // Clamp indices to valid range
+            let match_start = search_match.start.min(content_str.len());
+            let match_end = search_match.end.min(content_str.len());
+
+            // Write text before match (using safe .get() to handle edge cases)
+            if match_start > pos {
+                if let Some(before) = content_str.get(pos..match_start) {
+                    write!(out, "{}", before)?;
+                }
             }
 
             // Determine highlight color based on whether this is the current match
@@ -583,21 +617,17 @@ impl ScrollViewer {
             };
             let bg_ansi = color_to_bg_ansi(bg_color);
 
-            // Write highlighted match
-            let match_end = search_match.end.min(content_str.len());
-            let match_text = &content_str[search_match.start.min(content_str.len())..match_end];
-            write!(out, "{}{}\x1b[49m", bg_ansi, match_text)?; // 49 resets bg
+            // Write highlighted match (using safe .get() to handle edge cases)
+            if let Some(match_text) = content_str.get(match_start..match_end) {
+                write!(out, "{}{}\x1b[49m", bg_ansi, match_text)?; // 49 resets bg
+            }
 
             pos = match_end;
         }
 
         // Write remaining text after last match
-        if pos < content_str.len() {
-            let remaining = &content_str[pos..];
-            // Truncate if needed
-            if remaining.len() <= max_cols.saturating_sub(pos) {
-                write!(out, "{}", remaining)?;
-            }
+        if let Some(remaining) = content_str.get(pos..) {
+            write!(out, "{}", remaining)?;
         }
 
         Ok(())
@@ -692,7 +722,9 @@ impl ScrollViewer {
             if content.len() <= content_cols {
                 out.write_all(content)?;
             } else {
-                out.write_all(&content[..content_cols])?;
+                // Truncate respecting UTF-8 boundaries
+                let safe_len = safe_utf8_truncate(content, content_cols);
+                out.write_all(&content[..safe_len])?;
             }
 
             // If line was truncated in storage, show indicator
@@ -820,7 +852,9 @@ impl ScrollViewer {
                 if content.len() <= content_cols {
                     out.write_all(content)?;
                 } else {
-                    out.write_all(&content[..content_cols])?;
+                    // Truncate respecting UTF-8 boundaries
+                    let safe_len = safe_utf8_truncate(content, content_cols);
+                    out.write_all(&content[..safe_len])?;
                 }
             } else {
                 // Render line with search highlights

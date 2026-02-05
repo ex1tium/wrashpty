@@ -94,6 +94,9 @@ impl FilterState {
                 self.matching_lines.push(line_idx);
             }
         }
+
+        // Ensure sorted for binary_search in line_visible
+        self.matching_lines.sort_unstable();
     }
 
     /// Performs filtering within a subset of lines (e.g., search results).
@@ -111,6 +114,8 @@ impl FilterState {
         if self.pattern.is_empty() {
             // If pattern is empty, show all base lines
             self.matching_lines = base_lines.to_vec();
+            // Ensure sorted for binary_search in line_visible
+            self.matching_lines.sort_unstable();
             return;
         }
 
@@ -138,6 +143,9 @@ impl FilterState {
                 }
             }
         }
+
+        // Ensure sorted for binary_search in line_visible
+        self.matching_lines.sort_unstable();
     }
 
     /// Returns an iterator of (line_index, line) for filtered lines.

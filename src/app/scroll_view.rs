@@ -1278,6 +1278,14 @@ impl App {
     pub(super) fn run_scroll_view(&mut self) -> Result<()> {
         use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 
+        // RAII guard to ensure raw mode is disabled even on panic
+        struct RawModeGuard;
+        impl Drop for RawModeGuard {
+            fn drop(&mut self) {
+                let _ = disable_raw_mode();
+            }
+        }
+
         // Enable raw mode for crossterm event capture
         // Reedline may have disabled raw mode before returning via ExecuteHostCommand
         if let Err(e) = enable_raw_mode() {
@@ -1285,13 +1293,10 @@ impl App {
             return Ok(());
         }
 
-        // Ensure we restore terminal state even on error/panic
-        let result = self.run_scroll_view_inner();
+        // Guard ensures disable_raw_mode is called even if run_scroll_view_inner panics
+        let _guard = RawModeGuard;
 
-        // Disable raw mode before returning to reedline (it will re-enable as needed)
-        let _ = disable_raw_mode();
-
-        result
+        self.run_scroll_view_inner()
     }
 
     /// Inner scroll view loop (separated for RAII cleanup).

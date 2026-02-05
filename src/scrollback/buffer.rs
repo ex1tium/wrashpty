@@ -6,6 +6,8 @@
 use std::collections::VecDeque;
 use std::time::Instant;
 
+use unicode_width::UnicodeWidthChar;
+
 /// Default maximum number of lines to store.
 pub const DEFAULT_MAX_LINES: usize = 10_000;
 
@@ -77,11 +79,10 @@ impl ScrollLine {
 
     /// Calculates display width accounting for ANSI escape sequences.
     ///
-    /// This is a simplified calculation that:
+    /// Uses the unicode-width crate for accurate character widths including CJK.
     /// - Skips ANSI CSI sequences (ESC [ ... final byte)
     /// - Skips ANSI OSC sequences (ESC ] ... ST or BEL)
-    /// - Counts printable ASCII as width 1
-    /// - Treats wide characters (CJK) as width 2 (simplified)
+    /// - Uses UnicodeWidthChar for accurate character widths
     fn calculate_display_width(content: &[u8], terminal_width: u16) -> u16 {
         let mut width: u16 = 0;
         let mut i = 0;
@@ -124,24 +125,30 @@ impl ScrollLine {
                 }
             }
 
-            // Printable ASCII
-            if (0x20..=0x7E).contains(&b) {
-                width = width.saturating_add(1);
-            }
             // Tab - assume 8-space tabs for simplicity
-            else if b == 0x09 {
+            if b == 0x09 {
                 width = width.saturating_add(8 - (width % 8));
-            }
-            // UTF-8 continuation bytes don't add width
-            else if (0x80..=0xBF).contains(&b) {
-                // Skip continuation bytes
-            }
-            // UTF-8 start bytes - simplified: assume width 1 for most, 2 for CJK range
-            else if b >= 0xC0 {
-                // This is a simplification; proper handling would need full Unicode width tables
-                width = width.saturating_add(1);
+                i += 1;
+                continue;
             }
 
+            // Control characters (no width)
+            if b < 0x20 {
+                i += 1;
+                continue;
+            }
+
+            // Try to decode UTF-8 character and get its width
+            if let Ok(s) = std::str::from_utf8(&content[i..]) {
+                if let Some(c) = s.chars().next() {
+                    let char_width = c.width().unwrap_or(0) as u16;
+                    width = width.saturating_add(char_width);
+                    i += c.len_utf8();
+                    continue;
+                }
+            }
+
+            // Fallback: invalid UTF-8 byte, skip it
             i += 1;
         }
 

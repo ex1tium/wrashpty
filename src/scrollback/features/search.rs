@@ -1,5 +1,7 @@
 //! Search state and logic for incremental search in scrollback.
 
+use regex::{escape, RegexBuilder};
+
 use crate::scrollback::buffer::ScrollbackBuffer;
 
 /// Direction for search navigation.
@@ -114,6 +116,8 @@ impl SearchState {
     /// occurrences of the query in the buffer and sets the current
     /// match to the one nearest to the given viewport position.
     ///
+    /// Uses regex for case-insensitive matching to preserve correct byte offsets.
+    ///
     /// # Arguments
     ///
     /// * `buffer` - The scrollback buffer to search
@@ -125,13 +129,15 @@ impl SearchState {
             return;
         }
 
-        // Convert query for case-insensitive search if needed
-        let query_lower = if self.case_sensitive {
-            None
-        } else {
-            Some(self.query.to_lowercase())
+        // Build regex pattern with escaped query for literal matching
+        let escaped_query = escape(&self.query);
+        let regex = match RegexBuilder::new(&escaped_query)
+            .case_insensitive(!self.case_sensitive)
+            .build()
+        {
+            Ok(r) => r,
+            Err(_) => return, // Invalid regex (shouldn't happen with escaped query)
         };
-        let search_pattern = query_lower.as_deref().unwrap_or(&self.query);
 
         // Search all lines in buffer
         for (line_idx, line) in buffer.iter().enumerate() {
@@ -139,29 +145,14 @@ impl SearchState {
 
             // Convert content to string for searching (lossy for non-UTF8)
             let content_str = String::from_utf8_lossy(content);
-            let search_str = if self.case_sensitive {
-                content_str.to_string()
-            } else {
-                content_str.to_lowercase()
-            };
 
-            // Find all occurrences in this line
-            let mut start_pos = 0;
-            while let Some(found_pos) = search_str[start_pos..].find(search_pattern) {
-                let absolute_start = start_pos + found_pos;
-                let absolute_end = absolute_start + search_pattern.len();
-
+            // Find all matches using regex (preserves byte offsets in original string)
+            for mat in regex.find_iter(&content_str) {
                 self.matches.push(SearchMatch {
                     line: line_idx,
-                    start: absolute_start,
-                    end: absolute_end,
+                    start: mat.start(),
+                    end: mat.end(),
                 });
-
-                // Move past this match to find next
-                start_pos = absolute_start + 1;
-                if start_pos >= search_str.len() {
-                    break;
-                }
             }
         }
 
@@ -212,6 +203,8 @@ impl SearchState {
     /// This is used for filter+search combination where search only looks
     /// at lines that passed the filter.
     ///
+    /// Uses regex for case-insensitive matching to preserve correct byte offsets.
+    ///
     /// # Arguments
     ///
     /// * `buffer` - The scrollback buffer to search
@@ -229,13 +222,15 @@ impl SearchState {
             return;
         }
 
-        // Convert query for case-insensitive search if needed
-        let query_lower = if self.case_sensitive {
-            None
-        } else {
-            Some(self.query.to_lowercase())
+        // Build regex pattern with escaped query for literal matching
+        let escaped_query = escape(&self.query);
+        let regex = match RegexBuilder::new(&escaped_query)
+            .case_insensitive(!self.case_sensitive)
+            .build()
+        {
+            Ok(r) => r,
+            Err(_) => return, // Invalid regex (shouldn't happen with escaped query)
         };
-        let search_pattern = query_lower.as_deref().unwrap_or(&self.query);
 
         // Search only within the specified lines
         for &line_idx in within_lines {
@@ -244,29 +239,14 @@ impl SearchState {
 
                 // Convert content to string for searching (lossy for non-UTF8)
                 let content_str = String::from_utf8_lossy(content);
-                let search_str = if self.case_sensitive {
-                    content_str.to_string()
-                } else {
-                    content_str.to_lowercase()
-                };
 
-                // Find all occurrences in this line
-                let mut start_pos = 0;
-                while let Some(found_pos) = search_str[start_pos..].find(search_pattern) {
-                    let absolute_start = start_pos + found_pos;
-                    let absolute_end = absolute_start + search_pattern.len();
-
+                // Find all matches using regex (preserves byte offsets in original string)
+                for mat in regex.find_iter(&content_str) {
                     self.matches.push(SearchMatch {
                         line: line_idx,
-                        start: absolute_start,
-                        end: absolute_end,
+                        start: mat.start(),
+                        end: mat.end(),
                     });
-
-                    // Move past this match to find next
-                    start_pos = absolute_start + 1;
-                    if start_pos >= search_str.len() {
-                        break;
-                    }
                 }
             }
         }
