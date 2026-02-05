@@ -165,6 +165,17 @@ pub struct ChromeContext<'a> {
     pub last_duration: Option<Duration>,
     /// Current timestamp string (HH:MM format).
     pub timestamp: &'a str,
+    /// Scroll position information (percentage from top, if scrolled).
+    pub scroll_info: Option<ScrollInfo>,
+}
+
+/// Information about scroll position for display in context bar.
+#[derive(Debug, Clone, Copy)]
+pub struct ScrollInfo {
+    /// Scroll percentage (0 = at bottom/live, 100 = at top/oldest).
+    pub percentage: u8,
+    /// Total lines in scrollback buffer.
+    pub total_lines: usize,
 }
 
 impl Chrome {
@@ -551,6 +562,21 @@ impl Chrome {
             priority: 0,
             align: SegmentAlign::Left,
         });
+
+        // Scroll indicator: priority 0 (always shown when active)
+        if let Some(scroll_info) = ctx.scroll_info {
+            let scroll_fg = Self::color_to_fg_ansi(self.theme.separator_fg);
+            // Format: ↑ SCROLL 45%
+            let scroll_content = format!("↑SCROLL {}%", scroll_info.percentage);
+            let scroll_width = scroll_content.width();
+            // Insert at position 0 to show before status icon
+            left_segments.insert(0, ContextSegment {
+                content: format!(" {}{} ", scroll_fg, scroll_content),
+                display_width: scroll_width + 2, // " content "
+                priority: 0, // Always show
+                align: SegmentAlign::Left,
+            });
+        }
 
         // Duration: priority 3, shown only if >= 0.5s to avoid clutter
         if let Some(dur) = ctx.last_duration {
@@ -1296,6 +1322,7 @@ mod tests {
             last_command: Some("echo test"),
             last_duration: Some(Duration::from_millis(123)),
             timestamp: "14:32",
+            scroll_info: None,
         };
 
         let result = chrome.format_context_bar(80, &ctx);
@@ -1321,6 +1348,7 @@ mod tests {
             last_command: Some("false"),
             last_duration: Some(Duration::from_millis(50)),
             timestamp: "14:33",
+            scroll_info: None,
         };
 
         let result = chrome.format_context_bar(80, &ctx);
@@ -1341,6 +1369,7 @@ mod tests {
             last_command: None,
             last_duration: None,
             timestamp: "14:34",
+            scroll_info: None,
         };
 
         let result = chrome.format_context_bar(80, &ctx);
@@ -1362,6 +1391,7 @@ mod tests {
             last_command: Some("very long command"),
             last_duration: Some(Duration::from_secs(123)),
             timestamp: "14:32",
+            scroll_info: None,
         };
 
         let result = chrome.format_context_bar(40, &ctx);
