@@ -96,6 +96,50 @@ impl FilterState {
         }
     }
 
+    /// Performs filtering within a subset of lines (e.g., search results).
+    ///
+    /// This is used for filter+search combination where we only filter
+    /// lines that were found by a previous search.
+    ///
+    /// # Arguments
+    ///
+    /// * `buffer` - The scrollback buffer
+    /// * `base_lines` - Line indices to filter within
+    pub fn perform_filter_within(&mut self, buffer: &ScrollbackBuffer, base_lines: &[usize]) {
+        self.clear_matches();
+
+        if self.pattern.is_empty() {
+            // If pattern is empty, show all base lines
+            self.matching_lines = base_lines.to_vec();
+            return;
+        }
+
+        // Convert pattern for case-insensitive matching if needed
+        let pattern_lower = if self.case_sensitive {
+            None
+        } else {
+            Some(self.pattern.to_lowercase())
+        };
+        let search_pattern = pattern_lower.as_deref().unwrap_or(&self.pattern);
+
+        // Find matching lines within the base set
+        for &line_idx in base_lines {
+            if let Some(line) = buffer.get(line_idx) {
+                let content = line.content();
+                let content_str = String::from_utf8_lossy(content);
+                let search_str = if self.case_sensitive {
+                    content_str.to_string()
+                } else {
+                    content_str.to_lowercase()
+                };
+
+                if search_str.contains(search_pattern) {
+                    self.matching_lines.push(line_idx);
+                }
+            }
+        }
+    }
+
     /// Returns an iterator of (line_index, line) for filtered lines.
     ///
     /// Use this to render only the matching lines while preserving
@@ -271,5 +315,40 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].0, 0);
         assert_eq!(lines[1].0, 2);
+    }
+
+    #[test]
+    fn test_perform_filter_within() {
+        let mut buffer = ScrollbackBuffer::with_capacity(100, 1000);
+        buffer.push_line(b"error: first failure".to_vec()); // 0
+        buffer.push_line(b"info: all good".to_vec());       // 1
+        buffer.push_line(b"error: second failure".to_vec()); // 2
+        buffer.push_line(b"warning: something".to_vec());    // 3
+        buffer.push_line(b"error: third failure".to_vec());  // 4
+
+        // Base set: only lines 0, 2, 4 (the error lines)
+        let base_lines = vec![0, 2, 4];
+
+        let mut state = FilterState::new();
+
+        // Empty pattern should return all base lines
+        state.pattern = String::new();
+        state.perform_filter_within(&buffer, &base_lines);
+        assert_eq!(state.matching_lines, vec![0, 2, 4]);
+
+        // Filter within base lines for "second"
+        state.pattern = "second".to_string();
+        state.perform_filter_within(&buffer, &base_lines);
+        assert_eq!(state.matching_lines, vec![2]);
+
+        // Filter within base lines for "failure" (all match)
+        state.pattern = "failure".to_string();
+        state.perform_filter_within(&buffer, &base_lines);
+        assert_eq!(state.matching_lines, vec![0, 2, 4]);
+
+        // Filter within base lines for "not found"
+        state.pattern = "not found".to_string();
+        state.perform_filter_within(&buffer, &base_lines);
+        assert!(state.matching_lines.is_empty());
     }
 }

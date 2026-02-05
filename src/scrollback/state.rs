@@ -43,6 +43,9 @@ pub struct ViewerState {
     /// Command boundary index for Ctrl+P/N navigation.
     /// Lazily populated when markers are detected.
     pub boundaries: CommandBoundaries,
+    /// Cached search result line indices from last search.
+    /// Used by filter mode to show only search result lines.
+    pub last_search_lines: Option<Vec<usize>>,
 }
 
 impl ViewerState {

@@ -122,6 +122,14 @@ pub struct ScrollInfo {
     /// At offset=0 (bottom), this equals total_lines.
     /// As you scroll up, this decreases.
     pub current_line: usize,
+    /// Whether search mode is active (show [S]).
+    pub search_active: bool,
+    /// Whether filter mode is active (show [F]).
+    pub filter_active: bool,
+    /// Whether timestamp display is on (show [T]).
+    pub timestamps_on: bool,
+    /// Whether line numbers are on (show [L]).
+    pub line_numbers_on: bool,
 }
 
 /// Git repository information for display.
