@@ -61,7 +61,7 @@ impl TopbarSegment for DurationSegment {
             " {}{} {}{}{} ",
             sep_fg, separator, color, icon_part, duration_str
         );
-        let display_width = separator_width + icon_width + duration_str.len() + 3;
+        let display_width = separator_width + icon_width + duration_str.width() + 3;
 
         Some(RenderedSegment {
             content,

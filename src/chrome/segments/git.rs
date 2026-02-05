@@ -55,7 +55,7 @@ impl TopbarSegment for GitSegment {
             " {}{} {}{}{}{} ",
             sep_fg, separator, git_fg, icon_part, branch, dirty_part
         );
-        let display_width = separator_width + icon_width + branch.len() + dirty_width + 3;
+        let display_width = separator_width + icon_width + branch.width() + dirty_width + 3;
 
         Some(RenderedSegment {
             content,

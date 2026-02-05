@@ -42,7 +42,7 @@ impl TopbarSegment for ClockSegment {
             " {}{} {}{}{} ",
             sep_fg, separator, clock_fg, icon_part, state.timestamp
         );
-        let display_width = separator_width + icon_display_width + state.timestamp.len() + 3;
+        let display_width = separator_width + icon_display_width + state.timestamp.width() + 3;
 
         Some(RenderedSegment {
             content,
