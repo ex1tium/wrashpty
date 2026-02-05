@@ -17,4 +17,4 @@ pub mod tabbed_panel;
 pub mod theme;
 
 // Re-export core types for convenience
-pub use core::{Chrome, ChromeContext, NotificationStyle, ScrollInfo, SizeCheckResult};
+pub use core::{Chrome, ChromeContext, NotificationStyle, ScrollInfo, SizeCheckResult, TopbarMode};
