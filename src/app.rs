@@ -364,6 +364,8 @@ pub struct App {
     alt_screen_detector: crate::scrollback::AltScreenDetector,
     /// Current scroll state (Live or Scrolled with offset).
     scroll_state: crate::types::ScrollState,
+    /// Whether to show line numbers in scrollback view (toggled with Ctrl+L).
+    show_line_numbers: bool,
 }
 
 impl App {
@@ -476,6 +478,7 @@ impl App {
             capture_state,
             alt_screen_detector,
             scroll_state: crate::types::ScrollState::Live,
+            show_line_numbers: false,
         })
     }
 
@@ -1882,7 +1885,7 @@ impl App {
     fn viewport_height(&self) -> usize {
         match TerminalGuard::get_size() {
             Ok((_, rows)) => {
-                // Reserve 1 row for scroll indicator when scrolled
+                // Reserve 1 row for topbar when scrolled (scroll info shown in topbar)
                 if self.scroll_state.is_scrolled() {
                     (rows as usize).saturating_sub(1)
                 } else {
@@ -1911,9 +1914,20 @@ impl App {
             ((offset * 100) / max_offset).min(100) as u8
         };
 
+        // Calculate first visible line (1-indexed from oldest)
+        // Buffer stores lines oldest-first (index 0 = oldest = line 1)
+        // get_from_bottom(offset, viewport) returns lines from (total - offset - viewport) to (total - offset)
+        // So first visible line number is (total - offset - viewport + 1), clamped to 1
+        let first_visible_line = total
+            .saturating_sub(offset)
+            .saturating_sub(viewport)
+            .saturating_add(1)
+            .max(1);
+
         Some(crate::chrome::ScrollInfo {
             percentage,
             total_lines: total,
+            first_visible_line,
         })
     }
 
@@ -2089,8 +2103,8 @@ impl App {
     /// Renders the scrollback view to the terminal.
     ///
     /// This replaces the terminal content with scrollback buffer content
-    /// and shows a scroll position indicator.
-    fn render_scrollback_view(&self) -> std::io::Result<()> {
+    /// while preserving the topbar with scroll information.
+    fn render_scrollback_view(&mut self) -> std::io::Result<()> {
         let (cols, rows) = match TerminalGuard::get_size() {
             Ok(size) => size,
             Err(_) => return Ok(()), // Can't render without size
@@ -2099,15 +2113,41 @@ impl App {
         let offset = self.scroll_state.offset();
         let mut stdout = std::io::stdout();
 
-        crate::scrollback::ScrollViewer::render_with_indicator(
+        // Render scrollback content (starting at row 2 to preserve topbar)
+        crate::scrollback::ScrollViewer::render_with_chrome(
             &mut stdout,
             &self.scrollback_buffer,
             offset,
             cols,
             rows,
+            self.show_line_numbers,
         )?;
 
+        // Render the topbar with scroll info
+        self.render_scroll_topbar(cols)?;
+
         Ok(())
+    }
+
+    /// Renders the topbar with scroll information.
+    fn render_scroll_topbar(&self, cols: u16) -> std::io::Result<()> {
+        use std::io::Write;
+
+        let scroll_info = self.get_scroll_info();
+        let timestamp = chrono::Local::now().format("%H:%M").to_string();
+        let ctx = ChromeContext {
+            cwd: &self.current_cwd,
+            git_branch: self.git_branch.as_deref(),
+            git_dirty: self.git_dirty,
+            last_exit_code: self.last_exit_code,
+            last_command: self.last_command.as_deref(),
+            last_duration: self.last_command_duration,
+            timestamp: &timestamp,
+            scroll_info,
+        };
+
+        self.chrome.render_context_bar(cols, &ctx)?;
+        std::io::stdout().flush()
     }
 
     /// Clears the scrollback view and restores normal terminal display.
@@ -2236,6 +2276,71 @@ impl App {
                         }
                     } else {
                         // Returned to live view
+                        break;
+                    }
+                }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Up,
+                    ..
+                }) => {
+                    // Up arrow: scroll up one line
+                    if self.can_scroll() {
+                        self.scroll_up(1);
+                        if let Err(e) = self.render_scrollback_view() {
+                            warn!("Failed to render scrollback: {}", e);
+                            self.scroll_to_bottom();
+                            break;
+                        }
+                    }
+                }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Down,
+                    ..
+                }) => {
+                    // Down arrow: scroll down one line
+                    self.scroll_down(1);
+                    if self.scroll_state.is_scrolled() {
+                        if let Err(e) = self.render_scrollback_view() {
+                            warn!("Failed to render scrollback: {}", e);
+                            self.scroll_to_bottom();
+                            break;
+                        }
+                    } else {
+                        // Returned to live view
+                        break;
+                    }
+                }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Home,
+                    ..
+                }) => {
+                    // Home: jump to top (oldest content)
+                    self.scroll_to_top();
+                    if let Err(e) = self.render_scrollback_view() {
+                        warn!("Failed to render scrollback: {}", e);
+                        self.scroll_to_bottom();
+                        break;
+                    }
+                }
+                Event::Key(KeyEvent {
+                    code: KeyCode::End,
+                    ..
+                }) => {
+                    // End: jump to bottom (live view)
+                    self.scroll_to_bottom();
+                    break;
+                }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Char('l'),
+                    modifiers,
+                    ..
+                }) if modifiers.contains(KeyModifiers::CONTROL) => {
+                    // Ctrl+L: toggle line numbers
+                    self.show_line_numbers = !self.show_line_numbers;
+                    debug!(show_line_numbers = self.show_line_numbers, "Toggled line numbers");
+                    if let Err(e) = self.render_scrollback_view() {
+                        warn!("Failed to render scrollback: {}", e);
+                        self.scroll_to_bottom();
                         break;
                     }
                 }
