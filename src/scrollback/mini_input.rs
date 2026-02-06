@@ -236,8 +236,14 @@ impl MiniInput {
         }
 
         // Calculate available width for input (in display columns)
-        let status_width = status.map(|s| text_width::display_width(s) + 2).unwrap_or(0);
-        let available = (cols as usize).saturating_sub(prompt_width + status_width + 1);
+        let status_width = status.map(text_width::display_width).unwrap_or(0);
+        let reserved_for_status = if status.is_some() {
+            status_width + 1
+        } else {
+            0
+        };
+        let available = (cols as usize).saturating_sub(prompt_width + reserved_for_status);
+        let mut view_start_col = 0usize;
 
         // Show buffer (or hint if empty)
         if self.buffer.is_empty() {
@@ -263,15 +269,19 @@ impl MiniInput {
                     let target_start_col = cursor_display_col.saturating_sub(available / 2);
                     // Find byte offset corresponding to target_start_col
                     let mut start_byte = 0;
+                    let mut start_col = 0;
                     let mut col = 0;
                     for (idx, ch) in self.buffer.char_indices() {
                         if col >= target_start_col {
                             start_byte = idx;
+                            start_col = col;
                             break;
                         }
                         col += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
                         start_byte = idx + ch.len_utf8();
+                        start_col = col;
                     }
+                    view_start_col = start_col;
                     let window = &self.buffer[start_byte..];
                     text_width::truncate_to_width(window, available).into_owned()
                 } else {
@@ -284,17 +294,20 @@ impl MiniInput {
 
         // Show status on the right if provided
         if let Some(status) = status {
-            let col = cols.saturating_sub(text_width::display_width(status) as u16);
+            let col = cols
+                .saturating_sub(text_width::display_width(status) as u16)
+                .saturating_add(1);
             write!(out, "\x1b[1;{}H{}\x1b[2m{}\x1b[22m", col, bg, status)?;
         }
 
         // Reset styling before cursor positioning
         write!(out, "{}", reset)?;
 
-        // Position cursor using display width (not character count)
+        // Position cursor using display width and visible window offset.
         let cursor = self.sanitized_cursor();
         let cursor_display_col = text_width::display_width(&self.buffer[..cursor]);
-        let cursor_col = prompt_width + cursor_display_col.min(available) + 1;
+        let cursor_in_view = cursor_display_col.saturating_sub(view_start_col);
+        let cursor_col = prompt_width + cursor_in_view.min(available) + 1;
         write!(out, "\x1b[1;{}H", cursor_col)?;
 
         // Show cursor
@@ -472,5 +485,36 @@ mod tests {
         let mut buf = Vec::new();
         // This should not panic even with very small cols
         let _ = input.render(&mut buf, 10, None);
+    }
+
+    #[test]
+    fn test_render_cursor_tracks_windowed_view() {
+        let mut input = MiniInput::new("S");
+        input.buffer = "abcdefghijklmno".to_string();
+        input.cursor = 12;
+
+        let mut out = Vec::new();
+        input.render(&mut out, 12, None).unwrap();
+        let rendered = String::from_utf8_lossy(&out);
+
+        // Prompt width is 3 ("S: "), cursor should be at column 8 in the scrolled window.
+        assert!(
+            rendered.ends_with("\x1b[1;8H\x1b[?25h"),
+            "expected cursor at col 8 in windowed view, got: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn test_render_status_right_aligned_one_based_column() {
+        let input = MiniInput::new("S");
+        let mut out = Vec::new();
+        input.render(&mut out, 20, Some("OK")).unwrap();
+        let rendered = String::from_utf8_lossy(&out);
+
+        // Width 2 status should start at column 19 in a 20-col terminal.
+        assert!(
+            rendered.contains("\x1b[1;19H"),
+            "expected status at col 19, got: {rendered:?}"
+        );
     }
 }
