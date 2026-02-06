@@ -56,11 +56,12 @@ pub fn suggest(conn: &Connection, context: &SuggestionContext, limit: usize) -> 
     // Boost commands with high success rates
     boost_successful(&mut ranked, 0.8, 1.2);
 
-    // Re-sort after penalties/boosts
+    // Re-sort after penalties/boosts (tiebreak alphabetically for determinism)
     ranked.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.text.cmp(&b.text))
     });
 
     // Limit results
@@ -442,12 +443,15 @@ mod tests {
             ..Default::default()
         };
 
-        let suggestions = suggest(&conn, &context, 10);
+        // Request enough to include all git subcommands (22 bootstrapped)
+        let suggestions = suggest(&conn, &context, 30);
         // Should return git subcommands from bootstrapped hierarchy
         assert!(!suggestions.is_empty());
         // Verify we get git subcommands
         let texts: Vec<&str> = suggestions.iter().map(|s| s.text.as_str()).collect();
-        assert!(texts.contains(&"commit") || texts.contains(&"push") || texts.contains(&"pull"));
+        assert!(texts.contains(&"commit"), "expected 'commit' in {:?}", texts);
+        assert!(texts.contains(&"push"), "expected 'push' in {:?}", texts);
+        assert!(texts.contains(&"pull"), "expected 'pull' in {:?}", texts);
     }
 
     #[test]

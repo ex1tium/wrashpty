@@ -262,7 +262,7 @@ mod tests {
         // because "好" needs 2 cols and 2+2=4 > 3
         let result = truncate_to_width("你好", 3);
         assert_eq!(&*result, "你");
-        assert_eq!(display_width(&*result), 2);
+        assert_eq!(display_width(&result), 2);
     }
 
     #[test]
@@ -306,7 +306,7 @@ mod tests {
     fn ellipsis_truncation() {
         let result = truncate_with_ellipsis("hello world", 8);
         assert_eq!(&*result, "hello w…");
-        assert!(display_width(&*result) <= 8);
+        assert!(display_width(&result) <= 8);
     }
 
     #[test]
