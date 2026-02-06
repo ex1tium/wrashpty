@@ -908,9 +908,8 @@ impl Panel for FileBrowserPanel {
                 let actual_idx = self.scroll_offset + display_idx;
                 let is_selected = actual_idx == self.selection;
 
-                // Use single-column ASCII markers to avoid wide-glyph
-                // rendering drift against panel borders in some terminals.
-                let icon = if entry.is_dir { "d" } else { "f" };
+                // Use Unicode file/folder icons.
+                let icon = if entry.is_dir { "📁" } else { "📄" };
                 let icon_color = if entry.is_dir {
                     self.theme.dir_color
                 } else {
@@ -936,14 +935,18 @@ impl Panel for FileBrowserPanel {
                     format!("{:>5}", format_size(entry.size))
                 };
 
-                // Calculate available width for name (total - metadata columns)
-                // Format: icon(2) + name + perms(4) + date(6) + size(6) + spacing(6)
-                let metadata_width = 22_usize;
+                // Calculate available width for name (total - metadata columns).
+                // icon_display_width + spacing(1) + perms(4) + date(6) + size(6) + spacing(6)
+                let icon_width = crate::ui::text_width::display_width(icon) + 1;
+                let metadata_width = icon_width + 20;
                 let available_for_name = (area.width as usize).saturating_sub(metadata_width);
                 // Use display-width-aware truncation for correct column alignment
                 let name_display_width = crate::ui::text_width::display_width(&entry.name);
-                let display_name = if name_display_width > available_for_name && available_for_name > 0 {
-                    crate::ui::text_width::truncate_with_ellipsis(&entry.name, available_for_name).into_owned()
+                let display_name = if name_display_width > available_for_name
+                    && available_for_name > 0
+                {
+                    crate::ui::text_width::truncate_with_ellipsis(&entry.name, available_for_name)
+                        .into_owned()
                 } else {
                     entry.name.clone()
                 };

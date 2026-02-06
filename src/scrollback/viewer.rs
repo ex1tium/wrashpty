@@ -56,10 +56,7 @@ fn ansi_aware_truncate(content: &[u8], max_display_cols: usize) -> usize {
                         i += 1;
                         break;
                     }
-                    if content[i] == 0x1b
-                        && i + 1 < content.len()
-                        && content[i + 1] == b'\\'
-                    {
+                    if content[i] == 0x1b && i + 1 < content.len() && content[i + 1] == b'\\' {
                         i += 2;
                         break;
                     }
@@ -124,6 +121,25 @@ fn ansi_aware_truncate(content: &[u8], max_display_cols: usize) -> usize {
     }
 
     content.len()
+}
+
+/// Writes line content truncated to visible display width.
+///
+/// Appends a full style reset when truncation occurs so partially emitted ANSI
+/// styles do not bleed into the rest of the render output.
+fn write_truncated_content<W: Write>(
+    out: &mut W,
+    content: &[u8],
+    max_display_cols: usize,
+) -> io::Result<()> {
+    let safe_len = ansi_aware_truncate(content, max_display_cols);
+    out.write_all(&content[..safe_len])?;
+
+    if safe_len < content.len() {
+        out.write_all(b"\x1b[0m")?;
+    }
+
+    Ok(())
 }
 
 /// Rendering options for scrollback viewer.
@@ -302,10 +318,7 @@ impl ScrollViewer {
 
             // Write line content
             let content = line.content();
-            {
-                let safe_len = ansi_aware_truncate(content, content_cols);
-                out.write_all(&content[..safe_len])?;
-            }
+            write_truncated_content(out, content, content_cols)?;
 
             // If line was truncated in storage, show indicator
             if line.is_truncated() {
@@ -608,10 +621,7 @@ impl ScrollViewer {
             if line_matches.is_empty() {
                 // No matches - render line normally
                 let content = line.content();
-                {
-                    let safe_len = ansi_aware_truncate(content, content_cols);
-                    out.write_all(&content[..safe_len])?;
-                }
+                write_truncated_content(out, content, content_cols)?;
             } else {
                 // Render line with search highlights
                 Self::render_line_with_highlights(
@@ -677,6 +687,7 @@ impl ScrollViewer {
         use crate::chrome::segments::color_to_bg_ansi;
 
         let truncate_len = ansi_aware_truncate(content, max_cols);
+        let was_truncated = truncate_len < content.len();
         let truncated = &content[..truncate_len];
         let content_str = String::from_utf8_lossy(truncated);
         let mut pos = 0;
@@ -717,6 +728,10 @@ impl ScrollViewer {
         // Write remaining text after last match
         if let Some(remaining) = content_str.get(pos..) {
             write!(out, "{}", remaining)?;
+        }
+
+        if was_truncated {
+            write!(out, "\x1b[0m")?;
         }
 
         Ok(())
@@ -808,10 +823,7 @@ impl ScrollViewer {
 
             // Write line content
             let content = line.content();
-            {
-                let safe_len = ansi_aware_truncate(content, content_cols);
-                out.write_all(&content[..safe_len])?;
-            }
+            write_truncated_content(out, content, content_cols)?;
 
             // If line was truncated in storage, show indicator
             if line.is_truncated() {
@@ -935,10 +947,7 @@ impl ScrollViewer {
             if line_matches.is_empty() {
                 // No matches - render line normally
                 let content = line.content();
-                {
-                    let safe_len = ansi_aware_truncate(content, content_cols);
-                    out.write_all(&content[..safe_len])?;
-                }
+                write_truncated_content(out, content, content_cols)?;
             } else {
                 // Render line with search highlights
                 Self::render_line_with_highlights(
@@ -1251,6 +1260,33 @@ mod tests {
         assert_eq!(ansi_aware_truncate(content, 3), content.len());
         // 2 cols = ANSI + "你" + reset
         assert_eq!(ansi_aware_truncate(content, 2), "\x1b[31m你\x1b[0m".len());
+    }
+
+    #[test]
+    fn test_write_truncated_content_appends_reset_when_cut() {
+        let mut out = Vec::new();
+        write_truncated_content(&mut out, b"\x1b[31mhello\x1b[0m", 1).unwrap();
+        assert_eq!(out, b"\x1b[31mh\x1b[0m");
+    }
+
+    #[test]
+    fn test_render_line_with_highlights_resets_when_truncated() {
+        let mut out = Vec::new();
+        ScrollViewer::render_line_with_highlights(
+            &mut out,
+            b"\x1b[31mhello\x1b[0m",
+            1,
+            &[],
+            None,
+            &crate::chrome::theme::AMBER_THEME,
+        )
+        .unwrap();
+
+        let rendered = String::from_utf8_lossy(&out);
+        assert!(
+            rendered.ends_with("\x1b[0m"),
+            "truncated highlighted line should end with reset: {rendered:?}"
+        );
     }
 
     #[test]

@@ -17,7 +17,7 @@ use ratatui_widgets::paragraph::{Paragraph, Wrap};
 use tracing::{debug, warn};
 
 use super::command_edit::{
-    CommandEditState, CommandToken, TokenType, superscript_number, token_type_style,
+    superscript_number, token_type_style, CommandEditState, CommandToken, TokenType,
 };
 use super::command_knowledge::COMMAND_KNOWLEDGE;
 use super::panel::{Panel, PanelResult};
@@ -318,7 +318,8 @@ impl HistoryBrowserPanel {
         let border_style = Style::default().fg(self.theme.panel_border);
         let orig_hint = format!(" Original: {} ", edit_state.original);
         let max_hint_width = (area.width as usize).saturating_sub(4);
-        let truncated_hint: String = crate::ui::text_width::truncate_to_width(&orig_hint, max_hint_width).into_owned();
+        let truncated_hint: String =
+            crate::ui::text_width::truncate_to_width(&orig_hint, max_hint_width).into_owned();
         // Collect chars for cell-by-cell rendering
         let hint_chars: Vec<char> = truncated_hint.chars().collect();
 
@@ -327,19 +328,20 @@ impl HistoryBrowserPanel {
         let mut col_offset: usize = 0;
         for x in chunks[1].x..chunks[1].x + chunks[1].width {
             if let Some(cell) = buffer.cell_mut((x, chunks[1].y)) {
+                if col_offset > 0 {
+                    // Skip continuation cell(s) from previous wide char.
+                    col_offset -= 1;
+                    continue;
+                }
+
                 if hint_idx < hint_chars.len() {
                     let ch = hint_chars[hint_idx];
                     let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
                     cell.set_char(ch);
                     cell.set_style(Style::default().fg(self.theme.text_secondary));
                     hint_idx += 1;
-                    // For wide characters, skip continuation cells
-                    if ch_w > 1 {
-                        col_offset += ch_w - 1;
-                    }
-                } else if col_offset > 0 {
-                    // Skip continuation cell from previous wide char
-                    col_offset -= 1;
+                    // For wide characters, skip continuation cells.
+                    col_offset = ch_w.saturating_sub(1);
                 } else {
                     cell.set_char('─');
                     cell.set_style(border_style);
@@ -370,8 +372,7 @@ impl HistoryBrowserPanel {
             let token_width = superscript_len + 1 + text_display_width + 1 + 3;
 
             if i == edit_state.selected {
-                selected_x_end =
-                    selected_x_start + superscript_len + 1 + text_display_width + 1;
+                selected_x_end = selected_x_start + superscript_len + 1 + text_display_width + 1;
                 break;
             }
             selected_x_start += token_width;
@@ -1053,7 +1054,9 @@ impl HistoryBrowserPanel {
             let mut col: u16 = 0;
             for ch in time_padded.chars() {
                 let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
-                if (col + ch_w) as usize > max_col { break; }
+                if (col + ch_w) as usize > max_col {
+                    break;
+                }
                 if let Some(cell) = buffer.cell_mut((x + col, area.y)) {
                     cell.set_char(ch);
                     cell.set_style(time_style);
@@ -1083,7 +1086,9 @@ impl HistoryBrowserPanel {
             let mut col: u16 = 0;
             for ch in dur_padded.chars() {
                 let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
-                if (col + ch_w) as usize > max_col { break; }
+                if (col + ch_w) as usize > max_col {
+                    break;
+                }
                 if let Some(cell) = buffer.cell_mut((x + col, area.y)) {
                     cell.set_char(ch);
                     cell.set_style(dur_style);
@@ -1119,7 +1124,9 @@ impl HistoryBrowserPanel {
                 let mut col: u16 = 0;
                 for ch in count_text.chars() {
                     let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
-                    if (col + ch_w) as usize > max_col { break; }
+                    if (col + ch_w) as usize > max_col {
+                        break;
+                    }
                     if let Some(cell) = buffer.cell_mut((x + col, area.y)) {
                         cell.set_char(ch);
                         cell.set_style(count_style);
@@ -1149,7 +1156,9 @@ impl HistoryBrowserPanel {
             let mut col: u16 = 0;
             for ch in status_text.chars() {
                 let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
-                if (col + ch_w) as usize > max_col { break; }
+                if (col + ch_w) as usize > max_col {
+                    break;
+                }
                 if let Some(cell) = buffer.cell_mut((x + col, area.y)) {
                     cell.set_char(ch);
                     cell.set_style(status_style);
@@ -1421,9 +1430,10 @@ impl Panel for HistoryBrowserPanel {
 
 #[cfg(test)]
 mod tests {
+    use super::super::buffer_convert::buffer_to_ansi;
     use super::super::command_edit::{
-        QuoteStyle, TokenType, apply_quotes, check_dangerous_command, split_quotes,
-        tokenize_command,
+        apply_quotes, check_dangerous_command, split_quotes, tokenize_command, QuoteStyle,
+        TokenType,
     };
     use super::super::theme::AMBER_THEME;
     use super::*;
@@ -1565,5 +1575,43 @@ mod tests {
         assert_eq!(state.edit_buffer, "'hello'");
         state.cycle_quote();
         assert_eq!(state.edit_buffer, "\"hello\"");
+    }
+
+    #[test]
+    fn test_edit_mode_original_hint_preserves_wide_chars() {
+        let mut panel = HistoryBrowserPanel::new(&AMBER_THEME);
+        panel.edit_mode = Some(CommandEditState::from_command("echo 你好"));
+
+        let area = Rect::new(0, 0, 60, 12);
+        let mut buffer = Buffer::empty(area);
+        panel.render(&mut buffer, area);
+
+        let ansi = buffer_to_ansi(&buffer, area);
+        let visible = strip_ansi_for_test(&ansi);
+        assert!(
+            visible.contains("Original: echo 你好"),
+            "expected wide chars in original hint, got: {visible:?}"
+        );
+    }
+
+    fn strip_ansi_for_test(s: &str) -> String {
+        let mut result = String::new();
+        let mut chars = s.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\x1b' {
+                if chars.peek() == Some(&'[') {
+                    chars.next();
+                    while let Some(&c) = chars.peek() {
+                        chars.next();
+                        if c.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                }
+            } else {
+                result.push(ch);
+            }
+        }
+        result
     }
 }
