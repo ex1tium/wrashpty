@@ -1,10 +1,4 @@
 //! Scrollback viewer and scroll view mode handling.
-//!
-//! This module contains all the scroll view related functionality including:
-//! - Scrollback capture and viewing
-//! - Search and filter modes
-//! - Scroll key handling
-//! - Topbar state generation for scroll mode
 
 use anyhow::{Context, Result};
 use tracing::{debug, warn};
@@ -30,6 +24,53 @@ pub(super) enum ScrollAction {
     Home,
     /// Jump to bottom (live view)
     End,
+}
+
+fn filter_offset_for_line_with_viewport(
+    filter: &crate::scrollback::features::FilterState,
+    line_idx: usize,
+    viewport_height: usize,
+) -> usize {
+    if let Some(pos) = filter
+        .matching_lines
+        .iter()
+        .position(|&idx| idx == line_idx)
+    {
+        let total = filter.matching_lines.len();
+        let pos_from_bottom = total.saturating_sub(pos + 1);
+        pos_from_bottom.saturating_sub(viewport_height / 2)
+    } else {
+        0
+    }
+}
+
+fn try_scroll_action_prefix_bytes(bytes: &[u8]) -> Option<(ScrollAction, usize)> {
+    if bytes.starts_with(b"\x1b[5~") {
+        return Some((ScrollAction::PageUp, 4));
+    }
+    if bytes.starts_with(b"\x1b[6~") {
+        return Some((ScrollAction::PageDown, 4));
+    }
+    if bytes.starts_with(b"\x1b[5;2~") {
+        return Some((ScrollAction::LineUp, 6));
+    }
+    if bytes.starts_with(b"\x1b[6;2~") {
+        return Some((ScrollAction::LineDown, 6));
+    }
+    if bytes.starts_with(b"\x1b[1~") {
+        return Some((ScrollAction::Home, 4));
+    }
+    if bytes.starts_with(b"\x1b[H") {
+        return Some((ScrollAction::Home, 3));
+    }
+    if bytes.starts_with(b"\x1b[4~") {
+        return Some((ScrollAction::End, 4));
+    }
+    if bytes.starts_with(b"\x1b[F") {
+        return Some((ScrollAction::End, 3));
+    }
+
+    None
 }
 
 impl App {
@@ -60,7 +101,7 @@ impl App {
         }
 
         // Optional raw byte dump for debugging capture issues.
-        // Set WRASHPTY_CAPTURE_RAW=1 to write raw PTY bytes to /tmp/wrashpty-raw.bin
+        // Set WRASHPTY_CAPTURE_RAW=1 to write raw PTY bytes to a secure temp file.
         if self.raw_capture_fd.is_some() {
             use std::io::Write;
             if let Some(ref mut fd) = self.raw_capture_fd {
@@ -114,7 +155,7 @@ impl App {
     /// - Scrollback buffer has content
     /// - In Edit or Passthrough mode (not during mode transitions)
     #[inline]
-    pub(super) fn can_scroll(&self) -> bool {
+    pub(super) fn is_scroll_allowed(&self) -> bool {
         !self.alt_screen_detector.is_in_alt_screen()
             && !self.scrollback_buffer.is_empty()
             && matches!(self.mode, Mode::Edit | Mode::Passthrough)
@@ -122,7 +163,7 @@ impl App {
 
     /// Scrolls the view up by the specified number of lines.
     pub(super) fn scroll_up(&mut self, lines: usize) {
-        if !self.can_scroll() {
+        if !self.is_scroll_allowed() {
             return;
         }
 
@@ -154,7 +195,7 @@ impl App {
 
     /// Scrolls to the top (oldest content).
     pub(super) fn scroll_to_top(&mut self) {
-        if !self.can_scroll() {
+        if !self.is_scroll_allowed() {
             return;
         }
 
@@ -498,7 +539,7 @@ impl App {
         let mut out = std::io::stdout();
 
         // Render using the search-aware viewer
-        let boundary_lines = if self.viewer_state.show_command_separators() {
+        let boundary_lines = if self.viewer_state.is_command_separators_shown() {
             &self.viewer_state.boundaries.prompt_lines
         } else {
             &[] as &[usize]
@@ -509,8 +550,8 @@ impl App {
             offset,
             cols,
             rows,
-            self.viewer_state.show_line_numbers(),
-            self.viewer_state.show_timestamps(),
+            self.viewer_state.is_line_numbers_shown(),
+            self.viewer_state.is_timestamps_shown(),
             true, // show boundary markers
             search,
             self.chrome.theme(),
@@ -693,10 +734,14 @@ impl App {
                                     }
                                 } else {
                                     // Filter search results by additional pattern
-                                    filter.perform_filter_within(
-                                        &self.scrollback_buffer,
-                                        self.viewer_state.last_search_lines.as_ref().unwrap(),
-                                    );
+                                    if let Some(lines) =
+                                        self.viewer_state.last_search_lines.as_ref()
+                                    {
+                                        filter
+                                            .perform_filter_within(&self.scrollback_buffer, lines);
+                                    } else {
+                                        filter.clear_matches();
+                                    }
                                 }
                             } else {
                                 // Normal filtering - search entire buffer
@@ -737,8 +782,8 @@ impl App {
             filter_offset,
             cols,
             rows,
-            self.viewer_state.show_line_numbers(),
-            self.viewer_state.show_timestamps(),
+            self.viewer_state.is_line_numbers_shown(),
+            self.viewer_state.is_timestamps_shown(),
         )?;
 
         out.flush()?;
@@ -886,24 +931,7 @@ impl App {
         filter: &crate::scrollback::features::FilterState,
         line_idx: usize,
     ) -> usize {
-        // Find position of line_idx in matching_lines
-        if let Some(pos) = filter
-            .matching_lines
-            .iter()
-            .position(|&idx| idx == line_idx)
-        {
-            // Convert position to offset from bottom
-            let total = filter.matching_lines.len();
-            let viewport = self.viewport_height();
-            // We want this line visible, calculate offset
-            // Position from bottom = total - pos - 1
-            // But we want it somewhere in the middle of viewport
-            let pos_from_bottom = total.saturating_sub(pos + 1);
-            // Offset to show this line near center
-            pos_from_bottom.saturating_sub(viewport / 2)
-        } else {
-            0
-        }
+        filter_offset_for_line_with_viewport(filter, line_idx, self.viewport_height())
     }
 
     /// Renders scrollback with filter AND search active.
@@ -926,8 +954,8 @@ impl App {
             filter_offset,
             cols,
             rows,
-            self.viewer_state.show_line_numbers(),
-            self.viewer_state.show_timestamps(),
+            self.viewer_state.is_line_numbers_shown(),
+            self.viewer_state.is_timestamps_shown(),
             search,
             self.chrome.theme(),
         )?;
@@ -1008,8 +1036,8 @@ impl App {
                     self.viewer_state.mode,
                     crate::scrollback::ScrollViewMode::Filter(_)
                 ),
-                timestamps_on: self.viewer_state.show_timestamps(),
-                line_numbers_on: self.viewer_state.show_line_numbers(),
+                timestamps_on: self.viewer_state.is_timestamps_shown(),
+                line_numbers_on: self.viewer_state.is_line_numbers_shown(),
             })
         } else {
             None
@@ -1061,11 +1089,11 @@ impl App {
                 break;
             }
 
-            match self.detect_scroll_action_prefix(remaining) {
+            match self.try_scroll_action_prefix(remaining) {
                 Some((action, consumed)) => {
                     let should_handle = match action {
                         ScrollAction::PageUp | ScrollAction::LineUp | ScrollAction::Home => {
-                            self.can_scroll()
+                            self.is_scroll_allowed()
                         }
                         ScrollAction::PageDown | ScrollAction::LineDown | ScrollAction::End => {
                             self.scroll_state.is_scrolled()
@@ -1084,7 +1112,7 @@ impl App {
                     // Apply the scroll action
                     match action {
                         ScrollAction::PageUp => {
-                            if self.can_scroll() {
+                            if self.is_scroll_allowed() {
                                 self.scroll_up(self.viewport_height());
                                 needs_render = true;
                             }
@@ -1095,7 +1123,7 @@ impl App {
                             needs_render = true;
                         }
                         ScrollAction::LineUp => {
-                            if self.can_scroll() {
+                            if self.is_scroll_allowed() {
                                 self.scroll_up(1);
                                 needs_render = true;
                             }
@@ -1106,7 +1134,7 @@ impl App {
                             needs_render = true;
                         }
                         ScrollAction::Home => {
-                            if self.can_scroll() {
+                            if self.is_scroll_allowed() {
                                 self.scroll_to_top();
                                 needs_render = true;
                             }
@@ -1153,57 +1181,16 @@ impl App {
         }
     }
 
-    /// Detects scroll action at the START of bytes.
+    /// Tries to parse a scroll action at the start of `bytes`.
     ///
     /// Returns the action and how many bytes were consumed.
     /// This allows processing multiple accumulated scroll sequences.
-    pub(super) fn detect_scroll_action_prefix(
-        &self,
-        bytes: &[u8],
-    ) -> Option<(ScrollAction, usize)> {
-        // Common escape sequences for scroll keys
-        // Note: These can vary by terminal, but these cover most cases
-
-        // PgUp: ESC[5~
-        if bytes.starts_with(b"\x1b[5~") {
-            debug!("Detected PgUp key");
-            return Some((ScrollAction::PageUp, 4));
+    pub(super) fn try_scroll_action_prefix(&self, bytes: &[u8]) -> Option<(ScrollAction, usize)> {
+        let parsed = try_scroll_action_prefix_bytes(bytes);
+        if let Some((action, _)) = parsed {
+            debug!(?action, "Detected scroll action prefix");
         }
-        // PgDown: ESC[6~
-        if bytes.starts_with(b"\x1b[6~") {
-            debug!("Detected PgDown key");
-            return Some((ScrollAction::PageDown, 4));
-        }
-        // Shift+PgUp: ESC[5;2~ (scroll one line) - check BEFORE shorter sequences
-        if bytes.starts_with(b"\x1b[5;2~") {
-            debug!("Detected Shift+PgUp key");
-            return Some((ScrollAction::LineUp, 6));
-        }
-        // Shift+PgDown: ESC[6;2~ (scroll one line)
-        if bytes.starts_with(b"\x1b[6;2~") {
-            debug!("Detected Shift+PgDown key");
-            return Some((ScrollAction::LineDown, 6));
-        }
-        // Home: ESC[H (3 bytes) or ESC[1~ (4 bytes)
-        if bytes.starts_with(b"\x1b[1~") {
-            debug!("Detected Home key (ESC[1~)");
-            return Some((ScrollAction::Home, 4));
-        }
-        if bytes.starts_with(b"\x1b[H") {
-            debug!("Detected Home key (ESC[H)");
-            return Some((ScrollAction::Home, 3));
-        }
-        // End: ESC[F (3 bytes) or ESC[4~ (4 bytes)
-        if bytes.starts_with(b"\x1b[4~") {
-            debug!("Detected End key (ESC[4~)");
-            return Some((ScrollAction::End, 4));
-        }
-        if bytes.starts_with(b"\x1b[F") {
-            debug!("Detected End key (ESC[F)");
-            return Some((ScrollAction::End, 3));
-        }
-
-        None
+        parsed
     }
 
     /// Renders the scrollback view to the terminal.
@@ -1222,7 +1209,7 @@ impl App {
         let mut stdout = std::io::stdout();
 
         // Adjust content rows if help bar is shown
-        let content_rows = if self.viewer_state.show_help_bar() {
+        let content_rows = if self.viewer_state.is_help_bar_shown() {
             rows.saturating_sub(1) // Reserve last row for help bar
         } else {
             rows
@@ -1230,7 +1217,7 @@ impl App {
 
         // Render scrollback content (starting at row 2 to preserve topbar)
         // Show boundary markers (BEGIN/END) at buffer boundaries
-        let boundary_lines = if self.viewer_state.show_command_separators() {
+        let boundary_lines = if self.viewer_state.is_command_separators_shown() {
             &self.viewer_state.boundaries.prompt_lines
         } else {
             &[] as &[usize]
@@ -1241,15 +1228,15 @@ impl App {
             offset,
             cols,
             content_rows,
-            self.viewer_state.show_line_numbers(),
-            self.viewer_state.show_timestamps(),
+            self.viewer_state.is_line_numbers_shown(),
+            self.viewer_state.is_timestamps_shown(),
             true, // show_boundary_markers
             Some(self.chrome.theme()),
             boundary_lines,
         )?;
 
         // Render help bar if enabled
-        if self.viewer_state.show_help_bar() {
+        if self.viewer_state.is_help_bar_shown() {
             crate::scrollback::features::HelpBar::render(
                 &mut stdout,
                 &self.viewer_state.mode,
@@ -1417,7 +1404,7 @@ impl App {
                     modifiers,
                     ..
                 }) => {
-                    if self.can_scroll() {
+                    if self.is_scroll_allowed() {
                         let lines = if modifiers.contains(KeyModifiers::SHIFT) {
                             1 // Shift+PgUp: one line
                         } else {
@@ -1453,7 +1440,7 @@ impl App {
                     code: KeyCode::Up, ..
                 }) => {
                     // Up arrow: scroll up one line
-                    if self.can_scroll() {
+                    if self.is_scroll_allowed() {
                         self.scroll_up(1);
                         if let Err(e) = self.render_scrollback_view() {
                             warn!("Failed to render scrollback: {}", e);
@@ -1501,7 +1488,7 @@ impl App {
                     // Ctrl+L: toggle line numbers
                     self.viewer_state.toggle_line_numbers();
                     debug!(
-                        show_line_numbers = self.viewer_state.show_line_numbers(),
+                        show_line_numbers = self.viewer_state.is_line_numbers_shown(),
                         "Toggled line numbers"
                     );
                     if let Err(e) = self.render_scrollback_view() {
@@ -1516,7 +1503,7 @@ impl App {
                     ..
                 }) if modifiers.contains(KeyModifiers::CONTROL) => {
                     // Ctrl+U: half-page up
-                    if self.can_scroll() {
+                    if self.is_scroll_allowed() {
                         let half_page = self.viewport_height() / 2;
                         self.scroll_up(half_page.max(1));
                         if let Err(e) = self.render_scrollback_view() {
@@ -1548,7 +1535,7 @@ impl App {
                     // Ctrl+T: toggle timestamp gutter
                     self.viewer_state.toggle_timestamps();
                     debug!(
-                        show_timestamps = self.viewer_state.show_timestamps(),
+                        show_timestamps = self.viewer_state.is_timestamps_shown(),
                         "Toggled timestamps"
                     );
                     if let Err(e) = self.render_scrollback_view() {
@@ -1565,7 +1552,7 @@ impl App {
                     // Ctrl+B: toggle command boundary separators
                     self.viewer_state.toggle_command_separators();
                     debug!(
-                        show_separators = self.viewer_state.show_command_separators(),
+                        show_separators = self.viewer_state.is_command_separators_shown(),
                         "Toggled command separators"
                     );
                     if let Err(e) = self.render_scrollback_view() {
@@ -1694,7 +1681,7 @@ impl App {
                     // Toggle help bar
                     self.viewer_state.toggle_help_bar();
                     debug!(
-                        show_help = self.viewer_state.show_help_bar(),
+                        show_help = self.viewer_state.is_help_bar_shown(),
                         "Toggled help bar"
                     );
                     if let Err(e) = self.render_scrollback_view() {
@@ -1740,5 +1727,95 @@ impl App {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+mod tests {
+    use super::{
+        ScrollAction, filter_offset_for_line_with_viewport, try_scroll_action_prefix_bytes,
+    };
+    use crate::scrollback::features::FilterState;
+
+    #[test]
+    fn test_filter_offset_for_line_centered_returns_expected_offset() {
+        let filter = FilterState {
+            matching_lines: (0..20).collect(),
+            ..FilterState::default()
+        };
+
+        assert_eq!(filter_offset_for_line_with_viewport(&filter, 9, 10), 5);
+    }
+
+    #[test]
+    fn test_filter_offset_for_line_bottom_returns_zero_offset() {
+        let filter = FilterState {
+            matching_lines: (0..20).collect(),
+            ..FilterState::default()
+        };
+
+        assert_eq!(filter_offset_for_line_with_viewport(&filter, 19, 10), 0);
+    }
+
+    #[test]
+    fn test_filter_offset_for_line_out_of_range_returns_zero_offset() {
+        let filter = FilterState {
+            matching_lines: vec![2, 4, 6, 8],
+            ..FilterState::default()
+        };
+
+        assert_eq!(filter_offset_for_line_with_viewport(&filter, 99, 10), 0);
+    }
+
+    #[test]
+    fn test_try_scroll_action_prefix_page_keys_return_expected_action_and_len() {
+        assert_eq!(
+            try_scroll_action_prefix_bytes(b"\x1b[5~rest"),
+            Some((ScrollAction::PageUp, 4))
+        );
+        assert_eq!(
+            try_scroll_action_prefix_bytes(b"\x1b[6~"),
+            Some((ScrollAction::PageDown, 4))
+        );
+    }
+
+    #[test]
+    fn test_try_scroll_action_prefix_line_keys_return_expected_action_and_len() {
+        assert_eq!(
+            try_scroll_action_prefix_bytes(b"\x1b[5;2~"),
+            Some((ScrollAction::LineUp, 6))
+        );
+        assert_eq!(
+            try_scroll_action_prefix_bytes(b"\x1b[6;2~"),
+            Some((ScrollAction::LineDown, 6))
+        );
+    }
+
+    #[test]
+    fn test_try_scroll_action_prefix_home_end_keys_return_expected_action_and_len() {
+        assert_eq!(
+            try_scroll_action_prefix_bytes(b"\x1b[1~"),
+            Some((ScrollAction::Home, 4))
+        );
+        assert_eq!(
+            try_scroll_action_prefix_bytes(b"\x1b[H"),
+            Some((ScrollAction::Home, 3))
+        );
+        assert_eq!(
+            try_scroll_action_prefix_bytes(b"\x1b[4~"),
+            Some((ScrollAction::End, 4))
+        );
+        assert_eq!(
+            try_scroll_action_prefix_bytes(b"\x1b[F"),
+            Some((ScrollAction::End, 3))
+        );
+    }
+
+    #[test]
+    fn test_try_scroll_action_prefix_non_scroll_input_returns_none() {
+        assert_eq!(try_scroll_action_prefix_bytes(b"abc"), None);
+        assert_eq!(try_scroll_action_prefix_bytes(b"\x1b[9~"), None);
+        assert_eq!(try_scroll_action_prefix_bytes(b"\x1b["), None);
     }
 }

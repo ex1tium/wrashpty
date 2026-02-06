@@ -31,6 +31,7 @@
 //! processed sequentially to handle transitions correctly.
 
 use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -88,6 +89,39 @@ const INJECTION_TIMEOUT: Duration = Duration::from_millis(500);
 /// This allows the loop to wake periodically to check `injection_start` and
 /// trigger the 500ms timeout path even when no PTY data arrives.
 const INJECTION_POLL_TIMEOUT: Duration = Duration::from_millis(50);
+
+/// Creates a secure raw-capture file when `WRASHPTY_CAPTURE_RAW` is enabled.
+fn create_raw_capture_file() -> Result<(std::fs::File, PathBuf)> {
+    let temp_dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+
+    for attempt in 0..16 {
+        let path = temp_dir.join(format!("wrashpty-raw-{pid}-{seed}-{attempt}.bin"));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(file) => return Ok((file, path)),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!("Failed to create raw capture file at {}", path.display())
+                });
+            }
+        }
+    }
+
+    anyhow::bail!(
+        "Failed to create unique raw capture file in {}",
+        temp_dir.display()
+    );
+}
 
 /// RAII guard for cursor visibility.
 ///
@@ -292,6 +326,17 @@ impl App {
         };
         let capture_state = crate::scrollback::CaptureState::new(cols);
         let alt_screen_detector = crate::scrollback::AltScreenDetector::new();
+        let raw_capture_fd = if std::env::var_os("WRASHPTY_CAPTURE_RAW").is_some() {
+            let (raw_capture_fd, raw_capture_path) =
+                create_raw_capture_file().context("Failed to enable raw capture file creation")?;
+            info!(
+                raw_capture_path = %raw_capture_path.display(),
+                "Raw capture enabled"
+            );
+            Some(raw_capture_fd)
+        } else {
+            None
+        };
 
         Ok(Self {
             mode: Mode::Initializing,
@@ -325,15 +370,7 @@ impl App {
             alt_screen_detector,
             scroll_state: crate::types::ScrollState::Live,
             viewer_state: crate::scrollback::ViewerState::new(),
-            raw_capture_fd: if std::env::var("WRASHPTY_CAPTURE_RAW").is_ok() {
-                std::fs::File::create("/tmp/wrashpty-raw.bin")
-                    .ok()
-                    .inspect(|_| {
-                        info!("Raw capture enabled: /tmp/wrashpty-raw.bin");
-                    })
-            } else {
-                None
-            },
+            raw_capture_fd,
         })
     }
 
@@ -503,9 +540,8 @@ impl App {
                     if !stdin_bytes.is_empty() {
                         debug!(
                             stdin_len = stdin_bytes.len(),
-                            stdin_hex = %format!("{:02x?}", &stdin_bytes),
                             buffer_lines = self.scrollback_buffer.len(),
-                            can_scroll = self.can_scroll(),
+                            is_scroll_allowed = self.is_scroll_allowed(),
                             "Processing stdin for scroll (MarkerDetected)"
                         );
                         let to_forward = self.process_stdin_for_scroll(&stdin_bytes);
@@ -579,9 +615,8 @@ impl App {
                     if !stdin_bytes.is_empty() {
                         debug!(
                             stdin_len = stdin_bytes.len(),
-                            stdin_hex = %format!("{:02x?}", &stdin_bytes),
                             buffer_lines = self.scrollback_buffer.len(),
-                            can_scroll = self.can_scroll(),
+                            is_scroll_allowed = self.is_scroll_allowed(),
                             "Processing stdin for scroll (Continue)"
                         );
                         let to_forward = self.process_stdin_for_scroll(&stdin_bytes);
@@ -974,7 +1009,7 @@ impl App {
                     }
                     "scroll_up" | "scroll_down" | "scroll_line_up" | "scroll_line_down" => {
                         // Enter scroll view at the bottom (offset 0) - user can scroll from there
-                        if self.can_scroll() {
+                        if self.is_scroll_allowed() {
                             self.scroll_state = crate::types::ScrollState::scrolled_at(0);
                             self.run_scroll_view()?;
                         }

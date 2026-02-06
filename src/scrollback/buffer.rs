@@ -1,7 +1,5 @@
-//! Ring buffer for scrollback line storage.
-//!
-//! Stores captured terminal output lines in a fixed-capacity ring buffer.
-//! When full, oldest lines are dropped to make room for new ones.
+//! Fixed-capacity ring buffer for captured terminal output lines.
+//! Oldest lines are dropped automatically when capacity is reached.
 
 use std::collections::VecDeque;
 use std::time::Instant;
@@ -210,8 +208,14 @@ impl ScrollbackBuffer {
 
     /// Returns the current terminal width.
     #[inline]
-    pub fn terminal_width(&self) -> u16 {
+    pub fn current_terminal_width(&self) -> u16 {
         self.terminal_width
+    }
+
+    /// Backward-compatible alias for [`Self::current_terminal_width`].
+    #[inline]
+    pub fn terminal_width(&self) -> u16 {
+        self.current_terminal_width()
     }
 
     /// Returns the number of stored lines.
@@ -499,6 +503,7 @@ mod tests {
     fn test_terminal_width_clamping() {
         let mut buffer = ScrollbackBuffer::new();
         buffer.set_terminal_width(40);
+        assert_eq!(buffer.current_terminal_width(), 40);
         assert_eq!(buffer.terminal_width(), 40);
     }
 }

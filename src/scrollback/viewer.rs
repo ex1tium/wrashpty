@@ -1,7 +1,5 @@
-//! Scrollback viewer rendering.
-//!
-//! Stateless rendering functions for displaying scrollback buffer content.
-//! The scroll offset is owned by App, keeping this module simple.
+//! Stateless scrollback rendering utilities for display output.
+//! Scroll offset ownership stays in `App`; this module only renders views.
 
 use std::io::{self, Write};
 
@@ -61,6 +59,15 @@ fn ansi_aware_truncate(content: &[u8], max_display_cols: usize) -> usize {
         // Decode UTF-8 character and measure display width
         let expected_len = utf8_sequence_len(b);
         if expected_len == 1 {
+            if (b & 0b1100_0000) == 0b1000_0000 {
+                if width + 1 > max_display_cols {
+                    return i;
+                }
+                width += 1;
+                i += 1;
+                continue;
+            }
+
             let c = b as char;
             let ch_w = UnicodeWidthChar::width(c).unwrap_or(0);
             if width + ch_w > max_display_cols {
@@ -450,6 +457,69 @@ impl ScrollViewer {
         Ok(())
     }
 
+    fn count_command_separators_in_range(
+        boundary_lines: &[usize],
+        start_idx: usize,
+        line_count: usize,
+    ) -> usize {
+        if boundary_lines.is_empty() || line_count == 0 {
+            return 0;
+        }
+
+        let end_idx = start_idx.saturating_add(line_count);
+        let start_pos = boundary_lines.partition_point(|&idx| idx < start_idx);
+        let end_pos = boundary_lines.partition_point(|&idx| idx < end_idx);
+
+        boundary_lines[start_pos..end_pos]
+            .iter()
+            .filter(|&&idx| idx > 0)
+            .count()
+    }
+
+    fn adjusted_visible_line_count_for_separators(
+        total: usize,
+        offset: usize,
+        requested_rows: usize,
+        show_begin: bool,
+        boundary_lines: &[usize],
+    ) -> usize {
+        if requested_rows == 0 || total == 0 {
+            return 0;
+        }
+
+        let visible_limit = if show_begin {
+            total
+        } else {
+            total.saturating_sub(offset)
+        };
+        let mut line_count = requested_rows.min(visible_limit);
+
+        for _ in 0..=requested_rows {
+            let first_visible_line = if show_begin {
+                1
+            } else {
+                total
+                    .saturating_sub(offset)
+                    .saturating_sub(line_count)
+                    .saturating_add(1)
+                    .max(1)
+            };
+            let start_idx = first_visible_line.saturating_sub(1);
+            let separator_rows =
+                Self::count_command_separators_in_range(boundary_lines, start_idx, line_count);
+            let next_line_count = requested_rows
+                .saturating_sub(separator_rows)
+                .min(visible_limit);
+
+            if next_line_count == line_count {
+                break;
+            }
+            line_count = next_line_count;
+        }
+
+        line_count
+    }
+
     /// Renders scrollback content preserving the topbar (starts at row 2).
     ///
     /// This is a convenience method for the common case of rendering scrollback
@@ -507,6 +577,13 @@ impl ScrollViewer {
         let available_rows = content_rows
             .saturating_sub(end_cost)
             .saturating_sub(begin_cost);
+        let available_rows = Self::adjusted_visible_line_count_for_separators(
+            total,
+            offset,
+            available_rows,
+            show_begin,
+            boundary_lines,
+        );
 
         // Get lines to display
         let (first_visible_line, lines): (usize, Vec<_>) = if show_begin {
@@ -551,13 +628,7 @@ impl ScrollViewer {
         // Render BEGIN marker if at top
         if show_begin {
             write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
-            Self::render_boundary_marker_styled(
-                out,
-                cols as usize,
-                gutter_width,
-                "BEGIN",
-                theme,
-            )?;
+            Self::render_boundary_marker_styled(out, cols as usize, gutter_width, "BEGIN", theme)?;
             current_row += 1;
         }
 
@@ -616,13 +687,7 @@ impl ScrollViewer {
         // Render END marker if at bottom
         if show_end && current_row < max_row {
             write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
-            Self::render_boundary_marker_styled(
-                out,
-                cols as usize,
-                gutter_width,
-                "END",
-                theme,
-            )?;
+            Self::render_boundary_marker_styled(out, cols as usize, gutter_width, "END", theme)?;
             current_row += 1;
         }
 
@@ -702,6 +767,13 @@ impl ScrollViewer {
         let available_rows = content_rows
             .saturating_sub(end_cost)
             .saturating_sub(begin_cost);
+        let available_rows = Self::adjusted_visible_line_count_for_separators(
+            total,
+            offset,
+            available_rows,
+            show_begin,
+            boundary_lines,
+        );
 
         // Get lines to display and calculate first visible line number
         let (first_visible_line, lines): (usize, Vec<_>) = if show_begin {

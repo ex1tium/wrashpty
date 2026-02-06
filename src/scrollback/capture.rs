@@ -1,10 +1,5 @@
-//! PTY output capture and line parsing.
-//!
-//! This module provides streaming line parsing for terminal output.
-//! It handles CR, LF, CRLF line endings and terminal line wrapping.
-//! Cursor-up sequences (ESC[A, ESC[F) trigger overwrite mode so
-//! programs like `apt`, `pip`, and `docker` that redraw progress
-//! lines are captured faithfully.
+//! Capture PTY output into lines with streaming parsing.
+//! Handles CR/LF/CRLF endings, wrapping, and cursor-up overwrite redraws.
 
 /// A captured line with disposition indicating whether to append or overwrite.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,7 +131,7 @@ impl CaptureState {
     ///
     /// # Returns
     ///
-    /// Iterator over completed lines (as Vec<u8>).
+    /// Iterator over completed lines (as [`CapturedLine`]).
     pub fn feed<'a>(&'a mut self, data: &'a [u8]) -> impl Iterator<Item = CapturedLine> + 'a {
         CaptureIterator {
             state: self,
