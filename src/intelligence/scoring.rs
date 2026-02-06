@@ -179,6 +179,7 @@ pub fn rank_suggestions(suggestions: Vec<Suggestion>) -> Vec<Suggestion> {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.text.cmp(&b.text))
     });
 
     ranked
