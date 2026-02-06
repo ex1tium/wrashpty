@@ -143,7 +143,7 @@ pub fn suggest_next(conn: &Connection, last_command: &str) -> Vec<Suggestion> {
          JOIN ci_commands c ON c.command_hash = tr.to_command_hash
          WHERE tr.from_command_hash = ?1
          ORDER BY tr.frequency DESC
-         LIMIT 10"
+         LIMIT 10",
     ) {
         Ok(stmt) => stmt,
         Err(_) => return Vec::new(),
@@ -225,7 +225,7 @@ pub fn get_session_commands(
          JOIN ci_commands c ON c.id = sc.command_id
          WHERE sc.session_id = ?1
          ORDER BY sc.sequence_number DESC
-         LIMIT ?2"
+         LIMIT ?2",
     )?;
 
     let rows = stmt.query_map(rusqlite::params![db_id, limit], |row| row.get(0))?;
@@ -269,7 +269,10 @@ pub fn add_session_command(
         .ok();
 
     let Some(session_db_id) = db_session_id else {
-        return Err(CIError::NotFound(format!("Session not found: {}", session_id)));
+        return Err(CIError::NotFound(format!(
+            "Session not found: {}",
+            session_id
+        )));
     };
 
     // Get command ID
@@ -425,7 +428,9 @@ mod tests {
 
         // Verify session_commands entry
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM ci_session_commands", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM ci_session_commands", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(count, 1);
 

@@ -16,7 +16,9 @@ use ratatui_widgets::list::{List, ListItem};
 use ratatui_widgets::paragraph::{Paragraph, Wrap};
 use tracing::debug;
 
-use super::command_edit::{CommandEditState, CommandToken, TokenType, superscript_number, token_type_style};
+use super::command_edit::{
+    CommandEditState, CommandToken, TokenType, superscript_number, token_type_style,
+};
 use super::command_knowledge::COMMAND_KNOWLEDGE;
 use super::panel::{Panel, PanelResult};
 use super::theme::Theme;
@@ -39,7 +41,6 @@ pub struct DirEntry {
     /// Unix permissions mode (e.g., 0o755).
     pub mode: u32,
 }
-
 
 /// File browser panel.
 pub struct FileBrowserPanel {
@@ -243,12 +244,16 @@ impl FileBrowserPanel {
     /// After pipe: suggests pipeable commands.
     /// Other positions: uses intelligent suggestions from history.
     fn update_suggestions_with_file_context(&mut self) {
-        let Some(edit_state) = &mut self.edit_mode else { return };
+        let Some(edit_state) = &mut self.edit_mode else {
+            return;
+        };
         let filename = self.edit_filename.clone().unwrap_or_default();
 
         // Check if we're editing after a pipe
         let editing_after_pipe = if edit_state.selected > 0 {
-            edit_state.tokens.get(edit_state.selected.saturating_sub(1))
+            edit_state
+                .tokens
+                .get(edit_state.selected.saturating_sub(1))
                 .map(|t| t.text == "|")
                 .unwrap_or(false)
         } else {
@@ -267,8 +272,13 @@ impl FileBrowserPanel {
         }
 
         // Check if we're at the command position (first non-locked token)
-        let is_command_position = edit_state.selected == 0 ||
-            (edit_state.selected > 0 && edit_state.tokens.iter().take(edit_state.selected).all(|t| t.locked));
+        let is_command_position = edit_state.selected == 0
+            || (edit_state.selected > 0
+                && edit_state
+                    .tokens
+                    .iter()
+                    .take(edit_state.selected)
+                    .all(|t| t.locked));
 
         if is_command_position {
             // Command position: suggest file-type appropriate commands
@@ -296,7 +306,32 @@ impl FileBrowserPanel {
 pub fn shell_quote(s: &str) -> String {
     // If the string contains no special characters, return as-is
     let needs_quoting = s.chars().any(|c| {
-        matches!(c, ' ' | '\t' | '\n' | '"' | '\'' | '\\' | '$' | '`' | '!' | '*' | '?' | '[' | ']' | '{' | '}' | '(' | ')' | '<' | '>' | '|' | '&' | ';' | '#' | '~')
+        matches!(
+            c,
+            ' ' | '\t'
+                | '\n'
+                | '"'
+                | '\''
+                | '\\'
+                | '$'
+                | '`'
+                | '!'
+                | '*'
+                | '?'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '('
+                | ')'
+                | '<'
+                | '>'
+                | '|'
+                | '&'
+                | ';'
+                | '#'
+                | '~'
+        )
     });
 
     if !needs_quoting && !s.is_empty() {
@@ -351,8 +386,9 @@ fn format_date_compact(time: Option<SystemTime>) -> String {
         format!("{}d", days)
     } else if days < 365 {
         // Format as "Mon DD" using rough month calculation
-        let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+        let months = [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ];
         // Rough approximation - get day of year and convert
         let day_of_year = (days % 365) as usize;
         let month_idx = (day_of_year / 30).min(11);
@@ -365,7 +401,12 @@ fn format_date_compact(time: Option<SystemTime>) -> String {
 
 impl FileBrowserPanel {
     /// Renders the file edit mode UI using unified token strip (same as history browser).
-    fn render_file_edit_mode(&self, buffer: &mut Buffer, area: Rect, edit_state: &CommandEditState) {
+    fn render_file_edit_mode(
+        &self,
+        buffer: &mut Buffer,
+        area: Rect,
+        edit_state: &CommandEditState,
+    ) {
         // Layout matching history browser
         let chunks = Layout::vertical([
             Constraint::Length(1), // 0: Title with filename
@@ -385,12 +426,23 @@ impl FileBrowserPanel {
         // Title with filename and suggestion count
         let filename = self.edit_filename.as_deref().unwrap_or("file");
         let mut title_spans = vec![
-            Span::styled(" Edit Command for: ", Style::default().fg(self.theme.header_fg)),
-            Span::styled(filename, Style::default().fg(self.theme.text_highlight).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " Edit Command for: ",
+                Style::default().fg(self.theme.header_fg),
+            ),
+            Span::styled(
+                filename,
+                Style::default()
+                    .fg(self.theme.text_highlight)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ];
         if !edit_state.suggestions.is_empty() {
             let sugg_count = format!(" [{} suggestions]", edit_state.suggestions.len());
-            title_spans.push(Span::styled(sugg_count, Style::default().fg(self.theme.text_secondary)));
+            title_spans.push(Span::styled(
+                sugg_count,
+                Style::default().fg(self.theme.text_secondary),
+            ));
         }
         let title = Line::from(title_spans);
         Paragraph::new(title).render(chunks[0], buffer);
@@ -410,7 +462,11 @@ impl FileBrowserPanel {
         let mut selected_x_end: usize = 3;
         for (i, token) in edit_state.tokens.iter().enumerate() {
             let display_text = if i == edit_state.selected {
-                if edit_state.edit_buffer.is_empty() { "_" } else { &edit_state.edit_buffer }
+                if edit_state.edit_buffer.is_empty() {
+                    "_"
+                } else {
+                    &edit_state.edit_buffer
+                }
             } else if token.text.is_empty() {
                 "_"
             } else {
@@ -419,10 +475,12 @@ impl FileBrowserPanel {
             // superscript (n digits) + ⟦ (1) + text + ⟧ (1) + spacing (3)
             let slot_num = i + 1;
             let superscript_len = slot_num.to_string().len();
-            let token_width = superscript_len + 1 + display_text.chars().count() + 1 + 3;
+            let text_display_width = crate::ui::text_width::display_width(display_text);
+            let token_width = superscript_len + 1 + text_display_width + 1 + 3;
 
             if i == edit_state.selected {
-                selected_x_end = selected_x_start + superscript_len + 1 + display_text.chars().count() + 1;
+                selected_x_end =
+                    selected_x_start + superscript_len + 1 + text_display_width + 1;
                 break;
             }
             selected_x_start += token_width;
@@ -466,14 +524,20 @@ impl FileBrowserPanel {
 
             // Superscript number
             let num_style = if is_selected {
-                Style::default().fg(self.theme.text_highlight).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(self.theme.text_highlight)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(self.theme.text_secondary)
             };
             spans.push(Span::styled(superscript_number(slot_num), num_style));
 
             // Opening bracket
-            let bstyle = if is_selected { bracket_selected_style } else { bracket_style };
+            let bstyle = if is_selected {
+                bracket_selected_style
+            } else {
+                bracket_style
+            };
             spans.push(Span::styled("⟦", bstyle));
 
             // Token text with type-aware styling
@@ -524,29 +588,50 @@ impl FileBrowserPanel {
         // Edit input line with type hint and cycling indicator
         let type_hint = edit_state.type_hint();
         let cycling_indicator = if edit_state.suggestion_index.is_some() {
-            format!(" [{}/{}]",
+            format!(
+                " [{}/{}]",
                 edit_state.suggestion_index.unwrap_or(0) + 1,
-                edit_state.suggestions.len())
+                edit_state.suggestions.len()
+            )
         } else {
             String::new()
         };
-        let edit_label = format!("   {} {} > ", superscript_number(edit_state.selected + 1), type_hint);
+        let edit_label = format!(
+            "   {} {} > ",
+            superscript_number(edit_state.selected + 1),
+            type_hint
+        );
         let edit_line = Line::from(vec![
             Span::styled(edit_label, Style::default().fg(self.theme.git_fg)),
-            Span::styled(&edit_state.edit_buffer, Style::default().fg(self.theme.text_primary).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                &edit_state.edit_buffer,
+                Style::default()
+                    .fg(self.theme.text_primary)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("█", Style::default().fg(self.theme.header_fg)),
-            Span::styled(cycling_indicator, Style::default().fg(self.theme.text_secondary)),
+            Span::styled(
+                cycling_indicator,
+                Style::default().fg(self.theme.text_secondary),
+            ),
         ]);
         Paragraph::new(edit_line).render(chunks[6], buffer);
 
         // Build and show result preview
-        let result_preview: String = edit_state.tokens.iter().enumerate().map(|(i, t)| {
-            if i == edit_state.selected {
-                edit_state.edit_buffer.clone()
-            } else {
-                t.text.clone()
-            }
-        }).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ");
+        let result_preview: String = edit_state
+            .tokens
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                if i == edit_state.selected {
+                    edit_state.edit_buffer.clone()
+                } else {
+                    t.text.clone()
+                }
+            })
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
 
         let preview_changed = result_preview != edit_state.original;
         let preview_style = if preview_changed {
@@ -638,7 +723,9 @@ impl FileBrowserPanel {
                 // 1. If current token edit differs from saved token → revert token
                 // 2. If command differs from original → revert entire command
                 // 3. Exit edit mode
-                let token_text = edit_state.tokens.get(edit_state.selected)
+                let token_text = edit_state
+                    .tokens
+                    .get(edit_state.selected)
                     .map(|t| t.text.as_str())
                     .unwrap_or("");
 
@@ -709,10 +796,14 @@ impl FileBrowserPanel {
                 }
                 // Add the pipe as its own token
                 let pipe_pos = edit_state.selected + 1;
-                edit_state.tokens.insert(pipe_pos, CommandToken::new("|", TokenType::Argument));
+                edit_state
+                    .tokens
+                    .insert(pipe_pos, CommandToken::new("|", TokenType::Argument));
                 // Point to new empty token after pipe
                 let empty_pos = pipe_pos + 1;
-                edit_state.tokens.insert(empty_pos, CommandToken::new("", TokenType::Argument));
+                edit_state
+                    .tokens
+                    .insert(empty_pos, CommandToken::new("", TokenType::Argument));
                 edit_state.selected = empty_pos;
                 edit_state.edit_buffer.clear();
                 edit_state.suggestion_index = None;
@@ -767,11 +858,22 @@ impl Panel for FileBrowserPanel {
 
         // Render path header
         let path_str = self.current_dir.to_string_lossy();
-        let truncated_path = if path_str.len() > area.width as usize - 4 {
-            format!(
-                "...{}",
-                &path_str[path_str.len() - (area.width as usize - 7)..]
-            )
+        let max_path_width = (area.width as usize).saturating_sub(4);
+        let truncated_path = if crate::ui::text_width::display_width(&path_str) > max_path_width {
+            // Truncate from the left (show the end of the path)
+            let target_width = max_path_width.saturating_sub(3); // room for "..."
+            // Walk backwards through chars to find how much of the tail fits
+            let mut width = 0;
+            let mut start_idx = path_str.len();
+            for (idx, ch) in path_str.char_indices().rev() {
+                let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                if width + ch_w > target_width {
+                    break;
+                }
+                width += ch_w;
+                start_idx = idx;
+            }
+            format!("...{}", &path_str[start_idx..])
         } else {
             path_str.to_string()
         };
@@ -806,7 +908,8 @@ impl Panel for FileBrowserPanel {
                 let actual_idx = self.scroll_offset + display_idx;
                 let is_selected = actual_idx == self.selection;
 
-                let icon = if entry.is_dir { "" } else { "" };
+                // Use Unicode file/folder icons.
+                let icon = if entry.is_dir { "📁" } else { "📄" };
                 let icon_color = if entry.is_dir {
                     self.theme.dir_color
                 } else {
@@ -832,30 +935,36 @@ impl Panel for FileBrowserPanel {
                     format!("{:>5}", format_size(entry.size))
                 };
 
-                // Calculate available width for name (total - metadata columns)
-                // Format: icon(2) + name + perms(4) + date(6) + size(6) + spacing(6)
-                let metadata_width = 22_usize;
+                // Calculate available width for name (total - metadata columns).
+                // icon_display_width + spacing(1) + perms(4) + date(6) + size(6) + spacing(6)
+                let icon_width = crate::ui::text_width::display_width(icon) + 1;
+                let metadata_width = icon_width + 20;
                 let available_for_name = (area.width as usize).saturating_sub(metadata_width);
-                // Use char-aware truncation to avoid panic on UTF-8 multibyte boundaries
-                let name_chars: usize = entry.name.chars().count();
-                let display_name = if name_chars > available_for_name && available_for_name > 0 {
-                    let truncated: String = entry.name
-                        .chars()
-                        .take(available_for_name.saturating_sub(1))
-                        .collect();
-                    format!("{}…", truncated)
+                // Use display-width-aware truncation for correct column alignment
+                let name_display_width = crate::ui::text_width::display_width(&entry.name);
+                let display_name = if name_display_width > available_for_name
+                    && available_for_name > 0
+                {
+                    crate::ui::text_width::truncate_with_ellipsis(&entry.name, available_for_name)
+                        .into_owned()
                 } else {
                     entry.name.clone()
                 };
-                let display_name_chars = display_name.chars().count();
-                let name_padding = available_for_name.saturating_sub(display_name_chars);
+                let display_name_width = crate::ui::text_width::display_width(&display_name);
+                let name_padding = available_for_name.saturating_sub(display_name_width);
 
                 let line = Line::from(vec![
                     Span::styled(format!("{} ", icon), Style::default().fg(icon_color)),
                     Span::styled(display_name, name_style),
                     Span::styled(" ".repeat(name_padding), Style::default()),
-                    Span::styled(format!(" {} ", perms_str), Style::default().fg(self.theme.permissions_color)),
-                    Span::styled(format!("{:>5} ", date_str), Style::default().fg(self.theme.file_date_color)),
+                    Span::styled(
+                        format!(" {} ", perms_str),
+                        Style::default().fg(self.theme.permissions_color),
+                    ),
+                    Span::styled(
+                        format!("{:>5} ", date_str),
+                        Style::default().fg(self.theme.file_date_color),
+                    ),
                     Span::styled(size_str, Style::default().fg(self.theme.file_size_color)),
                 ]);
 
@@ -882,13 +991,22 @@ impl Panel for FileBrowserPanel {
         // Render keybind bar
         let key_style = Style::default().fg(self.theme.text_highlight);
         let label_style = Style::default().fg(self.theme.text_secondary);
-        let active_label = Style::default().fg(self.theme.semantic_success).add_modifier(Modifier::BOLD);
+        let active_label = Style::default()
+            .fg(self.theme.semantic_success)
+            .add_modifier(Modifier::BOLD);
         let hints = Line::from(vec![
             Span::styled("^E", key_style),
             Span::styled(" Edit", label_style),
             Span::raw("  "),
             Span::styled(".", key_style),
-            Span::styled(" Hidden", if self.show_hidden { active_label } else { label_style }),
+            Span::styled(
+                " Hidden",
+                if self.show_hidden {
+                    active_label
+                } else {
+                    label_style
+                },
+            ),
             Span::raw("  "),
             Span::styled("⌫", key_style),
             Span::styled(" Parent", label_style),
@@ -972,8 +1090,8 @@ impl Panel for FileBrowserPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::theme::AMBER_THEME;
+    use super::*;
 
     #[test]
     fn test_file_browser_new() {
@@ -1010,7 +1128,10 @@ mod tests {
     #[test]
     fn test_shell_quote_with_spaces() {
         assert_eq!(shell_quote("file name.txt"), "'file name.txt'");
-        assert_eq!(shell_quote("path with spaces/file"), "'path with spaces/file'");
+        assert_eq!(
+            shell_quote("path with spaces/file"),
+            "'path with spaces/file'"
+        );
     }
 
     #[test]

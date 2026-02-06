@@ -50,7 +50,6 @@ pub fn learn_sequences(
     Ok(())
 }
 
-
 /// Queries learned sequences for suggestions.
 ///
 /// Returns tuples of (next_token, frequency, success_count, last_seen).
@@ -76,11 +75,9 @@ pub fn query_sequences(
 
     // Get base command ID if provided
     let base_id: Option<i64> = base_command.and_then(|cmd| {
-        conn.query_row(
-            "SELECT id FROM ci_tokens WHERE text = ?1",
-            [cmd],
-            |row| row.get(0),
-        )
+        conn.query_row("SELECT id FROM ci_tokens WHERE text = ?1", [cmd], |row| {
+            row.get(0)
+        })
         .ok()
     });
 
@@ -94,7 +91,7 @@ pub fn query_sequences(
                AND s.context_position = ?2
                AND s.base_command_id = ?3
              ORDER BY s.frequency DESC
-             LIMIT ?4"
+             LIMIT ?4",
         )?
     } else {
         conn.prepare(
@@ -104,7 +101,7 @@ pub fn query_sequences(
              WHERE s.context_token_id = ?1
                AND s.context_position = ?2
              ORDER BY s.frequency DESC
-             LIMIT ?3"
+             LIMIT ?3",
         )?
     };
 
@@ -112,16 +109,27 @@ pub fn query_sequences(
     if let Some(base_id) = base_id {
         let rows = stmt.query_map(
             rusqlite::params![context_id, position, base_id, limit],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?, row.get::<_, u32>(2)?, row.get::<_, i64>(3)?)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, u32>(1)?,
+                    row.get::<_, u32>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
         )?;
         for row in rows.flatten() {
             results.push(row);
         }
     } else {
-        let rows = stmt.query_map(
-            rusqlite::params![context_id, position, limit],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?, row.get::<_, u32>(2)?, row.get::<_, i64>(3)?)),
-        )?;
+        let rows = stmt.query_map(rusqlite::params![context_id, position, limit], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u32>(1)?,
+                row.get::<_, u32>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
         for row in rows.flatten() {
             results.push(row);
         }
@@ -148,7 +156,7 @@ pub fn query_base_commands(
          WHERE c.base_command_id IS NOT NULL
          GROUP BY c.base_command_id
          ORDER BY frequency DESC
-         LIMIT ?1"
+         LIMIT ?1",
     )?;
 
     let rows = stmt.query_map(rusqlite::params![limit], |row| {
@@ -203,11 +211,9 @@ mod tests {
 
         learn_sequences(&conn, &tokens, &token_ids, Some(1), true, now).unwrap();
 
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM ci_sequences",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM ci_sequences", [], |row| row.get(0))
+            .unwrap();
         assert_eq!(count, 1);
     }
 

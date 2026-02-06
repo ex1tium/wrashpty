@@ -86,6 +86,32 @@ pub struct Theme {
     pub tab_inactive_bg: Color,
     /// Inactive tab foreground.
     pub tab_inactive_fg: Color,
+
+    // === Scroll Viewer Colors ===
+    /// Search match background (current match).
+    pub search_current_bg: Color,
+    /// Search match foreground (current match).
+    pub search_current_fg: Color,
+    /// Search match background (other matches).
+    pub search_other_bg: Color,
+    /// Search match foreground (other matches).
+    pub search_other_fg: Color,
+    /// URL foreground color.
+    pub url_fg: Color,
+    /// Selection background in yank mode.
+    pub yank_selection_bg: Color,
+    /// Selection foreground in yank mode.
+    pub yank_selection_fg: Color,
+    /// Timestamp gutter foreground.
+    pub timestamp_fg: Color,
+    /// Boundary marker foreground (BEGIN/END).
+    pub marker_fg: Color,
+    /// Help bar background.
+    pub help_bar_bg: Color,
+    /// Help bar foreground.
+    pub help_bar_fg: Color,
+    /// Help bar key highlight.
+    pub help_bar_key: Color,
 }
 
 impl Theme {
@@ -104,17 +130,17 @@ impl Theme {
 /// Warm orange/amber tones on pure black background.
 pub static AMBER_THEME: Theme = Theme {
     // Context Bar
-    bar_bg: Color::Rgb(0, 0, 0),             // Pure black
-    segment_bg: Color::Rgb(51, 34, 0),       // #332200 - dark amber
-    success_fg: Color::Rgb(255, 176, 0),     // #ffb000 - classic amber
-    failure_fg: Color::Rgb(255, 102, 0),     // #ff6600 - orange-red
-    cwd_fg: Color::Rgb(255, 215, 0),         // #ffd700 - bright amber
-    git_fg: Color::Rgb(204, 136, 0),         // #cc8800 - medium amber
-    git_dirty_fg: Color::Rgb(255, 140, 0),   // #ff8c00 - dark orange
-    duration_fg: Color::Rgb(255, 176, 0),    // #ffb000 - amber
+    bar_bg: Color::Rgb(0, 0, 0),               // Pure black
+    segment_bg: Color::Rgb(51, 34, 0),         // #332200 - dark amber
+    success_fg: Color::Rgb(255, 176, 0),       // #ffb000 - classic amber
+    failure_fg: Color::Rgb(255, 102, 0),       // #ff6600 - orange-red
+    cwd_fg: Color::Rgb(255, 215, 0),           // #ffd700 - bright amber
+    git_fg: Color::Rgb(204, 136, 0),           // #cc8800 - medium amber
+    git_dirty_fg: Color::Rgb(255, 140, 0),     // #ff8c00 - dark orange
+    duration_fg: Color::Rgb(255, 176, 0),      // #ffb000 - amber
     duration_slow_fg: Color::Rgb(255, 102, 0), // #ff6600 - orange warning
-    clock_fg: Color::Rgb(153, 102, 0),       // #996600 - dim amber
-    separator_fg: Color::Rgb(255, 176, 0),   // #ffb000 - amber
+    clock_fg: Color::Rgb(153, 102, 0),         // #996600 - dim amber
+    separator_fg: Color::Rgb(255, 176, 0),     // #ffb000 - amber
 
     // Panels
     panel_bg: Color::Rgb(0, 0, 0),           // Pure black
@@ -127,23 +153,37 @@ pub static AMBER_THEME: Theme = Theme {
     selection_fg: Color::Rgb(255, 215, 0),   // #ffd700 - bright amber
 
     // Semantic (slightly distinct for safety/visibility)
-    semantic_success: Color::Rgb(0, 170, 0),   // #00aa00 - green
-    semantic_error: Color::Rgb(255, 68, 0),    // #ff4400 - red-orange
+    semantic_success: Color::Rgb(0, 170, 0), // #00aa00 - green
+    semantic_error: Color::Rgb(255, 68, 0),  // #ff4400 - red-orange
     semantic_warning: Color::Rgb(255, 136, 0), // #ff8800 - orange
-    semantic_info: Color::Rgb(255, 176, 0),    // #ffb000 - amber
+    semantic_info: Color::Rgb(255, 176, 0),  // #ffb000 - amber
 
     // File Browser
-    dir_color: Color::Rgb(255, 215, 0),      // #ffd700 - bright amber
-    file_color: Color::Rgb(204, 153, 0),     // #cc9900 - medium amber
+    dir_color: Color::Rgb(255, 215, 0),  // #ffd700 - bright amber
+    file_color: Color::Rgb(204, 153, 0), // #cc9900 - medium amber
     permissions_color: Color::Rgb(204, 136, 0), // #cc8800 - medium amber
     file_size_color: Color::Rgb(153, 102, 0), // #996600 - dim amber
     file_date_color: Color::Rgb(204, 136, 0), // #cc8800 - medium amber
 
     // Tabs
-    tab_active_bg: Color::Rgb(255, 176, 0),  // #ffb000 - amber
-    tab_active_fg: Color::Rgb(0, 0, 0),      // Black text on amber
-    tab_inactive_bg: Color::Rgb(51, 34, 0),  // #332200 - dark amber
+    tab_active_bg: Color::Rgb(255, 176, 0), // #ffb000 - amber
+    tab_active_fg: Color::Rgb(0, 0, 0),     // Black text on amber
+    tab_inactive_bg: Color::Rgb(51, 34, 0), // #332200 - dark amber
     tab_inactive_fg: Color::Rgb(153, 102, 0), // #996600 - dim amber
+
+    // Scroll Viewer
+    search_current_bg: Color::Rgb(255, 215, 0), // #ffd700 - bright amber highlight
+    search_current_fg: Color::Rgb(0, 0, 0),     // Black text on highlight
+    search_other_bg: Color::Rgb(102, 68, 0),    // #664400 - dim amber
+    search_other_fg: Color::Rgb(255, 215, 0),   // #ffd700 - bright amber
+    url_fg: Color::Rgb(100, 180, 255),          // Light blue (stands out on amber)
+    yank_selection_bg: Color::Rgb(51, 34, 0),   // #332200 - dark amber
+    yank_selection_fg: Color::Rgb(255, 215, 0), // #ffd700 - bright amber
+    timestamp_fg: Color::Rgb(153, 102, 0),      // #996600 - dim amber
+    marker_fg: Color::Rgb(204, 136, 0),         // #cc8800 - medium amber
+    help_bar_bg: Color::Rgb(51, 34, 0),         // #332200 - dark amber
+    help_bar_fg: Color::Rgb(204, 153, 0),       // #cc9900 - medium amber
+    help_bar_key: Color::Rgb(255, 215, 0),      // #ffd700 - bright amber
 };
 
 /// Terminal-native theme.
@@ -153,46 +193,60 @@ pub static AMBER_THEME: Theme = Theme {
 /// via its color scheme settings.
 pub static TERMINAL_THEME: Theme = Theme {
     // Context Bar
-    bar_bg: Color::Reset,               // Terminal default
-    segment_bg: Color::DarkGray,        // ANSI color 8
-    success_fg: Color::Green,           // ANSI color 2
-    failure_fg: Color::Red,             // ANSI color 1
-    cwd_fg: Color::Cyan,                // ANSI color 6
-    git_fg: Color::Magenta,             // ANSI color 5
-    git_dirty_fg: Color::LightMagenta,  // ANSI color 13
-    duration_fg: Color::White,          // ANSI color 7
-    duration_slow_fg: Color::Yellow,    // ANSI color 3
-    clock_fg: Color::DarkGray,          // ANSI color 8
-    separator_fg: Color::DarkGray,      // ANSI color 8
+    bar_bg: Color::Reset,              // Terminal default
+    segment_bg: Color::DarkGray,       // ANSI color 8
+    success_fg: Color::Green,          // ANSI color 2
+    failure_fg: Color::Red,            // ANSI color 1
+    cwd_fg: Color::Cyan,               // ANSI color 6
+    git_fg: Color::Magenta,            // ANSI color 5
+    git_dirty_fg: Color::LightMagenta, // ANSI color 13
+    duration_fg: Color::White,         // ANSI color 7
+    duration_slow_fg: Color::Yellow,   // ANSI color 3
+    clock_fg: Color::DarkGray,         // ANSI color 8
+    separator_fg: Color::DarkGray,     // ANSI color 8
 
     // Panels
-    panel_bg: Color::Reset,             // Terminal default
-    panel_border: Color::DarkGray,      // ANSI color 8
-    header_fg: Color::Cyan,             // ANSI color 6
-    text_primary: Color::White,         // ANSI color 7
-    text_secondary: Color::DarkGray,    // ANSI color 8
-    text_highlight: Color::LightCyan,   // ANSI color 14
-    selection_bg: Color::DarkGray,      // ANSI color 8
-    selection_fg: Color::White,         // ANSI color 7
+    panel_bg: Color::Reset,           // Terminal default
+    panel_border: Color::DarkGray,    // ANSI color 8
+    header_fg: Color::Cyan,           // ANSI color 6
+    text_primary: Color::White,       // ANSI color 7
+    text_secondary: Color::DarkGray,  // ANSI color 8
+    text_highlight: Color::LightCyan, // ANSI color 14
+    selection_bg: Color::DarkGray,    // ANSI color 8
+    selection_fg: Color::White,       // ANSI color 7
 
     // Semantic
-    semantic_success: Color::Green,     // ANSI color 2
-    semantic_error: Color::Red,         // ANSI color 1
-    semantic_warning: Color::Yellow,    // ANSI color 3
-    semantic_info: Color::Cyan,         // ANSI color 6
+    semantic_success: Color::Green,  // ANSI color 2
+    semantic_error: Color::Red,      // ANSI color 1
+    semantic_warning: Color::Yellow, // ANSI color 3
+    semantic_info: Color::Cyan,      // ANSI color 6
 
     // File Browser
-    dir_color: Color::Blue,             // ANSI color 4
-    file_color: Color::White,           // ANSI color 7
-    permissions_color: Color::Magenta,  // ANSI color 5
-    file_size_color: Color::DarkGray,   // ANSI color 8
-    file_date_color: Color::Cyan,       // ANSI color 6
+    dir_color: Color::Blue,            // ANSI color 4
+    file_color: Color::White,          // ANSI color 7
+    permissions_color: Color::Magenta, // ANSI color 5
+    file_size_color: Color::DarkGray,  // ANSI color 8
+    file_date_color: Color::Cyan,      // ANSI color 6
 
     // Tabs
-    tab_active_bg: Color::Cyan,         // ANSI color 6
-    tab_active_fg: Color::Black,        // ANSI color 0
-    tab_inactive_bg: Color::DarkGray,   // ANSI color 8
-    tab_inactive_fg: Color::White,      // ANSI color 7
+    tab_active_bg: Color::Cyan,       // ANSI color 6
+    tab_active_fg: Color::Black,      // ANSI color 0
+    tab_inactive_bg: Color::DarkGray, // ANSI color 8
+    tab_inactive_fg: Color::White,    // ANSI color 7
+
+    // Scroll Viewer
+    search_current_bg: Color::Yellow,   // ANSI color 3
+    search_current_fg: Color::Black,    // ANSI color 0
+    search_other_bg: Color::DarkGray,   // ANSI color 8
+    search_other_fg: Color::Yellow,     // ANSI color 3
+    url_fg: Color::LightBlue,           // ANSI color 12
+    yank_selection_bg: Color::DarkGray, // ANSI color 8
+    yank_selection_fg: Color::White,    // ANSI color 7
+    timestamp_fg: Color::DarkGray,      // ANSI color 8
+    marker_fg: Color::Cyan,             // ANSI color 6
+    help_bar_bg: Color::DarkGray,       // ANSI color 8
+    help_bar_fg: Color::White,          // ANSI color 7
+    help_bar_key: Color::LightCyan,     // ANSI color 14
 };
 
 #[cfg(test)]

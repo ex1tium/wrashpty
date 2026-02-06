@@ -54,7 +54,10 @@ pub fn export(conn: &Connection, options: ExportOptions) -> Result<String, CIErr
 }
 
 /// Exports learned sequences.
-fn export_sequences(conn: &Connection, min_frequency: u32) -> Result<Vec<ExportedSequence>, CIError> {
+fn export_sequences(
+    conn: &Connection,
+    min_frequency: u32,
+) -> Result<Vec<ExportedSequence>, CIError> {
     let mut stmt = conn.prepare(
         "SELECT ct.text, s.context_position, bt.text, nt.text, s.frequency, s.success_count
          FROM ci_sequences s
@@ -63,7 +66,7 @@ fn export_sequences(conn: &Connection, min_frequency: u32) -> Result<Vec<Exporte
          LEFT JOIN ci_tokens bt ON bt.id = s.base_command_id
          WHERE s.frequency >= ?1
          ORDER BY s.frequency DESC
-         LIMIT 10000"
+         LIMIT 10000",
     )?;
 
     let rows = stmt.query_map([min_frequency], |row| {
@@ -86,7 +89,10 @@ fn export_sequences(conn: &Connection, min_frequency: u32) -> Result<Vec<Exporte
 }
 
 /// Exports pipe chains.
-fn export_pipe_chains(conn: &Connection, min_frequency: u32) -> Result<Vec<ExportedPipeChain>, CIError> {
+fn export_pipe_chains(
+    conn: &Connection,
+    min_frequency: u32,
+) -> Result<Vec<ExportedPipeChain>, CIError> {
     let mut stmt = conn.prepare(
         "SELECT bt.text, pt.text, p.full_chain, p.frequency
          FROM ci_pipe_chains p
@@ -94,7 +100,7 @@ fn export_pipe_chains(conn: &Connection, min_frequency: u32) -> Result<Vec<Expor
          LEFT JOIN ci_tokens bt ON bt.id = p.pre_pipe_base_cmd_id
          WHERE p.frequency >= ?1
          ORDER BY p.frequency DESC
-         LIMIT 10000"
+         LIMIT 10000",
     )?;
 
     let rows = stmt.query_map([min_frequency], |row| {
@@ -115,7 +121,10 @@ fn export_pipe_chains(conn: &Connection, min_frequency: u32) -> Result<Vec<Expor
 }
 
 /// Exports flag values.
-fn export_flag_values(conn: &Connection, min_frequency: u32) -> Result<Vec<ExportedFlagValue>, CIError> {
+fn export_flag_values(
+    conn: &Connection,
+    min_frequency: u32,
+) -> Result<Vec<ExportedFlagValue>, CIError> {
     let mut stmt = conn.prepare(
         "SELECT bt.text, st.text, f.flag_text, f.value_text, f.value_type, f.frequency
          FROM ci_flag_values f
@@ -123,7 +132,7 @@ fn export_flag_values(conn: &Connection, min_frequency: u32) -> Result<Vec<Expor
          LEFT JOIN ci_tokens st ON st.id = f.subcommand_id
          WHERE f.frequency >= ?1
          ORDER BY f.frequency DESC
-         LIMIT 10000"
+         LIMIT 10000",
     )?;
 
     let rows = stmt.query_map([min_frequency], |row| {
@@ -146,14 +155,17 @@ fn export_flag_values(conn: &Connection, min_frequency: u32) -> Result<Vec<Expor
 }
 
 /// Exports templates.
-fn export_templates(conn: &Connection, min_frequency: u32) -> Result<Vec<ExportedTemplate>, CIError> {
+fn export_templates(
+    conn: &Connection,
+    min_frequency: u32,
+) -> Result<Vec<ExportedTemplate>, CIError> {
     let mut stmt = conn.prepare(
         "SELECT t.template, bt.text, t.placeholders, t.frequency, t.example_command
          FROM ci_templates t
          LEFT JOIN ci_tokens bt ON bt.id = t.base_command_id
          WHERE t.frequency >= ?1
          ORDER BY t.frequency DESC
-         LIMIT 1000"
+         LIMIT 1000",
     )?;
 
     let rows = stmt.query_map([min_frequency], |row| {
@@ -225,7 +237,11 @@ fn anonymize_patterns(patterns: &mut ExportedPatterns) {
 ///
 /// All imports are performed within a single transaction to ensure atomicity.
 /// If any critical error occurs, the entire import is rolled back.
-pub fn import(conn: &Connection, json: &str, options: ImportOptions) -> Result<ImportStats, CIError> {
+pub fn import(
+    conn: &Connection,
+    json: &str,
+    options: ImportOptions,
+) -> Result<ImportStats, CIError> {
     let export: PatternExport = serde_json::from_str(json)?;
 
     // Validate version
@@ -480,16 +496,22 @@ fn import_pipe_chain(
     let pipe_cmd_id = get_or_create_import_token(conn, &chain.pipe_command, "Command", now)?;
 
     // Generate hash
-    let pre_pipe_hash = super::tokenizer::compute_command_hash(
-        chain.pre_pipe_base_cmd.as_deref().unwrap_or(""),
-    );
+    let pre_pipe_hash =
+        super::tokenizer::compute_command_hash(chain.pre_pipe_base_cmd.as_deref().unwrap_or(""));
 
     // Insert
     conn.execute(
         "INSERT OR IGNORE INTO ci_pipe_chains
          (pre_pipe_base_cmd_id, pre_pipe_hash, pipe_command_id, full_chain, frequency, last_seen)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params![base_id, pre_pipe_hash, pipe_cmd_id, chain.full_chain, chain.frequency, now],
+        rusqlite::params![
+            base_id,
+            pre_pipe_hash,
+            pipe_cmd_id,
+            chain.full_chain,
+            chain.frequency,
+            now
+        ],
     )?;
 
     Ok(true)
@@ -574,7 +596,12 @@ fn import_alias(
         return Ok(false);
     }
 
-    super::user_patterns::add_alias(conn, &alias.alias, &alias.expansion, alias.description.as_deref())?;
+    super::user_patterns::add_alias(
+        conn,
+        &alias.alias,
+        &alias.expansion,
+        alias.description.as_deref(),
+    )?;
     Ok(true)
 }
 
@@ -586,11 +613,9 @@ fn get_or_create_import_token(
     timestamp: i64,
 ) -> Result<i64, CIError> {
     let existing: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM ci_tokens WHERE text = ?1",
-            [text],
-            |row| row.get(0),
-        )
+        .query_row("SELECT id FROM ci_tokens WHERE text = ?1", [text], |row| {
+            row.get(0)
+        })
         .ok();
 
     if let Some(id) = existing {
@@ -639,12 +664,14 @@ mod tests {
             "INSERT INTO ci_tokens (id, text, token_type, first_seen, last_seen)
              VALUES (1, 'git', 'Command', ?1, ?1)",
             [now],
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO ci_tokens (id, text, token_type, first_seen, last_seen)
              VALUES (2, 'commit', 'Subcommand', ?1, ?1)",
             [now],
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO ci_sequences (context_token_id, context_position, base_command_id, next_token_id, frequency, success_count, last_seen)
              VALUES (1, 0, 1, 2, 10, 8, ?1)",

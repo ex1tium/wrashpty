@@ -169,7 +169,11 @@ impl CommandIntelligence {
     /// This should be called after a command completes to update patterns.
     /// Note: patterns::learn_command already handles variant execution recording,
     /// so we don't duplicate that call here.
-    pub fn learn_command(&mut self, command: &str, exit_status: Option<i32>) -> Result<(), CIError> {
+    pub fn learn_command(
+        &mut self,
+        command: &str,
+        exit_status: Option<i32>,
+    ) -> Result<(), CIError> {
         if !self.enabled {
             return Ok(());
         }
@@ -177,18 +181,26 @@ impl CommandIntelligence {
         let now = chrono::Utc::now().timestamp();
 
         // Get session database ID if we have an active session
-        let session_db_id = self.current_session.as_ref().and_then(|session| {
-            sessions::get_session_db_id(&self.conn, &session.session_id)
-        });
+        let session_db_id = self
+            .current_session
+            .as_ref()
+            .and_then(|session| sessions::get_session_db_id(&self.conn, &session.session_id));
 
         // patterns::learn_command handles sequences, hierarchy, pipes, flags, and variant recording
         // Pass session_db_id so ci_commands.session_id is set
-        patterns::learn_command(&mut self.conn, &mut self.token_cache, command, exit_status, session_db_id)?;
+        patterns::learn_command(
+            &mut self.conn,
+            &mut self.token_cache,
+            command,
+            exit_status,
+            session_db_id,
+        )?;
 
         // Track session command if active
         if let Some(ref mut session) = self.current_session {
             // Get the timestamp of the previous command for transition time delta
-            let prev_timestamp = sessions::get_last_command_timestamp(&self.conn, &session.session_id);
+            let prev_timestamp =
+                sessions::get_last_command_timestamp(&self.conn, &session.session_id);
 
             // Record transition from previous command to this one
             if let Some(last) = session.recent_commands.last().cloned() {
@@ -260,7 +272,9 @@ impl CommandIntelligence {
             return None;
         }
 
-        templates::extract_template(&self.conn, command).ok().flatten()
+        templates::extract_template(&self.conn, command)
+            .ok()
+            .flatten()
     }
 
     /// Gets template completions for the given context.
@@ -349,7 +363,9 @@ impl CommandIntelligence {
 
     /// Gets the success rate for a command pattern.
     pub fn get_success_rate(&self, command: &str) -> Option<f64> {
-        variants::get_success_rate(&self.conn, command).ok().flatten()
+        variants::get_success_rate(&self.conn, command)
+            .ok()
+            .flatten()
     }
 
     /// Clears the token cache.
@@ -378,35 +394,27 @@ impl CommandIntelligence {
 
     /// Gets statistics about the intelligence database.
     pub fn stats(&self) -> Result<IntelligenceStats, CIError> {
-        let token_count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM ci_tokens",
-            [],
-            |row| row.get(0),
-        )?;
+        let token_count: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM ci_tokens", [], |row| row.get(0))?;
 
-        let command_count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM ci_commands",
-            [],
-            |row| row.get(0),
-        )?;
+        let command_count: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM ci_commands", [], |row| row.get(0))?;
 
-        let sequence_count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM ci_sequences",
-            [],
-            |row| row.get(0),
-        )?;
+        let sequence_count: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM ci_sequences", [], |row| row.get(0))?;
 
-        let template_count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM ci_templates",
-            [],
-            |row| row.get(0),
-        )?;
+        let template_count: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM ci_templates", [], |row| row.get(0))?;
 
-        let user_pattern_count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM ci_user_patterns",
-            [],
-            |row| row.get(0),
-        )?;
+        let user_pattern_count: i64 =
+            self.conn
+                .query_row("SELECT COUNT(*) FROM ci_user_patterns", [], |row| {
+                    row.get(0)
+                })?;
 
         Ok(IntelligenceStats {
             token_count: token_count as usize,
@@ -458,7 +466,8 @@ mod tests {
                 cwd TEXT
             )",
             [],
-        ).unwrap();
+        )
+        .unwrap();
 
         CommandIntelligence::new(conn).unwrap()
     }
