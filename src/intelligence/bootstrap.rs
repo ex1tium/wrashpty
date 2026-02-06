@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use tracing::{debug, info};
 
 use super::error::CIError;
-use super::schema::{store_schema, CommandSchema, SchemaSource, SubcommandSchema};
+use super::schema::{CommandSchema, SchemaSource, SubcommandSchema, store_schema};
 
 /// Seeds the command hierarchy, merging with existing data.
 ///

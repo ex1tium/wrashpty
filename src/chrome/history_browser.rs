@@ -17,7 +17,7 @@ use ratatui_widgets::paragraph::{Paragraph, Wrap};
 use tracing::{debug, warn};
 
 use super::command_edit::{
-    superscript_number, token_type_style, CommandEditState, CommandToken, TokenType,
+    CommandEditState, CommandToken, TokenType, superscript_number, token_type_style,
 };
 use super::panel::{Panel, PanelResult};
 use super::theme::Theme;
@@ -1385,8 +1385,8 @@ impl Panel for HistoryBrowserPanel {
 mod tests {
     use super::super::buffer_convert::buffer_to_ansi;
     use super::super::command_edit::{
-        apply_quotes, check_dangerous_command, split_quotes, tokenize_command, QuoteStyle,
-        TokenType,
+        QuoteStyle, TokenType, apply_quotes, check_dangerous_command, split_quotes,
+        tokenize_command,
     };
     use super::super::theme::AMBER_THEME;
     use super::*;

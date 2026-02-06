@@ -16,7 +16,7 @@ mod viewer;
 pub use alt_screen::{AltScreenDetector, AltScreenEvent};
 pub use boundaries::CommandBoundaries;
 pub use buffer::{ScrollLine, ScrollbackBuffer};
-pub use capture::{CapturedLine, CaptureState};
+pub use capture::{CaptureState, CapturedLine};
 pub use mini_input::{MiniInput, MiniInputResult};
 pub use mode::ScrollViewMode;
 pub use state::{DisplaySettings, ViewerState};

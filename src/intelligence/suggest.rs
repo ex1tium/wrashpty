@@ -618,7 +618,7 @@ fn suggest_from_historical_frequency(conn: &Connection, limit: usize) -> Vec<Sug
 mod tests {
     use super::*;
     use crate::intelligence::db_schema;
-    use crate::intelligence::schema::{store_schema, SchemaSource};
+    use crate::intelligence::schema::{SchemaSource, store_schema};
     use crate::intelligence::schema::{SubcommandSchema, ValueType};
     use crate::intelligence::types::AnalyzedToken;
 
