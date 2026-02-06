@@ -1466,7 +1466,7 @@ mod tests {
 
     // Quote handling tests
     #[test]
-    fn test_split_quotes() {
+    fn test_split_quotes_styles_return_expected_quote_style() {
         assert_eq!(
             split_quotes("hello"),
             ("hello".to_string(), QuoteStyle::None)

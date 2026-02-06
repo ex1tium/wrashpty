@@ -1315,11 +1315,21 @@ impl App {
         }
 
         loop {
+            self.handle_signals()?;
+            if self.should_shutdown() {
+                self.scroll_to_bottom();
+                break;
+            }
+
             // Wait for input (with periodic checks for signals)
             let has_event = event::poll(std::time::Duration::from_millis(100))
                 .context("Failed to poll for events")?;
 
             if !has_event {
+                if self.should_shutdown() {
+                    self.scroll_to_bottom();
+                    break;
+                }
                 continue;
             }
 
@@ -1613,6 +1623,10 @@ impl App {
                     break;
                 }
                 Event::Resize(cols, _rows) => {
+                    if self.should_shutdown() {
+                        self.scroll_to_bottom();
+                        break;
+                    }
                     // Handle resize while in scroll view
                     self.capture_state.set_terminal_width(cols);
                     if let Err(e) = self.render_scrollback_view() {
