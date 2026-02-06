@@ -42,8 +42,9 @@ tracing-subscriber = "0.3"
 # Path resolution
 dirs = "5.0"
 
-# Unicode display width
+# Unicode display width and segmentation
 unicode-width = "0.1"
+unicode-segmentation = "1.11"
 
 # TUI rendering primitives (Buffer, Rect, Style, Layout)
 ratatui-core = "0.1"

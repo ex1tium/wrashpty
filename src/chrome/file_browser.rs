@@ -475,11 +475,12 @@ impl FileBrowserPanel {
             // superscript (n digits) + ⟦ (1) + text + ⟧ (1) + spacing (3)
             let slot_num = i + 1;
             let superscript_len = slot_num.to_string().len();
-            let token_width = superscript_len + 1 + display_text.chars().count() + 1 + 3;
+            let text_display_width = crate::ui::text_width::display_width(display_text);
+            let token_width = superscript_len + 1 + text_display_width + 1 + 3;
 
             if i == edit_state.selected {
                 selected_x_end =
-                    selected_x_start + superscript_len + 1 + display_text.chars().count() + 1;
+                    selected_x_start + superscript_len + 1 + text_display_width + 1;
                 break;
             }
             selected_x_start += token_width;
@@ -857,11 +858,22 @@ impl Panel for FileBrowserPanel {
 
         // Render path header
         let path_str = self.current_dir.to_string_lossy();
-        let truncated_path = if path_str.len() > area.width as usize - 4 {
-            format!(
-                "...{}",
-                &path_str[path_str.len() - (area.width as usize - 7)..]
-            )
+        let max_path_width = (area.width as usize).saturating_sub(4);
+        let truncated_path = if crate::ui::text_width::display_width(&path_str) > max_path_width {
+            // Truncate from the left (show the end of the path)
+            let target_width = max_path_width.saturating_sub(3); // room for "..."
+            // Walk backwards through chars to find how much of the tail fits
+            let mut width = 0;
+            let mut start_idx = path_str.len();
+            for (idx, ch) in path_str.char_indices().rev() {
+                let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                if width + ch_w > target_width {
+                    break;
+                }
+                width += ch_w;
+                start_idx = idx;
+            }
+            format!("...{}", &path_str[start_idx..])
         } else {
             path_str.to_string()
         };
@@ -928,20 +940,15 @@ impl Panel for FileBrowserPanel {
                 // Format: icon(2) + name + perms(4) + date(6) + size(6) + spacing(6)
                 let metadata_width = 22_usize;
                 let available_for_name = (area.width as usize).saturating_sub(metadata_width);
-                // Use char-aware truncation to avoid panic on UTF-8 multibyte boundaries
-                let name_chars: usize = entry.name.chars().count();
-                let display_name = if name_chars > available_for_name && available_for_name > 0 {
-                    let truncated: String = entry
-                        .name
-                        .chars()
-                        .take(available_for_name.saturating_sub(1))
-                        .collect();
-                    format!("{}…", truncated)
+                // Use display-width-aware truncation for correct column alignment
+                let name_display_width = crate::ui::text_width::display_width(&entry.name);
+                let display_name = if name_display_width > available_for_name && available_for_name > 0 {
+                    crate::ui::text_width::truncate_with_ellipsis(&entry.name, available_for_name).into_owned()
                 } else {
                     entry.name.clone()
                 };
-                let display_name_chars = display_name.chars().count();
-                let name_padding = available_for_name.saturating_sub(display_name_chars);
+                let display_name_width = crate::ui::text_width::display_width(&display_name);
+                let name_padding = available_for_name.saturating_sub(display_name_width);
 
                 let line = Line::from(vec![
                     Span::styled(format!("{} ", icon), Style::default().fg(icon_color)),

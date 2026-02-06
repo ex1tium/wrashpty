@@ -223,9 +223,11 @@ impl MiniInput {
             write!(out, "{}", bg)?;
         }
 
+        use crate::ui::text_width;
+
         // Build the prompt: "Label: "
         let prompt = format!("{}: ", self.label);
-        let prompt_len = prompt.len();
+        let prompt_width = text_width::display_width(&prompt);
 
         // Render the label with styling
         write!(out, "{}{}{}", label_fg, prompt, reset)?;
@@ -233,40 +235,48 @@ impl MiniInput {
             write!(out, "{}", bg)?; // Re-apply background after reset
         }
 
-        // Calculate available width for input
-        let status_len = status.map(|s| s.len() + 2).unwrap_or(0); // " [status]"
-        let available = (cols as usize).saturating_sub(prompt_len + status_len + 1);
+        // Calculate available width for input (in display columns)
+        let status_width = status.map(|s| text_width::display_width(s) + 2).unwrap_or(0);
+        let available = (cols as usize).saturating_sub(prompt_width + status_width + 1);
 
         // Show buffer (or hint if empty)
         if self.buffer.is_empty() {
             if let Some(hint) = self.hint {
-                // Hint in dim - truncate at character boundary
-                let truncated: String = hint.chars().take(available).collect();
+                // Hint in dim - truncate by display width
+                let truncated = text_width::truncate_to_width(hint, available);
                 write!(out, "\x1b[2m{}\x1b[22m", truncated)?;
             }
         } else {
             // Truncate if too long (show end of buffer if cursor is at end)
-            // Use character indices, not byte indices to avoid UTF-8 boundary issues
-            let char_count = self.buffer.chars().count();
-            let display = if char_count <= available {
+            // Use display width, not character count, to determine what fits
+            let buf_width = text_width::display_width(&self.buffer);
+            let display = if buf_width <= available {
                 self.buffer.clone()
             } else {
-                // Find cursor position in characters
+                // Find cursor display column position
                 let cursor = self.sanitized_cursor();
-                let cursor_char_pos = self.buffer[..cursor].chars().count();
+                let cursor_display_col = text_width::display_width(&self.buffer[..cursor]);
 
-                if cursor_char_pos >= available {
-                    // Show window around cursor
-                    let start_char = cursor_char_pos.saturating_sub(available / 2);
-                    let end_char = (start_char + available).min(char_count);
-                    self.buffer
-                        .chars()
-                        .skip(start_char)
-                        .take(end_char - start_char)
-                        .collect()
+                if cursor_display_col >= available {
+                    // Cursor is past the visible window – show window around cursor.
+                    // Walk backwards from cursor to find the start byte that fits.
+                    let target_start_col = cursor_display_col.saturating_sub(available / 2);
+                    // Find byte offset corresponding to target_start_col
+                    let mut start_byte = 0;
+                    let mut col = 0;
+                    for (idx, ch) in self.buffer.char_indices() {
+                        if col >= target_start_col {
+                            start_byte = idx;
+                            break;
+                        }
+                        col += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                        start_byte = idx + ch.len_utf8();
+                    }
+                    let window = &self.buffer[start_byte..];
+                    text_width::truncate_to_width(window, available).into_owned()
                 } else {
-                    // Show from beginning
-                    self.buffer.chars().take(available).collect()
+                    // Show from beginning, truncated to available width
+                    text_width::truncate_to_width(&self.buffer, available).into_owned()
                 }
             };
             write!(out, "{}{}", text_fg, display)?;
@@ -274,17 +284,17 @@ impl MiniInput {
 
         // Show status on the right if provided
         if let Some(status) = status {
-            let col = cols.saturating_sub(status.len() as u16);
+            let col = cols.saturating_sub(text_width::display_width(status) as u16);
             write!(out, "\x1b[1;{}H{}\x1b[2m{}\x1b[22m", col, bg, status)?;
         }
 
         // Reset styling before cursor positioning
         write!(out, "{}", reset)?;
 
-        // Position cursor (use character count, not byte offset)
+        // Position cursor using display width (not character count)
         let cursor = self.sanitized_cursor();
-        let cursor_char_pos = self.buffer[..cursor].chars().count();
-        let cursor_col = prompt_len + cursor_char_pos.min(available) + 1;
+        let cursor_display_col = text_width::display_width(&self.buffer[..cursor]);
+        let cursor_col = prompt_width + cursor_display_col.min(available) + 1;
         write!(out, "\x1b[1;{}H", cursor_col)?;
 
         // Show cursor
@@ -411,5 +421,56 @@ mod tests {
         assert_eq!(input.handle_input(ctrl_key('w')), MiniInputResult::Changed);
         assert_eq!(input.buffer, "hello ");
         assert_eq!(input.cursor, 6);
+    }
+
+    #[test]
+    fn test_cjk_input_cursor_movement() {
+        let mut input = MiniInput::new("Search");
+        // Type "你好" (each char is 3 bytes)
+        input.buffer = "你好".to_string();
+        input.cursor = 6; // After both chars
+
+        // Move left should go to byte 3 (after "你")
+        input.handle_input(key(KeyCode::Left));
+        assert_eq!(input.cursor, 3);
+
+        // Move left again to byte 0
+        input.handle_input(key(KeyCode::Left));
+        assert_eq!(input.cursor, 0);
+
+        // Move right to byte 3
+        input.handle_input(key(KeyCode::Right));
+        assert_eq!(input.cursor, 3);
+    }
+
+    #[test]
+    fn test_backspace_on_multibyte_char() {
+        let mut input = MiniInput::new("Search");
+        input.buffer = "a你b".to_string(); // 1 + 3 + 1 = 5 bytes
+        input.cursor = 4; // After "a你"
+
+        input.handle_input(key(KeyCode::Backspace));
+        assert_eq!(input.buffer, "ab");
+        assert_eq!(input.cursor, 1);
+    }
+
+    #[test]
+    fn test_delete_on_multibyte_char() {
+        let mut input = MiniInput::new("Search");
+        input.buffer = "a你b".to_string();
+        input.cursor = 1; // After "a", before "你"
+
+        input.handle_input(key(KeyCode::Delete));
+        assert_eq!(input.buffer, "ab");
+        assert_eq!(input.cursor, 1);
+    }
+
+    #[test]
+    fn test_render_cursor_position_with_wide_chars() {
+        let input = MiniInput::new("S");
+        // Verify render doesn't panic with wide content
+        let mut buf = Vec::new();
+        // This should not panic even with very small cols
+        let _ = input.render(&mut buf, 10, None);
     }
 }

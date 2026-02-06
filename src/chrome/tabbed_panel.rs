@@ -220,15 +220,19 @@ impl Panel for TabbedPanel {
             }
             // Add hint for tab switching at the right side
             let hint = "Ctrl+←→ switch tabs";
-            let hint_start = sep_area.x + sep_area.width.saturating_sub(hint.len() as u16 + 2);
-            for (i, ch) in hint.chars().enumerate() {
-                let x = hint_start + i as u16;
-                if x < sep_area.x + sep_area.width {
+            let hint_display_width = crate::ui::text_width::display_width(hint) as u16;
+            let hint_start = sep_area.x + sep_area.width.saturating_sub(hint_display_width + 2);
+            let mut col: u16 = 0;
+            for ch in hint.chars() {
+                let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+                let x = hint_start + col;
+                if x + ch_w <= sep_area.x + sep_area.width {
                     if let Some(cell) = buffer.cell_mut((x, sep_area.y)) {
                         cell.set_char(ch);
                         cell.set_style(Style::default().fg(self.theme.text_secondary));
                     }
                 }
+                col += ch_w;
             }
         }
 

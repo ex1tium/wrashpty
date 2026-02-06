@@ -151,7 +151,7 @@ impl Panel for HelpPanel {
             // Entries
             for (key, desc) in &section.entries {
                 let key_width = 15;
-                let padded_key = format!("{:width$}", key, width = key_width);
+                let padded_key = crate::ui::text_width::pad_to_width(key, key_width);
                 lines.push(ListItem::new(Line::from(vec![
                     Span::styled("  ", Style::default()),
                     Span::styled(padded_key, Style::default().fg(self.theme.text_highlight)),
