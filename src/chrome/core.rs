@@ -127,26 +127,6 @@ pub struct Chrome {
     registry: TopbarRegistry,
 }
 
-/// Truncates a string to fit within the specified display width.
-///
-/// Uses the same char-index logic as [`crate::ui::text_width::truncate_to_width`]
-/// but returns a borrowed `&str` for zero-cost use in format strings.
-fn truncate_to_width(s: &str, max_width: usize) -> &str {
-    let mut current_width = 0;
-    let mut last_valid_idx = 0;
-
-    for (idx, ch) in s.char_indices() {
-        let ch_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if current_width + ch_width > max_width {
-            break;
-        }
-        current_width += ch_width;
-        last_valid_idx = idx + ch.len_utf8();
-    }
-
-    &s[..last_valid_idx]
-}
-
 impl Chrome {
     /// Creates a new Chrome instance with the specified mode and configuration.
     ///
@@ -811,8 +791,11 @@ impl Chrome {
         let max_len = cols as usize;
         let available_for_msg = max_len.saturating_sub(decoration_width);
         let msg_display = if notif.message.width() > available_for_msg {
-            let truncated = truncate_to_width(&notif.message, available_for_msg.saturating_sub(3));
-            format!("{}...", truncated)
+            let truncated = crate::ui::text_width::truncate_to_width(
+                &notif.message,
+                available_for_msg.saturating_sub(3),
+            );
+            format!("{}...", truncated.as_ref())
         } else {
             notif.message.clone()
         };
@@ -969,18 +952,30 @@ mod tests {
     #[test]
     fn test_truncate_to_width_ascii() {
         let s = "Hello, World!";
-        assert_eq!(truncate_to_width(s, 5), "Hello");
-        assert_eq!(truncate_to_width(s, 100), s);
-        assert_eq!(truncate_to_width(s, 0), "");
+        assert_eq!(
+            crate::ui::text_width::truncate_to_width(s, 5).as_ref(),
+            "Hello"
+        );
+        assert_eq!(crate::ui::text_width::truncate_to_width(s, 100).as_ref(), s);
+        assert_eq!(crate::ui::text_width::truncate_to_width(s, 0).as_ref(), "");
     }
 
     #[test]
     fn test_truncate_to_width_unicode() {
         // CJK characters have width 2
         let s = "Hello\u{4E2D}\u{6587}"; // "Hello中文"
-        assert_eq!(truncate_to_width(s, 5), "Hello");
-        assert_eq!(truncate_to_width(s, 7), "Hello\u{4E2D}");
-        assert_eq!(truncate_to_width(s, 6), "Hello"); // Can't fit half a CJK char
+        assert_eq!(
+            crate::ui::text_width::truncate_to_width(s, 5).as_ref(),
+            "Hello"
+        );
+        assert_eq!(
+            crate::ui::text_width::truncate_to_width(s, 7).as_ref(),
+            "Hello\u{4E2D}"
+        );
+        assert_eq!(
+            crate::ui::text_width::truncate_to_width(s, 6).as_ref(),
+            "Hello"
+        ); // Can't fit half a CJK char
     }
 
     #[test]

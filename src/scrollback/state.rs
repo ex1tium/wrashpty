@@ -1,7 +1,5 @@
-//! Unified state management for the scroll viewer.
-//!
-//! This module consolidates all scroll viewer state into a single struct,
-//! making it easy to pass around and manage during the scroll view loop.
+//! Unified scroll view state centered on [`ViewerState`].
+//! Keeps mode, display toggles, and command boundary metadata together.
 
 use super::boundaries::CommandBoundaries;
 use super::mode::ScrollViewMode;
@@ -25,8 +23,8 @@ impl DisplaySettings {
     /// Creates new settings with defaults.
     pub fn new() -> Self {
         Self {
-            url_highlighting: true,    // On by default
-            command_separators: true,   // On by default
+            url_highlighting: true,   // On by default
+            command_separators: true, // On by default
             ..Default::default()
         }
     }
@@ -65,9 +63,15 @@ impl ViewerState {
         self.mode = ScrollViewMode::Normal;
     }
 
-    /// Returns true if currently showing line numbers.
-    pub fn show_line_numbers(&self) -> bool {
+    /// Returns true if line numbers are currently shown.
+    pub fn is_line_numbers_shown(&self) -> bool {
         self.display.line_numbers
+    }
+
+    /// Deprecated alias for [`Self::is_line_numbers_shown`].
+    #[deprecated(note = "Use is_line_numbers_shown() instead.")]
+    pub fn show_line_numbers(&self) -> bool {
+        self.is_line_numbers_shown()
     }
 
     /// Toggles line number display.
@@ -75,9 +79,15 @@ impl ViewerState {
         self.display.line_numbers = !self.display.line_numbers;
     }
 
-    /// Returns true if currently showing timestamps.
-    pub fn show_timestamps(&self) -> bool {
+    /// Returns true if timestamps are currently shown.
+    pub fn is_timestamps_shown(&self) -> bool {
         self.display.timestamps
+    }
+
+    /// Deprecated alias for [`Self::is_timestamps_shown`].
+    #[deprecated(note = "Use is_timestamps_shown() instead.")]
+    pub fn show_timestamps(&self) -> bool {
+        self.is_timestamps_shown()
     }
 
     /// Toggles timestamp display.
@@ -85,9 +95,15 @@ impl ViewerState {
         self.display.timestamps = !self.display.timestamps;
     }
 
-    /// Returns true if help bar is shown.
-    pub fn show_help_bar(&self) -> bool {
+    /// Returns true if the help bar is currently shown.
+    pub fn is_help_bar_shown(&self) -> bool {
         self.display.help_bar
+    }
+
+    /// Deprecated alias for [`Self::is_help_bar_shown`].
+    #[deprecated(note = "Use is_help_bar_shown() instead.")]
+    pub fn show_help_bar(&self) -> bool {
+        self.is_help_bar_shown()
     }
 
     /// Toggles help bar display.
@@ -95,9 +111,15 @@ impl ViewerState {
         self.display.help_bar = !self.display.help_bar;
     }
 
-    /// Returns true if command separators are shown.
-    pub fn show_command_separators(&self) -> bool {
+    /// Returns true if command separators are currently shown.
+    pub fn is_command_separators_shown(&self) -> bool {
         self.display.command_separators
+    }
+
+    /// Deprecated alias for [`Self::is_command_separators_shown`].
+    #[deprecated(note = "Use is_command_separators_shown() instead.")]
+    pub fn show_command_separators(&self) -> bool {
+        self.is_command_separators_shown()
     }
 
     /// Toggles command separator display.
@@ -111,7 +133,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_display_settings_default() {
+    fn test_display_settings_default_values_are_expected() {
         let settings = DisplaySettings::new();
         assert!(!settings.line_numbers);
         assert!(!settings.timestamps);
@@ -121,20 +143,25 @@ mod tests {
     }
 
     #[test]
-    fn test_viewer_state_toggles() {
+    fn test_viewer_state_toggle_line_numbers_updates_state() {
         let mut state = ViewerState::new();
 
-        assert!(!state.show_line_numbers());
+        assert!(!state.is_line_numbers_shown());
         state.toggle_line_numbers();
-        assert!(state.show_line_numbers());
-
-        assert!(!state.show_timestamps());
-        state.toggle_timestamps();
-        assert!(state.show_timestamps());
+        assert!(state.is_line_numbers_shown());
     }
 
     #[test]
-    fn test_reset_mode() {
+    fn test_viewer_state_toggle_timestamps_updates_state() {
+        let mut state = ViewerState::new();
+
+        assert!(!state.is_timestamps_shown());
+        state.toggle_timestamps();
+        assert!(state.is_timestamps_shown());
+    }
+
+    #[test]
+    fn test_reset_mode_from_search_returns_normal() {
         use super::super::features::SearchState;
 
         let mut state = ViewerState::new();

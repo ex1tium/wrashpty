@@ -134,22 +134,17 @@ pub fn grapheme_count(s: &str) -> usize {
 ///
 /// Panics: none (clamps to valid range).
 pub fn slice_grapheme_range(s: &str, start_g: usize, end_g: usize) -> &str {
-    let graphemes: Vec<(usize, &str)> = s.grapheme_indices(true).collect();
-    let count = graphemes.len();
-
-    let start_g = start_g.min(count);
-    let end_g = end_g.min(count);
-
     if start_g >= end_g {
         return "";
     }
 
-    let start_byte = graphemes[start_g].0;
-    let end_byte = if end_g >= count {
-        s.len()
-    } else {
-        graphemes[end_g].0
+    let mut iter = s.grapheme_indices(true);
+    let start_byte = match iter.nth(start_g) {
+        Some((idx, _)) => idx,
+        None => return "",
     };
+    let remaining = end_g.saturating_sub(start_g.saturating_add(1));
+    let end_byte = iter.nth(remaining).map(|(idx, _)| idx).unwrap_or(s.len());
 
     &s[start_byte..end_byte]
 }
@@ -226,7 +221,10 @@ mod tests {
         let plain = display_width("☺");
         let with_vs = display_width("☺\u{FE0F}");
         // VS shouldn't add width (it's zero-width)
-        assert!(with_vs <= plain + 1, "VS16 should not add significant width");
+        assert!(
+            with_vs <= plain + 1,
+            "VS16 should not add significant width"
+        );
     }
 
     #[test]

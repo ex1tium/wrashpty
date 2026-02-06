@@ -1,7 +1,4 @@
-//! Shared ANSI escape sequence parsing helpers.
-//!
-//! Centralizes CSI/OSC sequence handling used across capture, buffer, and viewer
-//! modules to eliminate duplication and ensure consistent behavior.
+//! Shared ANSI escape sequence (CSI/OSC) parsing helpers for capture, buffer, and viewer modules.
 
 /// Returns the expected byte length of a UTF-8 sequence from its first byte.
 ///
@@ -149,13 +146,41 @@ pub(crate) fn sanitize_for_display(content: &[u8]) -> Vec<u8> {
         let seq_len = utf8_sequence_len(b);
         if seq_len > 1 && i + seq_len <= content.len() {
             // Verify all continuation bytes have the form 10xxxxxx
-            let valid = content[i + 1..i + seq_len]
+            let has_valid_continuations = content[i + 1..i + seq_len]
                 .iter()
                 .all(|&c| (c & 0xC0) == 0x80);
-            if valid {
-                out.extend_from_slice(&content[i..i + seq_len]);
-                i += seq_len;
-                continue;
+
+            if has_valid_continuations {
+                let code_point = match seq_len {
+                    2 => ((b & 0x1F) as u32) << 6 | ((content[i + 1] & 0x3F) as u32),
+                    3 => {
+                        ((b & 0x0F) as u32) << 12
+                            | ((content[i + 1] & 0x3F) as u32) << 6
+                            | ((content[i + 2] & 0x3F) as u32)
+                    }
+                    4 => {
+                        ((b & 0x07) as u32) << 18
+                            | ((content[i + 1] & 0x3F) as u32) << 12
+                            | ((content[i + 2] & 0x3F) as u32) << 6
+                            | ((content[i + 3] & 0x3F) as u32)
+                    }
+                    _ => 0,
+                };
+
+                let is_minimal_encoding = match seq_len {
+                    2 => code_point >= 0x80,
+                    3 => code_point >= 0x800,
+                    4 => code_point >= 0x10000,
+                    _ => false,
+                };
+                let is_surrogate = (0xD800..=0xDFFF).contains(&code_point);
+                let is_valid_scalar = code_point <= 0x10FFFF && !is_surrogate;
+
+                if is_minimal_encoding && is_valid_scalar {
+                    out.extend_from_slice(&content[i..i + seq_len]);
+                    i += seq_len;
+                    continue;
+                }
             }
         }
 
