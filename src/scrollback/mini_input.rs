@@ -36,6 +36,18 @@ pub struct MiniInput {
 }
 
 impl MiniInput {
+    fn sanitized_cursor(&self) -> usize {
+        let mut cursor = self.cursor.min(self.buffer.len());
+        while cursor > 0 && !self.buffer.is_char_boundary(cursor) {
+            cursor -= 1;
+        }
+        cursor
+    }
+
+    fn clamp_cursor(&mut self) {
+        self.cursor = self.sanitized_cursor();
+    }
+
     /// Creates a new mini-input with the given label.
     pub fn new(label: &'static str) -> Self {
         Self {
@@ -58,6 +70,8 @@ impl MiniInput {
 
     /// Handles a key event, returning the result.
     pub fn handle_input(&mut self, key: KeyEvent) -> MiniInputResult {
+        self.clamp_cursor();
+
         // Handle Ctrl combinations first
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             return match key.code {
@@ -238,9 +252,8 @@ impl MiniInput {
                 self.buffer.clone()
             } else {
                 // Find cursor position in characters
-                let cursor_char_pos = self.buffer[..self.cursor.min(self.buffer.len())]
-                    .chars()
-                    .count();
+                let cursor = self.sanitized_cursor();
+                let cursor_char_pos = self.buffer[..cursor].chars().count();
 
                 if cursor_char_pos >= available {
                     // Show window around cursor
@@ -269,9 +282,8 @@ impl MiniInput {
         write!(out, "{}", reset)?;
 
         // Position cursor (use character count, not byte offset)
-        let cursor_char_pos = self.buffer[..self.cursor.min(self.buffer.len())]
-            .chars()
-            .count();
+        let cursor = self.sanitized_cursor();
+        let cursor_char_pos = self.buffer[..cursor].chars().count();
         let cursor_col = prompt_len + cursor_char_pos.min(available) + 1;
         write!(out, "\x1b[1;{}H", cursor_col)?;
 
@@ -311,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn test_new() {
+    fn test_new_min_input_initializes_empty() {
         let input = MiniInput::new("Search");
         assert_eq!(input.label, "Search");
         assert!(input.buffer.is_empty());
@@ -319,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn test_typing() {
+    fn test_handle_input_typing_changed() {
         let mut input = MiniInput::new("Search");
 
         assert_eq!(
@@ -335,7 +347,7 @@ mod tests {
     }
 
     #[test]
-    fn test_backspace() {
+    fn test_handle_input_backspace_changed() {
         let mut input = MiniInput::new("Search");
         input.buffer = "hello".to_string();
         input.cursor = 5;
@@ -349,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cursor_movement() {
+    fn test_handle_input_cursor_movement_positions_updated() {
         let mut input = MiniInput::new("Search");
         input.buffer = "hello".to_string();
         input.cursor = 5;
@@ -365,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn test_submit_cancel() {
+    fn test_handle_input_submit_and_cancel_results() {
         let mut input = MiniInput::new("Search");
 
         assert_eq!(
@@ -380,7 +392,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ctrl_u_clear_line() {
+    fn test_handle_input_ctrl_u_clears_line_changed() {
         let mut input = MiniInput::new("Search");
         input.buffer = "hello world".to_string();
         input.cursor = 6; // After "hello "
@@ -391,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ctrl_w_delete_word() {
+    fn test_handle_input_ctrl_w_deletes_word_changed() {
         let mut input = MiniInput::new("Search");
         input.buffer = "hello world".to_string();
         input.cursor = 11; // At end

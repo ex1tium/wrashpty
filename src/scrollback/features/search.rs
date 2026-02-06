@@ -1,6 +1,6 @@
 //! Search state and logic for incremental search in scrollback.
 
-use regex::{escape, RegexBuilder};
+use regex::{RegexBuilder, escape};
 
 use crate::scrollback::buffer::ScrollbackBuffer;
 
@@ -46,8 +46,8 @@ impl SearchState {
         Self::default()
     }
 
-    /// Returns true if there are any matches.
-    pub fn has_matches(&self) -> bool {
+    /// Returns true if a match is available.
+    pub fn is_match_available(&self) -> bool {
         !self.matches.is_empty()
     }
 
@@ -275,7 +275,7 @@ mod tests {
     fn test_search_state_default() {
         let state = SearchState::default();
         assert!(state.query.is_empty());
-        assert!(!state.has_matches());
+        assert!(!state.is_match_available());
         assert!(state.current().is_none());
     }
 

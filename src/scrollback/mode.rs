@@ -57,7 +57,7 @@ impl ScrollViewMode {
     }
 
     /// Returns the mode name for display (e.g., in help bar).
-    pub fn name(&self) -> &'static str {
+    pub fn current_mode_name(&self) -> &'static str {
         match self {
             Self::Normal => "NORMAL",
             Self::Search(_) => "SEARCH",
@@ -73,25 +73,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_is_normal() {
+    fn test_default_default_returns_normal() {
         assert!(matches!(ScrollViewMode::default(), ScrollViewMode::Normal));
     }
 
     #[test]
-    fn test_mode_predicates() {
+    fn test_is_normal_on_normal_returns_true() {
         assert!(ScrollViewMode::Normal.is_normal());
-        assert!(!ScrollViewMode::Normal.is_input_mode());
+    }
 
+    #[test]
+    fn test_is_input_mode_on_normal_returns_false() {
+        assert!(!ScrollViewMode::Normal.is_input_mode());
+    }
+
+    #[test]
+    fn test_is_normal_on_search_returns_false() {
         let search = ScrollViewMode::Search(SearchState::default());
         assert!(!search.is_normal());
+    }
+
+    #[test]
+    fn test_is_input_mode_on_search_returns_true() {
+        let search = ScrollViewMode::Search(SearchState::default());
         assert!(search.is_input_mode());
     }
 
     #[test]
-    fn test_mode_names() {
-        assert_eq!(ScrollViewMode::Normal.name(), "NORMAL");
+    fn test_name_on_normal_returns_normal_uppercase() {
+        assert_eq!(ScrollViewMode::Normal.current_mode_name(), "NORMAL");
+    }
+
+    #[test]
+    fn test_name_on_search_returns_search_uppercase() {
         assert_eq!(
-            ScrollViewMode::Search(SearchState::default()).name(),
+            ScrollViewMode::Search(SearchState::default()).current_mode_name(),
             "SEARCH"
         );
     }

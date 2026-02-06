@@ -68,7 +68,7 @@ impl AltScreenDetector {
     /// This is the hot path - called for every byte of PTY output.
     /// Designed to be O(1) and inline-friendly.
     #[inline]
-    pub fn feed_byte(&mut self, b: u8) -> Option<AltScreenEvent> {
+    pub fn try_parse_byte(&mut self, b: u8) -> Option<AltScreenEvent> {
         match self.state {
             CsiState::Normal => {
                 if b == 0x1b {
@@ -92,7 +92,10 @@ impl AltScreenDetector {
     /// Feeds multiple bytes and returns events.
     ///
     /// Convenience method for processing chunks.
-    pub fn feed<'a>(&'a mut self, data: &'a [u8]) -> impl Iterator<Item = AltScreenEvent> + 'a {
+    pub fn parse_bytes<'a>(
+        &'a mut self,
+        data: &'a [u8],
+    ) -> impl Iterator<Item = AltScreenEvent> + 'a {
         AltScreenIterator {
             detector: self,
             data,
@@ -209,7 +212,7 @@ impl<'a> Iterator for AltScreenIterator<'a> {
         while self.pos < self.data.len() {
             let b = self.data[self.pos];
             self.pos += 1;
-            if let Some(event) = self.detector.feed_byte(b) {
+            if let Some(event) = self.detector.try_parse_byte(b) {
                 return Some(event);
             }
         }
@@ -230,7 +233,7 @@ mod tests {
     #[test]
     fn test_detect_1049h_enter() {
         let mut detector = AltScreenDetector::new();
-        let events: Vec<_> = detector.feed(b"\x1b[?1049h").collect();
+        let events: Vec<_> = detector.parse_bytes(b"\x1b[?1049h").collect();
         assert_eq!(events, vec![AltScreenEvent::Enter]);
         assert!(detector.is_in_alt_screen());
     }
@@ -239,11 +242,11 @@ mod tests {
     fn test_detect_1049l_exit() {
         let mut detector = AltScreenDetector::new();
         // First enter
-        detector.feed(b"\x1b[?1049h").for_each(drop);
+        detector.parse_bytes(b"\x1b[?1049h").for_each(drop);
         assert!(detector.is_in_alt_screen());
 
         // Then exit
-        let events: Vec<_> = detector.feed(b"\x1b[?1049l").collect();
+        let events: Vec<_> = detector.parse_bytes(b"\x1b[?1049l").collect();
         assert_eq!(events, vec![AltScreenEvent::Exit]);
         assert!(!detector.is_in_alt_screen());
     }
@@ -251,7 +254,7 @@ mod tests {
     #[test]
     fn test_detect_47h_enter() {
         let mut detector = AltScreenDetector::new();
-        let events: Vec<_> = detector.feed(b"\x1b[?47h").collect();
+        let events: Vec<_> = detector.parse_bytes(b"\x1b[?47h").collect();
         assert_eq!(events, vec![AltScreenEvent::Enter]);
         assert!(detector.is_in_alt_screen());
     }
@@ -259,8 +262,8 @@ mod tests {
     #[test]
     fn test_detect_47l_exit() {
         let mut detector = AltScreenDetector::new();
-        detector.feed(b"\x1b[?47h").for_each(drop);
-        let events: Vec<_> = detector.feed(b"\x1b[?47l").collect();
+        detector.parse_bytes(b"\x1b[?47h").for_each(drop);
+        let events: Vec<_> = detector.parse_bytes(b"\x1b[?47l").collect();
         assert_eq!(events, vec![AltScreenEvent::Exit]);
         assert!(!detector.is_in_alt_screen());
     }
@@ -268,10 +271,10 @@ mod tests {
     #[test]
     fn test_no_duplicate_enter() {
         let mut detector = AltScreenDetector::new();
-        detector.feed(b"\x1b[?1049h").for_each(drop);
+        detector.parse_bytes(b"\x1b[?1049h").for_each(drop);
 
         // Second enter should not emit event
-        let events: Vec<_> = detector.feed(b"\x1b[?1049h").collect();
+        let events: Vec<_> = detector.parse_bytes(b"\x1b[?1049h").collect();
         assert!(events.is_empty());
     }
 
@@ -279,14 +282,14 @@ mod tests {
     fn test_no_duplicate_exit() {
         let mut detector = AltScreenDetector::new();
         // Exit without enter should not emit
-        let events: Vec<_> = detector.feed(b"\x1b[?1049l").collect();
+        let events: Vec<_> = detector.parse_bytes(b"\x1b[?1049l").collect();
         assert!(events.is_empty());
     }
 
     #[test]
     fn test_sequence_in_middle_of_data() {
         let mut detector = AltScreenDetector::new();
-        let events: Vec<_> = detector.feed(b"hello\x1b[?1049hworld").collect();
+        let events: Vec<_> = detector.parse_bytes(b"hello\x1b[?1049hworld").collect();
         assert_eq!(events, vec![AltScreenEvent::Enter]);
     }
 
@@ -295,10 +298,10 @@ mod tests {
         let mut detector = AltScreenDetector::new();
 
         // Feed sequence in parts
-        let events1: Vec<_> = detector.feed(b"\x1b[?10").collect();
+        let events1: Vec<_> = detector.parse_bytes(b"\x1b[?10").collect();
         assert!(events1.is_empty());
 
-        let events2: Vec<_> = detector.feed(b"49h").collect();
+        let events2: Vec<_> = detector.parse_bytes(b"49h").collect();
         assert_eq!(events2, vec![AltScreenEvent::Enter]);
     }
 
@@ -306,7 +309,7 @@ mod tests {
     fn test_other_csi_ignored() {
         let mut detector = AltScreenDetector::new();
         // Color sequence should be ignored
-        let events: Vec<_> = detector.feed(b"\x1b[31m").collect();
+        let events: Vec<_> = detector.parse_bytes(b"\x1b[31m").collect();
         assert!(events.is_empty());
         assert!(!detector.is_in_alt_screen());
     }
@@ -315,14 +318,14 @@ mod tests {
     fn test_osc_ignored() {
         let mut detector = AltScreenDetector::new();
         // OSC title sequence should not confuse the parser
-        let events: Vec<_> = detector.feed(b"\x1b]0;title\x07").collect();
+        let events: Vec<_> = detector.parse_bytes(b"\x1b]0;title\x07").collect();
         assert!(events.is_empty());
     }
 
     #[test]
     fn test_reset_preserves_alt_screen_state() {
         let mut detector = AltScreenDetector::new();
-        detector.feed(b"\x1b[?1049h").for_each(drop);
+        detector.parse_bytes(b"\x1b[?1049h").for_each(drop);
         assert!(detector.is_in_alt_screen());
 
         detector.reset();

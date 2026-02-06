@@ -866,7 +866,7 @@ impl CommandEditState {
         // The hierarchy includes bootstrapped data, so it handles all cases
         if let Some(ref store) = self.history_store {
             if let Ok(store) = store.lock() {
-                if store.has_intelligence() {
+                if store.is_intelligence_enabled() {
                     let tokens = &self.tokens[..self.selected];
 
                     // Only apply prefix filter when user has modified the text

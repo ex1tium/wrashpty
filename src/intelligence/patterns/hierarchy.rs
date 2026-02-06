@@ -5,7 +5,7 @@
 //! - What tokens follow which parent tokens
 //! - Token roles (subcommand, flag, argument, value)
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 use crate::chrome::command_edit::TokenType;
 use crate::intelligence::error::CIError;
@@ -101,20 +101,24 @@ pub fn query_hierarchy(
     }
 
     // Get parent token ID
-    let parent_id: Option<i64> = parent_token.and_then(|text| {
-        conn.query_row("SELECT id FROM ci_tokens WHERE text = ?1", [text], |row| {
-            row.get(0)
-        })
-        .ok()
-    });
+    let parent_id: Option<i64> = match parent_token {
+        Some(text) => conn
+            .query_row("SELECT id FROM ci_tokens WHERE text = ?1", [text], |row| {
+                row.get(0)
+            })
+            .optional()?,
+        None => None,
+    };
 
     // Get base command ID
-    let base_id: Option<i64> = base_command.and_then(|text| {
-        conn.query_row("SELECT id FROM ci_tokens WHERE text = ?1", [text], |row| {
-            row.get(0)
-        })
-        .ok()
-    });
+    let base_id: Option<i64> = match base_command {
+        Some(text) => conn
+            .query_row("SELECT id FROM ci_tokens WHERE text = ?1", [text], |row| {
+                row.get(0)
+            })
+            .optional()?,
+        None => None,
+    };
 
     // Query with both parent and base command for best specificity
     if let (Some(parent_id), Some(base_id)) = (parent_id, base_id) {

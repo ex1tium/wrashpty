@@ -248,7 +248,7 @@ impl HistoryBrowserPanel {
         // This provides at least some history-aware completions even without full intelligence
         if let Some(store) = &self.history_store {
             if let Ok(store) = store.lock() {
-                if !store.has_intelligence() {
+                if !store.is_intelligence_enabled() {
                     let preceding: Vec<&str> = edit_state.tokens[..edit_state.selected]
                         .iter()
                         .map(|t| t.text.as_str())
