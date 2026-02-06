@@ -347,6 +347,43 @@ impl ScrollbackBuffer {
             .take(count.min(end_from_start - start_from_start))
     }
 
+    /// Replaces a line at the given index with new content.
+    ///
+    /// Used by cursor-up coalescence to overwrite previously emitted lines
+    /// when programs like `apt` use cursor-up + erase-line to redraw progress.
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - Buffer index (0 = oldest line)
+    /// * `content` - New raw line bytes (may include ANSI codes)
+    pub fn replace_line(&mut self, index: usize, content: Vec<u8>) {
+        if let Some(existing) = self.lines.get_mut(index) {
+            let truncated = content.len() > self.max_line_bytes;
+            let content = if truncated {
+                content[..self.max_line_bytes].to_vec()
+            } else {
+                content
+            };
+            let display_width = ScrollLine::calculate_display_width(&content, self.terminal_width);
+            *existing = ScrollLine {
+                content,
+                display_width,
+                truncated,
+                timestamp: existing.timestamp, // preserve original timestamp
+            };
+        }
+    }
+
+    /// Erases lines from `from_index` to the end of the buffer.
+    ///
+    /// Used when ESC[J (erase below) is encountered during cursor-up overwrite
+    /// mode. Removes the stale lines that the program intended to clear.
+    pub fn erase_from(&mut self, from_index: usize) {
+        if from_index < self.lines.len() {
+            self.lines.truncate(from_index);
+        }
+    }
+
     /// Clears all stored lines.
     pub fn clear(&mut self) {
         self.lines.clear();

@@ -410,6 +410,46 @@ impl ScrollViewer {
         Ok(())
     }
 
+    /// Renders a command boundary separator line.
+    ///
+    /// Draws a thin horizontal rule: `────────────────────`
+    fn render_command_separator<W: Write>(
+        out: &mut W,
+        cols: usize,
+        gutter_width: usize,
+        theme: Option<&Theme>,
+    ) -> io::Result<()> {
+        use crate::chrome::segments::color_to_fg_ansi;
+
+        let content_cols = cols.saturating_sub(gutter_width);
+
+        // Render gutter spacer if needed
+        if gutter_width > 0 {
+            write!(out, "{:width$}", "", width = gutter_width)?;
+        }
+
+        // Apply color
+        if let Some(theme) = theme {
+            let fg = color_to_fg_ansi(theme.marker_fg);
+            write!(out, "{}", fg)?;
+        } else {
+            write!(out, "\x1b[2m")?;
+        }
+
+        for _ in 0..content_cols {
+            write!(out, "─")?;
+        }
+
+        // Reset styling
+        if theme.is_some() {
+            write!(out, "\x1b[39m")?;
+        } else {
+            write!(out, "\x1b[22m")?;
+        }
+
+        Ok(())
+    }
+
     /// Renders scrollback content preserving the topbar (starts at row 2).
     ///
     /// This is a convenience method for the common case of rendering scrollback
@@ -426,6 +466,7 @@ impl ScrollViewer {
     /// * `show_timestamps` - Whether to show relative timestamp gutter
     /// * `show_boundary_markers` - Whether to show BEGIN/END markers at buffer boundaries
     /// * `theme` - Optional theme for styled boundary markers
+    /// * `boundary_lines` - Sorted prompt line indices for command separators
     #[allow(clippy::too_many_arguments)]
     pub fn render_with_chrome<W: Write>(
         out: &mut W,
@@ -437,16 +478,168 @@ impl ScrollViewer {
         show_timestamps: bool,
         show_boundary_markers: bool,
         theme: Option<&Theme>,
+        boundary_lines: &[usize],
     ) -> io::Result<RenderStats> {
-        let content_rows = rows.saturating_sub(1); // Reserve row 1 for topbar
-        let options = RenderOptions {
-            start_row: 2,
-            show_line_numbers,
-            show_timestamps,
-            show_end_marker: show_boundary_markers,
-            show_begin_marker: show_boundary_markers,
+        let content_rows = rows.saturating_sub(1) as usize; // Reserve row 1 for topbar
+        let total = buffer.len();
+
+        // Calculate boundary conditions
+        let max_offset = Self::max_offset(total, content_rows);
+        let is_at_bottom = offset == 0;
+        let is_at_top = offset >= max_offset && total > 0;
+
+        // Determine if we need to show markers
+        let show_end = show_boundary_markers && is_at_bottom && total > 0;
+        let show_begin = show_boundary_markers && is_at_top && total > 0;
+
+        // Calculate marker row costs
+        let buffer_fills_viewport = total >= content_rows;
+        let end_cost = if show_end && buffer_fills_viewport {
+            1
+        } else {
+            0
         };
-        Self::render(out, buffer, offset, cols, content_rows, &options, theme)
+        let begin_cost = if show_begin && buffer_fills_viewport {
+            1
+        } else {
+            0
+        };
+        let available_rows = content_rows
+            .saturating_sub(end_cost)
+            .saturating_sub(begin_cost);
+
+        // Get lines to display
+        let (first_visible_line, lines): (usize, Vec<_>) = if show_begin {
+            (1, buffer.get_range(0, available_rows).collect())
+        } else {
+            let first = total
+                .saturating_sub(offset)
+                .saturating_sub(available_rows)
+                .saturating_add(1)
+                .max(1);
+            (
+                first,
+                buffer.get_from_bottom(offset, available_rows).collect(),
+            )
+        };
+
+        // Calculate gutter widths
+        let line_num_width = if show_line_numbers {
+            let max_line = total;
+            let num_width = if max_line == 0 {
+                1
+            } else {
+                (max_line as f64).log10().floor() as usize + 1
+            };
+            num_width.max(4) + 3
+        } else {
+            0
+        };
+        let timestamp_width = if show_timestamps { 7 } else { 0 };
+        let gutter_width = line_num_width + timestamp_width;
+        let content_cols = (cols as usize).saturating_sub(gutter_width);
+
+        let now = std::time::Instant::now();
+
+        // Hide cursor during render
+        write!(out, "\x1b[?25l")?;
+
+        let mut current_row = 2usize; // Start at row 2 (after topbar)
+        let max_row = 2 + content_rows;
+        let mut rendered = 0;
+
+        // Render BEGIN marker if at top
+        if show_begin {
+            write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
+            Self::render_boundary_marker_styled(
+                out,
+                cols as usize,
+                gutter_width,
+                "BEGIN",
+                theme,
+            )?;
+            current_row += 1;
+        }
+
+        for (i, line) in lines.iter().enumerate() {
+            let line_index = first_visible_line + i - 1; // 0-indexed buffer position
+            let line_number = first_visible_line + i;
+
+            // Render command separator if this line is a prompt boundary
+            if !boundary_lines.is_empty()
+                && boundary_lines.binary_search(&line_index).is_ok()
+                && line_index > 0
+            {
+                if current_row >= max_row {
+                    break;
+                }
+                write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
+                Self::render_command_separator(out, cols as usize, gutter_width, theme)?;
+                current_row += 1;
+            }
+
+            if current_row >= max_row {
+                break;
+            }
+
+            // Move to line position and clear
+            write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
+
+            // Render timestamp gutter
+            if show_timestamps {
+                let elapsed = now.duration_since(line.timestamp());
+                let time_str = Self::format_relative_time(elapsed);
+                write!(out, "\x1b[2m{:>4} │ \x1b[22m", time_str)?;
+            }
+
+            // Render line number gutter
+            if show_line_numbers {
+                write!(
+                    out,
+                    "\x1b[2m{:>width$} │ \x1b[22m",
+                    line_number,
+                    width = line_num_width - 3
+                )?;
+            }
+
+            // Write line content
+            write_truncated_content(out, line.content(), content_cols)?;
+
+            if line.is_truncated() {
+                write!(out, "\x1b[7m>\x1b[27m")?;
+            }
+
+            current_row += 1;
+            rendered += 1;
+        }
+
+        // Render END marker if at bottom
+        if show_end && current_row < max_row {
+            write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
+            Self::render_boundary_marker_styled(
+                out,
+                cols as usize,
+                gutter_width,
+                "END",
+                theme,
+            )?;
+            current_row += 1;
+        }
+
+        // Clear remaining rows
+        while current_row < max_row {
+            write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
+            current_row += 1;
+        }
+
+        // Show cursor
+        write!(out, "\x1b[?25h")?;
+        out.flush()?;
+
+        Ok(RenderStats {
+            lines_rendered: rendered,
+            first_visible_line,
+        })
     }
 
     /// Renders scrollback content with search highlighting.
@@ -467,6 +660,7 @@ impl ScrollViewer {
     /// * `show_boundary_markers` - Whether to show BEGIN/END markers
     /// * `search` - Search state with matches to highlight
     /// * `theme` - Theme for highlight colors
+    /// * `boundary_lines` - Sorted prompt line indices for command separators
     #[allow(clippy::too_many_arguments)]
     pub fn render_with_search<W: Write>(
         out: &mut W,
@@ -479,6 +673,7 @@ impl ScrollViewer {
         show_boundary_markers: bool,
         search: &SearchState,
         theme: &Theme,
+        boundary_lines: &[usize],
     ) -> io::Result<RenderStats> {
         let content_rows = rows.saturating_sub(1) as usize; // Reserve row 1 for topbar
         let total = buffer.len();
@@ -545,7 +740,8 @@ impl ScrollViewer {
         // Hide cursor during render
         write!(out, "\x1b[?25l")?;
 
-        let mut current_row = 2; // Start at row 2 (after topbar)
+        let mut current_row = 2usize; // Start at row 2 (after topbar)
+        let max_row = 2 + content_rows;
         let mut rendered = 0;
 
         // Render BEGIN marker if at top (with theme styling)
@@ -567,6 +763,23 @@ impl ScrollViewer {
         for (i, line) in lines.iter().enumerate() {
             let line_index = first_visible_line + i - 1; // Convert to 0-indexed
             let line_number = first_visible_line + i;
+
+            // Render command separator if this line is a prompt boundary
+            if !boundary_lines.is_empty()
+                && boundary_lines.binary_search(&line_index).is_ok()
+                && line_index > 0
+            {
+                if current_row >= max_row {
+                    break;
+                }
+                write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
+                Self::render_command_separator(out, cols as usize, gutter_width, Some(theme))?;
+                current_row += 1;
+            }
+
+            if current_row >= max_row {
+                break;
+            }
 
             // Move to line position
             write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
@@ -618,7 +831,7 @@ impl ScrollViewer {
         }
 
         // Render END marker if at bottom (with theme styling)
-        if show_end {
+        if show_end && current_row < max_row {
             write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
             Self::render_boundary_marker_styled(
                 out,
@@ -631,8 +844,7 @@ impl ScrollViewer {
         }
 
         // Clear remaining rows
-        let start_row = 2;
-        while current_row < start_row + content_rows {
+        while current_row < max_row {
             write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
             current_row += 1;
         }
@@ -1087,6 +1299,7 @@ mod tests {
             false,
             false,
             None,
+            &[],
         )
         .unwrap();
         assert_eq!(stats.lines_rendered, 4);
@@ -1112,6 +1325,7 @@ mod tests {
             false,
             false,
             None,
+            &[],
         )
         .unwrap();
         assert_eq!(stats.lines_rendered, 2);
@@ -1137,6 +1351,7 @@ mod tests {
             false,
             false,
             None,
+            &[],
         )
         .unwrap();
         assert_eq!(stats.first_visible_line, 8);
@@ -1153,6 +1368,7 @@ mod tests {
             false,
             false,
             None,
+            &[],
         )
         .unwrap();
         assert_eq!(stats.first_visible_line, 5);
@@ -1174,6 +1390,7 @@ mod tests {
             false,
             true,
             None,
+            &[],
         )
         .unwrap();
         assert_eq!(stats.lines_rendered, 2);
@@ -1194,6 +1411,7 @@ mod tests {
             false,
             true,
             None,
+            &[],
         )
         .unwrap();
 

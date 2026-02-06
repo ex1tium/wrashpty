@@ -209,6 +209,9 @@ pub struct App {
     scroll_state: crate::types::ScrollState,
     /// Viewer state for scroll view modes and display settings.
     viewer_state: crate::scrollback::ViewerState,
+    /// Optional raw byte dump file for debugging capture issues.
+    /// Enabled by setting WRASHPTY_CAPTURE_RAW=1 environment variable.
+    raw_capture_fd: Option<std::fs::File>,
 }
 
 impl App {
@@ -322,6 +325,15 @@ impl App {
             alt_screen_detector,
             scroll_state: crate::types::ScrollState::Live,
             viewer_state: crate::scrollback::ViewerState::new(),
+            raw_capture_fd: if std::env::var("WRASHPTY_CAPTURE_RAW").is_ok() {
+                std::fs::File::create("/tmp/wrashpty-raw.bin")
+                    .ok()
+                    .inspect(|_| {
+                        info!("Raw capture enabled: /tmp/wrashpty-raw.bin");
+                    })
+            } else {
+                None
+            },
         })
     }
 

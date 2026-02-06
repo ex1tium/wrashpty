@@ -17,13 +17,16 @@ pub struct DisplaySettings {
     pub help_bar: bool,
     /// Enable URL highlighting (default: true).
     pub url_highlighting: bool,
+    /// Show horizontal rule separators at command boundaries (Ctrl+B toggle).
+    pub command_separators: bool,
 }
 
 impl DisplaySettings {
     /// Creates new settings with defaults.
     pub fn new() -> Self {
         Self {
-            url_highlighting: true, // On by default
+            url_highlighting: true,    // On by default
+            command_separators: true,   // On by default
             ..Default::default()
         }
     }
@@ -91,6 +94,16 @@ impl ViewerState {
     pub fn toggle_help_bar(&mut self) {
         self.display.help_bar = !self.display.help_bar;
     }
+
+    /// Returns true if command separators are shown.
+    pub fn show_command_separators(&self) -> bool {
+        self.display.command_separators
+    }
+
+    /// Toggles command separator display.
+    pub fn toggle_command_separators(&mut self) {
+        self.display.command_separators = !self.display.command_separators;
+    }
 }
 
 #[cfg(test)]
@@ -104,6 +117,7 @@ mod tests {
         assert!(!settings.timestamps);
         assert!(!settings.help_bar);
         assert!(settings.url_highlighting); // On by default
+        assert!(settings.command_separators); // On by default
     }
 
     #[test]
