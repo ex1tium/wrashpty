@@ -179,7 +179,7 @@ impl CommandPalettePanel {
                 let desc = value.as_str().unwrap_or("").to_string();
                 self.items.push(CommandItem {
                     name: name.clone(),
-                    description: desc.chars().take(50).collect(),
+                    description: crate::ui::text_width::truncate_to_width(&desc, 50).into_owned(),
                     command: format!("npm run {}", name),
                     source: CommandSource::PackageJson,
                     frecency_score: 60.0,

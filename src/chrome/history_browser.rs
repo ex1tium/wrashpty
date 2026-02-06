@@ -317,16 +317,29 @@ impl HistoryBrowserPanel {
         // Separator with original command hint
         let border_style = Style::default().fg(self.theme.panel_border);
         let orig_hint = format!(" Original: {} ", edit_state.original);
-        let hint_len = orig_hint.chars().count().min(area.width as usize - 4);
-        let truncated_hint: String = orig_hint.chars().take(hint_len).collect();
+        let max_hint_width = (area.width as usize).saturating_sub(4);
+        let truncated_hint: String = crate::ui::text_width::truncate_to_width(&orig_hint, max_hint_width).into_owned();
+        // Collect chars for cell-by-cell rendering
+        let hint_chars: Vec<char> = truncated_hint.chars().collect();
 
+        // Track display column as we write hint chars into cells
+        let mut hint_idx = 0;
+        let mut col_offset: usize = 0;
         for x in chunks[1].x..chunks[1].x + chunks[1].width {
             if let Some(cell) = buffer.cell_mut((x, chunks[1].y)) {
-                let rel_x = (x - chunks[1].x) as usize;
-                if rel_x < truncated_hint.len() {
-                    let ch = truncated_hint.chars().nth(rel_x).unwrap_or('─');
+                if hint_idx < hint_chars.len() {
+                    let ch = hint_chars[hint_idx];
+                    let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
                     cell.set_char(ch);
                     cell.set_style(Style::default().fg(self.theme.text_secondary));
+                    hint_idx += 1;
+                    // For wide characters, skip continuation cells
+                    if ch_w > 1 {
+                        col_offset += ch_w - 1;
+                    }
+                } else if col_offset > 0 {
+                    // Skip continuation cell from previous wide char
+                    col_offset -= 1;
                 } else {
                     cell.set_char('─');
                     cell.set_style(border_style);
@@ -353,11 +366,12 @@ impl HistoryBrowserPanel {
             // superscript (n digits) + ⟦ (1) + text + ⟧ (1) + spacing (3)
             let slot_num = i + 1;
             let superscript_len = slot_num.to_string().len(); // Number of digits
-            let token_width = superscript_len + 1 + display_text.chars().count() + 1 + 3;
+            let text_display_width = crate::ui::text_width::display_width(display_text);
+            let token_width = superscript_len + 1 + text_display_width + 1 + 3;
 
             if i == edit_state.selected {
                 selected_x_end =
-                    selected_x_start + superscript_len + 1 + display_text.chars().count() + 1;
+                    selected_x_start + superscript_len + 1 + text_display_width + 1;
                 break;
             }
             selected_x_start += token_width;
@@ -998,22 +1012,23 @@ impl HistoryBrowserPanel {
             base_style.fg(self.theme.text_primary)
         };
         let cmd_width = cols.command.saturating_sub(1) as usize;
-        let cmd_display = if record.command.chars().count() > cmd_width {
-            let truncated: String = record
-                .command
-                .chars()
-                .take(cmd_width.saturating_sub(3))
-                .collect();
-            format!("{}...", truncated)
+        let cmd_display = if crate::ui::text_width::display_width(&record.command) > cmd_width {
+            crate::ui::text_width::truncate_with_ellipsis(&record.command, cmd_width).into_owned()
         } else {
             record.command.clone()
         };
-        for (i, ch) in cmd_display.chars().enumerate() {
-            if (i as u16) < cols.command {
-                if let Some(cell) = buffer.cell_mut((x + (i as u16), area.y)) {
+        {
+            let mut col: u16 = 0;
+            for ch in cmd_display.chars() {
+                let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+                if col + ch_w > cols.command {
+                    break;
+                }
+                if let Some(cell) = buffer.cell_mut((x + col, area.y)) {
                     cell.set_char(ch);
                     cell.set_style(cmd_style);
                 }
+                col += ch_w;
             }
         }
         x += cols.command;
@@ -1032,14 +1047,18 @@ impl HistoryBrowserPanel {
         // When column
         let time_text = self.format_relative_time(record);
         let time_style = base_style.fg(self.theme.semantic_info);
-        for (i, ch) in format!("{:>5}", time_text)
-            .chars()
-            .take(cols.time as usize - 1)
-            .enumerate()
+        let time_padded = crate::ui::text_width::pad_right_align(&time_text, 5);
         {
-            if let Some(cell) = buffer.cell_mut((x + i as u16, area.y)) {
-                cell.set_char(ch);
-                cell.set_style(time_style);
+            let max_col = cols.time.saturating_sub(1) as usize;
+            let mut col: u16 = 0;
+            for ch in time_padded.chars() {
+                let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+                if (col + ch_w) as usize > max_col { break; }
+                if let Some(cell) = buffer.cell_mut((x + col, area.y)) {
+                    cell.set_char(ch);
+                    cell.set_style(time_style);
+                }
+                col += ch_w;
             }
         }
         x += cols.time;
@@ -1058,14 +1077,18 @@ impl HistoryBrowserPanel {
         // Duration column
         let dur_text = self.format_duration(record);
         let dur_style = base_style.fg(self.theme.git_fg);
-        for (i, ch) in format!("{:>7}", dur_text)
-            .chars()
-            .take(cols.duration as usize - 1)
-            .enumerate()
+        let dur_padded = crate::ui::text_width::pad_right_align(&dur_text, 7);
         {
-            if let Some(cell) = buffer.cell_mut((x + i as u16, area.y)) {
-                cell.set_char(ch);
-                cell.set_style(dur_style);
+            let max_col = cols.duration.saturating_sub(1) as usize;
+            let mut col: u16 = 0;
+            for ch in dur_padded.chars() {
+                let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+                if (col + ch_w) as usize > max_col { break; }
+                if let Some(cell) = buffer.cell_mut((x + col, area.y)) {
+                    cell.set_char(ch);
+                    cell.set_style(dur_style);
+                }
+                col += ch_w;
             }
         }
         x += cols.duration;
@@ -1091,10 +1114,17 @@ impl HistoryBrowserPanel {
             } else {
                 base_style.fg(self.theme.text_secondary)
             };
-            for (i, ch) in count_text.chars().take(cols.count as usize - 1).enumerate() {
-                if let Some(cell) = buffer.cell_mut((x + i as u16, area.y)) {
-                    cell.set_char(ch);
-                    cell.set_style(count_style);
+            {
+                let max_col = cols.count.saturating_sub(1) as usize;
+                let mut col: u16 = 0;
+                for ch in count_text.chars() {
+                    let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+                    if (col + ch_w) as usize > max_col { break; }
+                    if let Some(cell) = buffer.cell_mut((x + col, area.y)) {
+                        cell.set_char(ch);
+                        cell.set_style(count_style);
+                    }
+                    col += ch_w;
                 }
             }
             x += cols.count;
@@ -1114,10 +1144,17 @@ impl HistoryBrowserPanel {
         // Status column (last)
         let (status_text, status_color) = self.format_exit_status(record);
         let status_style = base_style.fg(status_color);
-        for (i, ch) in status_text.chars().take(cols.status as usize).enumerate() {
-            if let Some(cell) = buffer.cell_mut((x + i as u16, area.y)) {
-                cell.set_char(ch);
-                cell.set_style(status_style);
+        {
+            let max_col = cols.status as usize;
+            let mut col: u16 = 0;
+            for ch in status_text.chars() {
+                let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+                if (col + ch_w) as usize > max_col { break; }
+                if let Some(cell) = buffer.cell_mut((x + col, area.y)) {
+                    cell.set_char(ch);
+                    cell.set_style(status_style);
+                }
+                col += ch_w;
             }
         }
     }

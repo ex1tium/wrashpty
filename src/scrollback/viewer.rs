@@ -9,28 +9,121 @@ use super::buffer::ScrollbackBuffer;
 use super::features::{FilterState, SearchState};
 use crate::chrome::theme::Theme;
 
-/// Finds the largest valid UTF-8 boundary <= max_len in content.
+/// Truncates raw byte content (potentially containing ANSI escape sequences)
+/// to fit within `max_display_cols` terminal columns.
 ///
-/// Returns the byte index to safely slice content[..index] without
-/// splitting a multi-byte UTF-8 character.
-fn safe_utf8_truncate(content: &[u8], max_len: usize) -> usize {
-    if max_len >= content.len() {
-        return content.len();
+/// Returns the byte index to safely slice `content[..index]` such that:
+/// - The visible (non-ANSI) display width does not exceed `max_display_cols`
+/// - No multi-byte UTF-8 character is split
+/// - ANSI escape sequences are not counted toward display width
+fn ansi_aware_truncate(content: &[u8], max_display_cols: usize) -> usize {
+    use unicode_width::UnicodeWidthChar;
+
+    fn utf8_sequence_len(first: u8) -> usize {
+        match first {
+            0x00..=0x7F => 1,
+            0xC2..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            0xF0..=0xF4 => 4,
+            _ => 1,
+        }
     }
 
-    // Start from max_len and work backward to find a valid UTF-8 boundary
-    let mut end = max_len;
-    while end > 0 {
-        // Check if this is a valid UTF-8 start byte or ASCII
-        let byte = content[end - 1];
-        if !(0x80..0xC0).contains(&byte) {
-            // ASCII byte or UTF-8 start byte - this is a valid boundary after it
-            break;
+    let mut width: usize = 0;
+    let mut i = 0;
+
+    while i < content.len() {
+        let b = content[i];
+
+        // ESC sequence start - skip entirely (zero display width)
+        if b == 0x1b && i + 1 < content.len() {
+            let next = content[i + 1];
+            if next == b'[' {
+                // CSI: skip until final byte
+                i += 2;
+                while i < content.len() && !(0x40..=0x7E).contains(&content[i]) {
+                    i += 1;
+                }
+                if i < content.len() {
+                    i += 1;
+                }
+                continue;
+            } else if next == b']' {
+                // OSC: skip until BEL or ST
+                i += 2;
+                while i < content.len() {
+                    if content[i] == 0x07 {
+                        i += 1;
+                        break;
+                    }
+                    if content[i] == 0x1b
+                        && i + 1 < content.len()
+                        && content[i + 1] == b'\\'
+                    {
+                        i += 2;
+                        break;
+                    }
+                    i += 1;
+                }
+                continue;
+            } else {
+                i += 2;
+                continue;
+            }
         }
-        // This is a UTF-8 continuation byte (0x80-0xBF), keep going back
-        end -= 1;
+
+        // Tab - assume 8-space tabs
+        if b == 0x09 {
+            let tab_width = 8 - (width % 8);
+            if width + tab_width > max_display_cols {
+                return i;
+            }
+            width += tab_width;
+            i += 1;
+            continue;
+        }
+
+        // Control characters (no width)
+        if b < 0x20 {
+            i += 1;
+            continue;
+        }
+
+        // Decode UTF-8 character and measure display width
+        let expected_len = utf8_sequence_len(b);
+        if expected_len == 1 {
+            let c = b as char;
+            let ch_w = UnicodeWidthChar::width(c).unwrap_or(0);
+            if width + ch_w > max_display_cols {
+                return i;
+            }
+            width += ch_w;
+            i += 1;
+        } else {
+            let end = (i + expected_len).min(content.len());
+            if let Ok(s) = std::str::from_utf8(&content[i..end]) {
+                if let Some(c) = s.chars().next() {
+                    let ch_w = UnicodeWidthChar::width(c).unwrap_or(0);
+                    if width + ch_w > max_display_cols {
+                        return i;
+                    }
+                    width += ch_w;
+                    i += c.len_utf8();
+                } else {
+                    i += 1;
+                }
+            } else {
+                // Invalid UTF-8 - treat as 1-width replacement glyph
+                if width + 1 > max_display_cols {
+                    return i;
+                }
+                width += 1;
+                i += 1;
+            }
+        }
     }
-    end
+
+    content.len()
 }
 
 /// Rendering options for scrollback viewer.
@@ -209,11 +302,8 @@ impl ScrollViewer {
 
             // Write line content
             let content = line.content();
-            if content.len() <= content_cols {
-                out.write_all(content)?;
-            } else {
-                // Truncate to available width, respecting UTF-8 boundaries
-                let safe_len = safe_utf8_truncate(content, content_cols);
+            {
+                let safe_len = ansi_aware_truncate(content, content_cols);
                 out.write_all(&content[..safe_len])?;
             }
 
@@ -297,8 +387,8 @@ impl ScrollViewer {
 
         // Build marker: "─────── LABEL ───────"
         let label_with_spaces = format!(" {} ", label);
-        let label_len = label_with_spaces.len();
-        let dashes_total = content_cols.saturating_sub(label_len);
+        let label_width = crate::ui::text_width::display_width(&label_with_spaces);
+        let dashes_total = content_cols.saturating_sub(label_width);
         let dashes_left = dashes_total / 2;
         let dashes_right = dashes_total - dashes_left;
 
@@ -518,11 +608,8 @@ impl ScrollViewer {
             if line_matches.is_empty() {
                 // No matches - render line normally
                 let content = line.content();
-                if content.len() <= content_cols {
-                    out.write_all(content)?;
-                } else {
-                    // Truncate respecting UTF-8 boundaries
-                    let safe_len = safe_utf8_truncate(content, content_cols);
+                {
+                    let safe_len = ansi_aware_truncate(content, content_cols);
                     out.write_all(&content[..safe_len])?;
                 }
             } else {
@@ -589,7 +676,8 @@ impl ScrollViewer {
     ) -> io::Result<()> {
         use crate::chrome::segments::color_to_bg_ansi;
 
-        let truncated = &content[..content.len().min(max_cols)];
+        let truncate_len = ansi_aware_truncate(content, max_cols);
+        let truncated = &content[..truncate_len];
         let content_str = String::from_utf8_lossy(truncated);
         let mut pos = 0;
 
@@ -720,11 +808,8 @@ impl ScrollViewer {
 
             // Write line content
             let content = line.content();
-            if content.len() <= content_cols {
-                out.write_all(content)?;
-            } else {
-                // Truncate respecting UTF-8 boundaries
-                let safe_len = safe_utf8_truncate(content, content_cols);
+            {
+                let safe_len = ansi_aware_truncate(content, content_cols);
                 out.write_all(&content[..safe_len])?;
             }
 
@@ -850,11 +935,8 @@ impl ScrollViewer {
             if line_matches.is_empty() {
                 // No matches - render line normally
                 let content = line.content();
-                if content.len() <= content_cols {
-                    out.write_all(content)?;
-                } else {
-                    // Truncate respecting UTF-8 boundaries
-                    let safe_len = safe_utf8_truncate(content, content_cols);
+                {
+                    let safe_len = ansi_aware_truncate(content, content_cols);
                     out.write_all(&content[..safe_len])?;
                 }
             } else {
@@ -1126,5 +1208,59 @@ mod tests {
         let output_str = String::from_utf8_lossy(&output);
         // When buffer is smaller than viewport, BEGIN should show at top
         assert!(output_str.contains("BEGIN"), "Should contain BEGIN marker");
+    }
+
+    // ─── Unicode truncation regression tests ────────────────────────
+
+    #[test]
+    fn test_ansi_aware_truncate_ascii() {
+        let content = b"hello world";
+        assert_eq!(ansi_aware_truncate(content, 5), 5);
+        assert_eq!(ansi_aware_truncate(content, 100), 11);
+    }
+
+    #[test]
+    fn test_ansi_aware_truncate_skips_ansi_sequences() {
+        // "\x1b[31m" (red) + "hi" + "\x1b[0m" (reset) = 2 display cols
+        let content = b"\x1b[31mhi\x1b[0m";
+        // Truncating to 2 display cols should include everything
+        assert_eq!(ansi_aware_truncate(content, 2), content.len());
+        // Truncating to 1 display col should include the ANSI intro + "h"
+        let len = ansi_aware_truncate(content, 1);
+        assert_eq!(&content[..len], b"\x1b[31mh");
+    }
+
+    #[test]
+    fn test_ansi_aware_truncate_wide_chars() {
+        // "你好" = 6 bytes, 4 display cols
+        let content = "你好".as_bytes();
+        assert_eq!(ansi_aware_truncate(content, 4), 6);
+        // Truncating to 3 cols should only include "你" (2 cols, 3 bytes)
+        assert_eq!(ansi_aware_truncate(content, 3), 3);
+        // Truncating to 2 cols exactly fits "你"
+        assert_eq!(ansi_aware_truncate(content, 2), 3);
+        // Truncating to 1 col can't fit "你" (width 2), so 0 bytes
+        assert_eq!(ansi_aware_truncate(content, 1), 0);
+    }
+
+    #[test]
+    fn test_ansi_aware_truncate_mixed_ansi_and_wide() {
+        // "\x1b[31m" + "你" + "\x1b[0m" + "a" = 3 display cols
+        let content = "\x1b[31m你\x1b[0ma".as_bytes();
+        // All 3 cols
+        assert_eq!(ansi_aware_truncate(content, 3), content.len());
+        // 2 cols = ANSI + "你" + reset
+        assert_eq!(ansi_aware_truncate(content, 2), "\x1b[31m你\x1b[0m".len());
+    }
+
+    #[test]
+    fn test_render_with_cjk_content_no_panic() {
+        let buffer = create_test_buffer(&["hello", "你好世界", "mixed混合content"]);
+        let mut output = Vec::new();
+        let options = RenderOptions::default();
+
+        // Should not panic even with narrow viewport
+        let stats = ScrollViewer::render(&mut output, &buffer, 0, 10, 3, &options, None).unwrap();
+        assert_eq!(stats.lines_rendered, 3);
     }
 }

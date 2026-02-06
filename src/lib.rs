@@ -15,6 +15,7 @@ pub mod safety;
 pub mod scrollback;
 pub mod terminal;
 pub mod types;
+pub mod ui;
 
 // Application modules - public for binary crate access
 pub mod app;

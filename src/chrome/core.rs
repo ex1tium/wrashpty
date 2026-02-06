@@ -129,8 +129,8 @@ pub struct Chrome {
 
 /// Truncates a string to fit within the specified display width.
 ///
-/// Handles Unicode characters correctly by using display width rather
-/// than byte or character count.
+/// Uses the same char-index logic as [`crate::ui::text_width::truncate_to_width`]
+/// but returns a borrowed `&str` for zero-cost use in format strings.
 fn truncate_to_width(s: &str, max_width: usize) -> &str {
     let mut current_width = 0;
     let mut last_valid_idx = 0;
