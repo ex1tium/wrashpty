@@ -6,7 +6,7 @@
 /// State machine for parsing terminal output into lines.
 ///
 /// Handles:
-/// - CR (\r) - Carriage return, resets column position
+/// - CR (\r) - Carriage return for in-place line rewrite
 /// - LF (\n) - Line feed, completes a line
 /// - CRLF (\r\n) - Windows-style line ending
 /// - Line wrapping when column exceeds terminal width
@@ -21,6 +21,8 @@ pub struct CaptureState {
     terminal_width: u16,
     /// State for escape sequence parsing.
     escape_state: EscapeState,
+    /// Whether the previous byte was CR and needs disambiguation from CRLF.
+    pending_cr: bool,
 }
 
 /// State for tracking escape sequence parsing.
@@ -44,6 +46,7 @@ impl CaptureState {
             column: 0,
             terminal_width: terminal_width.max(1),
             escape_state: EscapeState::Normal,
+            pending_cr: false,
         }
     }
 
@@ -91,12 +94,29 @@ impl CaptureState {
             let line = std::mem::take(&mut self.partial_line);
             self.column = 0;
             self.escape_state = EscapeState::Normal;
+            self.pending_cr = false;
             Some(line)
         }
     }
 
     /// Processes a single byte, returning a completed line if one is ready.
     fn process_byte(&mut self, b: u8) -> Option<Vec<u8>> {
+        if self.pending_cr {
+            self.pending_cr = false;
+
+            // CRLF: complete current line.
+            if b == 0x0a {
+                let line = std::mem::take(&mut self.partial_line);
+                self.column = 0;
+                return Some(line);
+            }
+
+            // Standalone CR: command rewrote the current line in-place.
+            // Keep only the latest frame to avoid progress-line artifacts.
+            self.partial_line.clear();
+            self.column = 0;
+        }
+
         match self.escape_state {
             EscapeState::Normal => self.process_normal(b),
             EscapeState::EscSeen => self.process_esc_seen(b),
@@ -122,10 +142,10 @@ impl CaptureState {
             }
             // CR - carriage return
             0x0d => {
-                // CR typically resets column, we include it in the line
-                // but don't count it towards display width
-                self.partial_line.push(b);
-                self.column = 0;
+                // Defer handling until we see the next byte:
+                // - if next is LF => CRLF newline
+                // - otherwise => standalone CR (in-place rewrite)
+                self.pending_cr = true;
                 None
             }
             // TAB - advance column to next tab stop
@@ -291,8 +311,23 @@ mod tests {
         let mut state = CaptureState::new(80);
         let lines: Vec<_> = state.feed(b"hello\r\n").collect();
         assert_eq!(lines.len(), 1);
-        // CR is included in the line content
-        assert_eq!(lines[0], b"hello\r");
+        assert_eq!(lines[0], b"hello");
+    }
+
+    #[test]
+    fn test_standalone_cr_rewrites_current_line() {
+        let mut state = CaptureState::new(80);
+        let lines: Vec<_> = state.feed(b"abc\rxy\n").collect();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0], b"xy");
+    }
+
+    #[test]
+    fn test_progress_updates_keep_latest_frame() {
+        let mut state = CaptureState::new(120);
+        let lines: Vec<_> = state.feed(b"10%\r20%\r30%\n").collect();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0], b"30%");
     }
 
     #[test]
