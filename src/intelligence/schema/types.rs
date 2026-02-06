@@ -17,7 +17,7 @@ pub enum SchemaSource {
 }
 
 /// Value type for flags and arguments.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ValueType {
     /// Boolean flag (no value)
     Bool,
@@ -38,13 +38,8 @@ pub enum ValueType {
     /// One of specific choices
     Choice(Vec<String>),
     /// Unknown/any type
+    #[default]
     Any,
-}
-
-impl Default for ValueType {
-    fn default() -> Self {
-        Self::Any
-    }
 }
 
 /// Schema for a command flag.
@@ -111,7 +106,8 @@ impl FlagSchema {
 
     /// Returns the canonical name (long form preferred).
     pub fn canonical_name(&self) -> &str {
-        self.long.as_deref()
+        self.long
+            .as_deref()
             .or(self.short.as_deref())
             .unwrap_or("unknown")
     }
@@ -246,7 +242,9 @@ impl CommandSchema {
 
     /// Finds a subcommand by name.
     pub fn find_subcommand(&self, name: &str) -> Option<&SubcommandSchema> {
-        self.subcommands.iter().find(|s| s.name == name || s.aliases.contains(&name.to_string()))
+        self.subcommands
+            .iter()
+            .find(|s| s.name == name || s.aliases.contains(&name.to_string()))
     }
 
     /// Finds a global flag by short or long form.

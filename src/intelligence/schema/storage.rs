@@ -1,6 +1,6 @@
 //! Schema storage and retrieval from SQLite database.
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use tracing::{debug, info};
 
 use super::types::{CommandSchema, SchemaSource, SubcommandSchema};
@@ -66,13 +66,7 @@ impl<'a> SchemaStore<'a> {
             "INSERT OR REPLACE INTO ci_command_schemas
              (command, subcommand, schema_json, source, confidence, extracted_at)
              VALUES (?1, NULL, ?2, ?3, ?4, ?5)",
-            rusqlite::params![
-                schema.command,
-                schema_json,
-                source,
-                schema.confidence,
-                now,
-            ],
+            rusqlite::params![schema.command, schema_json, source, schema.confidence, now,],
         )?;
 
         // Store each subcommand schema separately for quick lookup
@@ -139,14 +133,15 @@ impl<'a> SchemaStore<'a> {
 
     /// Retrieves a command schema.
     pub fn get(&self, command: &str) -> Result<Option<CommandSchema>, CIError> {
-        let result: Option<String> = self.conn
+        let result: Option<String> = self
+            .conn
             .query_row(
                 "SELECT schema_json FROM ci_command_schemas
                  WHERE command = ?1 AND subcommand IS NULL",
                 [command],
                 |row| row.get(0),
             )
-            .ok();
+            .optional()?;
 
         match result {
             Some(json) => {
@@ -159,15 +154,20 @@ impl<'a> SchemaStore<'a> {
     }
 
     /// Retrieves a subcommand schema.
-    pub fn get_subcommand(&self, command: &str, subcommand: &str) -> Result<Option<SubcommandSchema>, CIError> {
-        let result: Option<String> = self.conn
+    pub fn get_subcommand(
+        &self,
+        command: &str,
+        subcommand: &str,
+    ) -> Result<Option<SubcommandSchema>, CIError> {
+        let result: Option<String> = self
+            .conn
             .query_row(
                 "SELECT schema_json FROM ci_command_schemas
                  WHERE command = ?1 AND subcommand = ?2",
                 [command, subcommand],
                 |row| row.get(0),
             )
-            .ok();
+            .optional()?;
 
         match result {
             Some(json) => {
@@ -181,9 +181,9 @@ impl<'a> SchemaStore<'a> {
 
     /// Lists all stored command names.
     pub fn list_commands(&self) -> Result<Vec<String>, CIError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT command FROM ci_command_schemas ORDER BY command"
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT command FROM ci_command_schemas ORDER BY command")?;
 
         let rows = stmt.query_map([], |row| row.get(0))?;
 
@@ -200,7 +200,7 @@ impl<'a> SchemaStore<'a> {
         let mut stmt = self.conn.prepare(
             "SELECT subcommand FROM ci_command_schemas
              WHERE command = ?1 AND subcommand IS NOT NULL
-             ORDER BY subcommand"
+             ORDER BY subcommand",
         )?;
 
         let rows = stmt.query_map([command], |row| row.get(0))?;
@@ -233,19 +233,27 @@ impl<'a> SchemaStore<'a> {
             |row| row.get(0),
         )?;
 
-        let confidence: f64 = self.conn.query_row(
-            "SELECT confidence FROM ci_command_schemas
-             WHERE command = ?1 AND subcommand IS NULL",
-            [command],
-            |row| row.get(0),
-        ).unwrap_or(0.0);
+        let confidence: f64 = self
+            .conn
+            .query_row(
+                "SELECT confidence FROM ci_command_schemas
+                 WHERE command = ?1 AND subcommand IS NULL",
+                [command],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(0.0);
 
-        let source: String = self.conn.query_row(
-            "SELECT source FROM ci_command_schemas
-             WHERE command = ?1 AND subcommand IS NULL",
-            [command],
-            |row| row.get(0),
-        ).unwrap_or_else(|_| "unknown".to_string());
+        let source: String = self
+            .conn
+            .query_row(
+                "SELECT source FROM ci_command_schemas
+                 WHERE command = ?1 AND subcommand IS NULL",
+                [command],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or_else(|| "unknown".to_string());
 
         Ok(SchemaStats {
             command: command.to_string(),
@@ -262,7 +270,11 @@ impl<'a> SchemaStore<'a> {
             [command],
         )?;
 
-        info!(command = command, deleted = deleted, "Deleted command schemas");
+        info!(
+            command = command,
+            deleted = deleted,
+            "Deleted command schemas"
+        );
         Ok(deleted)
     }
 }
@@ -308,7 +320,9 @@ mod tests {
         let store = SchemaStore::new(&conn);
 
         let mut schema = CommandSchema::new("testcmd", SchemaSource::Bootstrap);
-        schema.global_flags.push(FlagSchema::boolean(Some("-v"), Some("--verbose")));
+        schema
+            .global_flags
+            .push(FlagSchema::boolean(Some("-v"), Some("--verbose")));
         schema.subcommands.push(SubcommandSchema::new("build"));
         schema.subcommands.push(SubcommandSchema::new("run"));
 
@@ -327,7 +341,11 @@ mod tests {
 
         let mut schema = CommandSchema::new("git", SchemaSource::Bootstrap);
         let mut commit = SubcommandSchema::new("commit");
-        commit.flags.push(FlagSchema::with_value(Some("-m"), Some("--message"), ValueType::String));
+        commit.flags.push(FlagSchema::with_value(
+            Some("-m"),
+            Some("--message"),
+            ValueType::String,
+        ));
         schema.subcommands.push(commit);
 
         store.store(&schema).unwrap();
@@ -342,9 +360,15 @@ mod tests {
         let conn = setup_test_db();
         let store = SchemaStore::new(&conn);
 
-        store.store(&CommandSchema::new("git", SchemaSource::Bootstrap)).unwrap();
-        store.store(&CommandSchema::new("docker", SchemaSource::Bootstrap)).unwrap();
-        store.store(&CommandSchema::new("cargo", SchemaSource::Bootstrap)).unwrap();
+        store
+            .store(&CommandSchema::new("git", SchemaSource::Bootstrap))
+            .unwrap();
+        store
+            .store(&CommandSchema::new("docker", SchemaSource::Bootstrap))
+            .unwrap();
+        store
+            .store(&CommandSchema::new("cargo", SchemaSource::Bootstrap))
+            .unwrap();
 
         let commands = store.list_commands().unwrap();
         assert_eq!(commands.len(), 3);
@@ -359,7 +383,9 @@ mod tests {
 
         assert!(!store.has_schema("git"));
 
-        store.store(&CommandSchema::new("git", SchemaSource::Bootstrap)).unwrap();
+        store
+            .store(&CommandSchema::new("git", SchemaSource::Bootstrap))
+            .unwrap();
 
         assert!(store.has_schema("git"));
         assert!(!store.has_schema("nonexistent"));

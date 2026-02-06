@@ -42,7 +42,13 @@ pub fn learn_pipe_chains(
 
         // First token after pipe is the pipe command
         let pipe_command = &post_pipe[0];
-        let pipe_command_id = super::get_or_create_token(conn, token_cache, &pipe_command.text, pipe_command.token_type, timestamp)?;
+        let pipe_command_id = super::get_or_create_token(
+            conn,
+            token_cache,
+            &pipe_command.text,
+            pipe_command.token_type,
+            timestamp,
+        )?;
 
         // Full post-pipe chain
         let full_chain: String = post_pipe
@@ -95,7 +101,7 @@ pub fn query_pipe_chains(
              JOIN ci_tokens t ON t.id = p.pipe_command_id
              WHERE p.pre_pipe_base_cmd_id = ?1
              ORDER BY p.frequency DESC
-             LIMIT ?2"
+             LIMIT ?2",
         )?
     } else {
         // Fallback: query all pipe chains
@@ -105,21 +111,29 @@ pub fn query_pipe_chains(
              JOIN ci_tokens t ON t.id = p.pipe_command_id
              GROUP BY t.text
              ORDER BY total_freq DESC
-             LIMIT ?1"
+             LIMIT ?1",
         )?
     };
 
     let mut results = Vec::new();
     if let Some(base_id) = base_id {
         let rows = stmt.query_map(rusqlite::params![base_id, limit], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?, row.get::<_, i64>(2)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u32>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
         })?;
         for row in rows.flatten() {
             results.push(row);
         }
     } else {
         let rows = stmt.query_map(rusqlite::params![limit], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?, row.get::<_, i64>(2)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u32>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
         })?;
         for row in rows.flatten() {
             results.push(row);
@@ -161,7 +175,7 @@ pub fn query_full_chain(
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     use crate::intelligence::db_schema;
     use crate::intelligence::tokenizer::analyze_command;
 
@@ -186,11 +200,9 @@ mod tests {
         let tokens = analyze_command("cat file.txt | grep test | wc -l");
         learn_pipe_chains(&conn, &mut cache, &tokens, Some(1), now).unwrap();
 
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM ci_pipe_chains",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM ci_pipe_chains", [], |row| row.get(0))
+            .unwrap();
         // Should have 2 pipe transitions: cat->grep, grep->wc
         assert_eq!(count, 2);
     }

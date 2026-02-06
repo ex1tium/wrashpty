@@ -86,7 +86,10 @@ impl SuggestionSource {
         match self {
             Self::UserPattern | Self::UserAlias => 2.0,
             Self::SessionTransition => 1.5,
-            Self::LearnedHierarchy | Self::LearnedSequence | Self::LearnedPipe | Self::LearnedFlagValue => 1.2,
+            Self::LearnedHierarchy
+            | Self::LearnedSequence
+            | Self::LearnedPipe
+            | Self::LearnedFlagValue => 1.2,
             Self::Template | Self::FuzzySearch | Self::HistoricalFrequency => 1.0,
         }
     }

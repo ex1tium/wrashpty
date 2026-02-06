@@ -1,6 +1,6 @@
 //! Enhanced token analysis for the Command Intelligence Engine.
 
-use crate::chrome::command_edit::{tokenize_command, TokenType};
+use crate::chrome::command_edit::{TokenType, tokenize_command};
 
 use super::types::{AnalyzedToken, PositionType};
 
@@ -51,9 +51,7 @@ pub fn determine_position_type(
         // Common flags that expect values
         let flag = &last_token.text;
         if flag_expects_value(flag, base_command) {
-            return PositionType::FlagValue {
-                flag: flag.clone(),
-            };
+            return PositionType::FlagValue { flag: flag.clone() };
         }
     }
 
@@ -76,10 +74,30 @@ pub fn determine_position_type(
 pub fn flag_expects_value(flag: &str, base_command: Option<&str>) -> bool {
     // Common flags that always expect values
     let common_value_flags = [
-        "-o", "-f", "-i", "-c", "-n", "-m", "-p", "-t", "-u", "-d",
-        "--output", "--file", "--input", "--config", "--name", "--message",
-        "--port", "--target", "--user", "--directory", "--format",
-        "--filter", "--branch", "--remote",
+        "-o",
+        "-f",
+        "-i",
+        "-c",
+        "-n",
+        "-m",
+        "-p",
+        "-t",
+        "-u",
+        "-d",
+        "--output",
+        "--file",
+        "--input",
+        "--config",
+        "--name",
+        "--message",
+        "--port",
+        "--target",
+        "--user",
+        "--directory",
+        "--format",
+        "--filter",
+        "--branch",
+        "--remote",
     ];
 
     if common_value_flags.contains(&flag) {
@@ -118,7 +136,8 @@ pub fn flag_expects_value(flag: &str, base_command: Option<&str>) -> bool {
 pub fn is_compound_command(cmd: &str) -> bool {
     matches!(
         cmd,
-        "git" | "docker"
+        "git"
+            | "docker"
             | "kubectl"
             | "cargo"
             | "npm"
@@ -354,7 +373,10 @@ mod tests {
         assert_eq!(detect_value_type("8080:80"), Some("port_mapping"));
         assert_eq!(detect_value_type("/path/to/file"), Some("path"));
         assert_eq!(detect_value_type("https://example.com"), Some("url"));
-        assert_eq!(detect_value_type("git@github.com:user/repo"), Some("git_url"));
+        assert_eq!(
+            detect_value_type("git@github.com:user/repo"),
+            Some("git_url")
+        );
     }
 
     #[test]

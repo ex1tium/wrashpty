@@ -130,12 +130,12 @@ pub static FALLBACK_SYMBOLS: Symbols = Symbols {
     failure: "\u{2717}", // ✗ (ballot x)
 
     // Git
-    git_branch: "",    // No icon, text-only
+    git_branch: "",        // No icon, text-only
     git_dirty: "\u{25cf}", // ● (black circle)
 
     // Directory
-    folder: "",      // No icon
-    home: "~",       // Tilde for home
+    folder: "", // No icon
+    home: "~",  // Tilde for home
 
     // Time
     clock: "",     // No icon

@@ -38,7 +38,10 @@ use super::variants;
 /// When an individual entry fails to process, the sync continues but only
 /// advances `last_sync_id` up to the last successfully processed entry.
 /// This ensures that failed entries can be retried on the next sync attempt.
-pub fn sync_from_reedline(conn: &Connection, last_sync_id: i64) -> Result<(SyncStats, i64), CIError> {
+pub fn sync_from_reedline(
+    conn: &Connection,
+    last_sync_id: i64,
+) -> Result<(SyncStats, i64), CIError> {
     let start = std::time::Instant::now();
     let mut stats = SyncStats::default();
     let mut token_cache: HashMap<String, i64> = HashMap::new();
@@ -49,7 +52,7 @@ pub fn sync_from_reedline(conn: &Connection, last_sync_id: i64) -> Result<(SyncS
          FROM history
          WHERE id > ?1
          ORDER BY id ASC
-         LIMIT 1000"
+         LIMIT 1000",
     )?;
 
     // Use current timestamp as fallback for entries missing start_timestamp
@@ -204,7 +207,8 @@ fn process_entry(
     let now = entry.timestamp;
 
     for token in &tokens {
-        let token_id = patterns::get_or_create_token(conn, token_cache, &token.text, token.token_type, now)?;
+        let token_id =
+            patterns::get_or_create_token(conn, token_cache, &token.text, token.token_type, now)?;
         token_ids.push(token_id);
         stats.tokens_extracted += 1;
     }
@@ -308,7 +312,12 @@ fn count_flag_value_pairs(tokens: &[super::types::AnalyzedToken]) -> usize {
         if next.token_type == TokenType::Flag {
             continue;
         }
-        if next.text == "|" || next.text == ">" || next.text == ">>" || next.text == "<" || next.text.ends_with('|') {
+        if next.text == "|"
+            || next.text == ">"
+            || next.text == ">>"
+            || next.text == "<"
+            || next.text.ends_with('|')
+        {
             continue;
         }
         count += 1;
@@ -333,7 +342,8 @@ mod tests {
                 cwd TEXT
             )",
             [],
-        ).unwrap();
+        )
+        .unwrap();
 
         // Create intelligence schema
         super::super::db_schema::create_schema(&conn).unwrap();
@@ -358,7 +368,8 @@ mod tests {
             "INSERT INTO history (command_line, start_timestamp, exit_status, cwd)
              VALUES ('git commit -m test', 1700000000000, 0, '/home/user')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
 
         let (stats, _) = sync_from_reedline(&conn, 0).unwrap();
         assert_eq!(stats.commands_processed, 1);
@@ -371,17 +382,33 @@ mod tests {
         let mut cache = HashMap::new();
         let now = chrono::Utc::now().timestamp();
 
-        let id1 = patterns::get_or_create_token(&conn, &mut cache, "git", crate::chrome::command_edit::TokenType::Command, now).unwrap();
-        let id2 = patterns::get_or_create_token(&conn, &mut cache, "git", crate::chrome::command_edit::TokenType::Command, now).unwrap();
+        let id1 = patterns::get_or_create_token(
+            &conn,
+            &mut cache,
+            "git",
+            crate::chrome::command_edit::TokenType::Command,
+            now,
+        )
+        .unwrap();
+        let id2 = patterns::get_or_create_token(
+            &conn,
+            &mut cache,
+            "git",
+            crate::chrome::command_edit::TokenType::Command,
+            now,
+        )
+        .unwrap();
 
         assert_eq!(id1, id2);
 
         // Check frequency was incremented
-        let freq: i32 = conn.query_row(
-            "SELECT frequency FROM ci_tokens WHERE id = ?1",
-            [id1],
-            |row| row.get(0),
-        ).unwrap();
+        let freq: i32 = conn
+            .query_row(
+                "SELECT frequency FROM ci_tokens WHERE id = ?1",
+                [id1],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(freq, 2);
     }
 
@@ -394,17 +421,20 @@ mod tests {
             "INSERT INTO history (id, command_line, start_timestamp, exit_status, cwd)
              VALUES (1, 'git status', 1700000000000, 0, '/home/user')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO history (id, command_line, start_timestamp, exit_status, cwd)
              VALUES (2, 'git add .', 1700000001000, 0, '/home/user')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO history (id, command_line, start_timestamp, exit_status, cwd)
              VALUES (3, 'git commit -m test', 1700000002000, 0, '/home/user')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
 
         // First sync should process all entries
         let (stats, last_id) = sync_from_reedline(&conn, 0).unwrap();
@@ -420,7 +450,8 @@ mod tests {
             "INSERT INTO history (id, command_line, start_timestamp, exit_status, cwd)
              VALUES (4, 'git push', 1700000003000, 0, '/home/user')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
 
         // Second sync should only process the new entry
         let (stats, last_id) = sync_from_reedline(&conn, 3).unwrap();
@@ -437,21 +468,24 @@ mod tests {
             "INSERT INTO history (id, command_line, start_timestamp, exit_status, cwd)
              VALUES (1, 'git status', 1700000000000, 0, '/home/user')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
 
         // Insert an empty command (which will be skipped but not counted as an error)
         conn.execute(
             "INSERT INTO history (id, command_line, start_timestamp, exit_status, cwd)
              VALUES (2, '   ', 1700000001000, 0, '/home/user')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
 
         // Insert another valid entry
         conn.execute(
             "INSERT INTO history (id, command_line, start_timestamp, exit_status, cwd)
              VALUES (3, 'git commit -m test', 1700000002000, 0, '/home/user')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
 
         // Sync should process 2 entries (empty command is silently skipped)
         let (_stats, last_id) = sync_from_reedline(&conn, 0).unwrap();
@@ -483,29 +517,38 @@ mod tests {
         assert!(stats.hierarchy_learned > 0, "Hierarchy should be populated");
 
         // Verify hierarchy table has entries
-        let hierarchy_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM ci_command_hierarchy",
-            [],
-            |row| row.get(0),
-        ).unwrap();
-        assert!(hierarchy_count >= 5, "Expected at least 5 hierarchy entries for 'git remote add origin <url>'");
+        let hierarchy_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM ci_command_hierarchy", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert!(
+            hierarchy_count >= 5,
+            "Expected at least 5 hierarchy entries for 'git remote add origin <url>'"
+        );
 
         // Verify we can query suggestions from the hierarchy
-        let git_id: i64 = conn.query_row(
-            "SELECT id FROM ci_tokens WHERE text = 'git'",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let git_id: i64 = conn
+            .query_row("SELECT id FROM ci_tokens WHERE text = 'git'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
 
-        let subcommands: Vec<String> = conn.prepare(
-            "SELECT t.text FROM ci_command_hierarchy h
+        let subcommands: Vec<String> = conn
+            .prepare(
+                "SELECT t.text FROM ci_command_hierarchy h
              JOIN ci_tokens t ON t.id = h.token_id
-             WHERE h.position = 1 AND h.parent_token_id = ?1"
-        ).unwrap()
-        .query_map([git_id], |row| row.get(0)).unwrap()
-        .filter_map(|r| r.ok())
-        .collect();
+             WHERE h.position = 1 AND h.parent_token_id = ?1",
+            )
+            .unwrap()
+            .query_map([git_id], |row| row.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
 
-        assert!(subcommands.contains(&"remote".to_string()), "Should find 'remote' as git subcommand");
+        assert!(
+            subcommands.contains(&"remote".to_string()),
+            "Should find 'remote' as git subcommand"
+        );
     }
 }

@@ -31,19 +31,18 @@
 //! processed sequentially to handle transitions correctly.
 
 use std::io::Write;
-use std::os::unix::io::{AsRawFd, BorrowedFd, RawFd};
+use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event};
-use nix::poll::{PollFd, PollFlags, poll};
-use nix::unistd::read;
 use portable_pty::ExitStatus;
 use ratatui_core::buffer::Buffer;
 use ratatui_core::layout::Rect;
@@ -51,7 +50,7 @@ use tracing::{debug, info, warn};
 
 use crate::chrome::panel::{Panel, PanelResult};
 use crate::chrome::tabbed_panel::TabbedPanel;
-use crate::chrome::{Chrome, ChromeContext, NotificationStyle, SizeCheckResult};
+use crate::chrome::{Chrome, NotificationStyle, SizeCheckResult};
 use crate::config::Config;
 use crate::editor::{Editor, EditorResult};
 use crate::history_store::HistoryStore;
@@ -60,13 +59,19 @@ use crate::pty::Pty;
 use crate::pump::{Pump, PumpResult};
 use crate::signals::SignalHandler;
 use crate::terminal::TerminalGuard;
-use crate::types::{ChromeMode, MarkerEvent, Mode, SignalEvent};
+use crate::types::{ChromeMode, MarkerEvent, Mode};
+
+mod drain;
+mod scroll_view;
+mod transitions;
+
+use drain::{DRAIN_CHANNEL_CAPACITY, DrainGuard, DrainResult, pty_drain_loop};
 
 /// Extracts the actual exit code from an ExitStatus.
 ///
 /// Returns the shell's exit code (0-255). On Unix, if the process was
 /// terminated by a signal, the code is typically 128 + signal_number.
-fn exit_code_from_status(status: &ExitStatus) -> i32 {
+pub(super) fn exit_code_from_status(status: &ExitStatus) -> i32 {
     status.exit_code() as i32
 }
 
@@ -85,39 +90,37 @@ const INJECTION_TIMEOUT: Duration = Duration::from_millis(500);
 /// trigger the 500ms timeout path even when no PTY data arrives.
 const INJECTION_POLL_TIMEOUT: Duration = Duration::from_millis(50);
 
-/// Poll interval for background PTY drain during Edit mode (milliseconds).
-const EDIT_MODE_DRAIN_POLL_MS: i32 = 50;
+/// Creates a secure raw-capture file when `WRASHPTY_CAPTURE_RAW` is enabled.
+fn create_raw_capture_file() -> Result<(std::fs::File, PathBuf)> {
+    let temp_dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
 
-/// Buffer size for background PTY drain reads.
-const DRAIN_BUFFER_SIZE: usize = 4096;
+    for attempt in 0..16 {
+        let path = temp_dir.join(format!("wrashpty-raw-{pid}-{seed}-{attempt}.bin"));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+        {
+            Ok(file) => return Ok((file, path)),
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!("Failed to create raw capture file at {}", path.display())
+                });
+            }
+        }
+    }
 
-/// Maximum number of drain results to buffer in the channel.
-/// With 4KB per chunk, this caps memory at ~16MB for the channel.
-/// This accommodates verbose background jobs (builds, find, logs) while
-/// still preventing OOM from runaway output. When full, newest chunks
-/// are dropped to prevent blocking PTY reads.
-const DRAIN_CHANNEL_CAPACITY: usize = 4096;
-
-/// Result from the background PTY drain thread.
-struct DrainResult {
-    /// Bytes read from the PTY.
-    bytes: Vec<u8>,
-    /// Whether EOF was detected.
-    eof: bool,
-    /// Number of bytes dropped due to channel backpressure before this chunk.
-    dropped_bytes: usize,
-}
-
-/// RAII guard for the background PTY drain thread.
-///
-/// Ensures the drain thread is stopped and joined on all exit paths,
-/// including when `read_line` returns an error. This prevents leaking
-/// a live PTY reader thread.
-struct DrainGuard {
-    /// Flag to signal the drain thread to stop.
-    stop_flag: Arc<AtomicBool>,
-    /// Handle to the drain thread (Option to allow taking in drop).
-    handle: Option<JoinHandle<()>>,
+    anyhow::bail!(
+        "Failed to create unique raw capture file in {}",
+        temp_dir.display()
+    );
 }
 
 /// RAII guard for cursor visibility.
@@ -147,132 +150,6 @@ impl Drop for CursorGuard {
         use std::io::Write;
         let _ = write!(out, "{}", crossterm::cursor::Show);
         let _ = out.flush();
-    }
-}
-
-impl DrainGuard {
-    /// Creates a new drain guard with the given stop flag and thread handle.
-    fn new(stop_flag: Arc<AtomicBool>, handle: JoinHandle<()>) -> Self {
-        Self {
-            stop_flag,
-            handle: Some(handle),
-        }
-    }
-
-    /// Stops the drain thread and waits for it to finish.
-    ///
-    /// This is called automatically on drop, but can be called explicitly
-    /// if you need to ensure the thread is stopped before proceeding.
-    fn stop(&mut self) {
-        self.stop_flag.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
-    }
-}
-
-impl Drop for DrainGuard {
-    fn drop(&mut self) {
-        self.stop();
-    }
-}
-
-/// Background PTY drain loop that runs while reedline blocks on input.
-///
-/// This function continuously polls the PTY and reads any available data,
-/// sending it through a bounded channel for later processing. This prevents
-/// background job output from backing up in the PTY buffer while the user
-/// is typing.
-///
-/// When the channel is full (backpressure), chunks are dropped and the byte
-/// count is tracked. The dropped count is reported with the next successfully
-/// sent chunk so users are informed about dropped background output.
-fn pty_drain_loop(pty_fd: RawFd, stop: Arc<AtomicBool>, tx: SyncSender<DrainResult>) {
-    let mut buf = [0u8; DRAIN_BUFFER_SIZE];
-    let mut pending_dropped_bytes: usize = 0;
-
-    while !stop.load(Ordering::Relaxed) {
-        // SAFETY: pty_fd is valid for the duration of Edit mode
-        let borrowed_fd = unsafe { BorrowedFd::borrow_raw(pty_fd) };
-        let mut pollfds = [PollFd::new(&borrowed_fd, PollFlags::POLLIN)];
-
-        // Poll with short timeout to check stop flag periodically
-        match poll(&mut pollfds, EDIT_MODE_DRAIN_POLL_MS) {
-            Ok(_) => {}
-            Err(nix::errno::Errno::EINTR) => continue,
-            Err(_) => break,
-        }
-
-        if let Some(revents) = pollfds[0].revents() {
-            if revents.contains(PollFlags::POLLHUP) || revents.contains(PollFlags::POLLERR) {
-                // EOF detected - use try_send to avoid blocking if channel is full.
-                // If we can't send the EOF marker, just break - the receiver will
-                // detect EOF when it processes the channel contents.
-                let eof_result = DrainResult {
-                    bytes: Vec::new(),
-                    eof: true,
-                    dropped_bytes: pending_dropped_bytes,
-                };
-                match tx.try_send(eof_result) {
-                    Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
-                    Err(mpsc::TrySendError::Disconnected(_)) => {}
-                }
-                break;
-            }
-
-            if revents.contains(PollFlags::POLLIN) {
-                // Drain all available data
-                loop {
-                    match read(pty_fd, &mut buf) {
-                        Ok(0) => {
-                            // EOF - use try_send to avoid blocking
-                            let eof_result = DrainResult {
-                                bytes: Vec::new(),
-                                eof: true,
-                                dropped_bytes: pending_dropped_bytes,
-                            };
-                            let _ = tx.try_send(eof_result);
-                            return;
-                        }
-                        Ok(n) => {
-                            let result = DrainResult {
-                                bytes: buf[..n].to_vec(),
-                                eof: false,
-                                dropped_bytes: pending_dropped_bytes,
-                            };
-                            // Use try_send for backpressure - don't block PTY reads
-                            match tx.try_send(result) {
-                                Ok(()) => {
-                                    // Successfully sent, reset dropped counter
-                                    pending_dropped_bytes = 0;
-                                }
-                                Err(mpsc::TrySendError::Full(dropped)) => {
-                                    // Channel full - drop this chunk and track bytes
-                                    pending_dropped_bytes =
-                                        pending_dropped_bytes.saturating_add(dropped.bytes.len());
-                                }
-                                Err(mpsc::TrySendError::Disconnected(_)) => {
-                                    // Receiver gone, stop draining
-                                    return;
-                                }
-                            }
-                        }
-                        Err(nix::errno::Errno::EAGAIN) => break,
-                        Err(nix::errno::Errno::EIO) => {
-                            // EIO means PTY closed - use try_send to avoid blocking
-                            let eof_result = DrainResult {
-                                bytes: Vec::new(),
-                                eof: true,
-                                dropped_bytes: pending_dropped_bytes,
-                            };
-                            let _ = tx.try_send(eof_result);
-                            return;
-                        }
-                        Err(_) => break,
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -352,6 +229,23 @@ pub struct App {
     /// Flag indicating a resize occurred during Edit mode and chrome needs updating.
     /// This defers scroll region and context bar updates until after reedline yields.
     pending_resize: bool,
+
+    // Scrollback system
+    /// Configuration for scrollback behavior (cached from Config).
+    scrollback_config: crate::config::ScrollbackConfig,
+    /// Ring buffer storing captured terminal output for scrollback.
+    scrollback_buffer: crate::scrollback::ScrollbackBuffer,
+    /// State machine for parsing PTY output into lines.
+    capture_state: crate::scrollback::CaptureState,
+    /// Detector for alternate screen buffer (vim, htop).
+    alt_screen_detector: crate::scrollback::AltScreenDetector,
+    /// Current scroll state (Live or Scrolled with offset).
+    scroll_state: crate::types::ScrollState,
+    /// Viewer state for scroll view modes and display settings.
+    viewer_state: crate::scrollback::ViewerState,
+    /// Optional raw byte dump file for debugging capture issues.
+    /// Enabled by setting WRASHPTY_CAPTURE_RAW=1 environment variable.
+    raw_capture_fd: Option<std::fs::File>,
 }
 
 impl App {
@@ -403,7 +297,7 @@ impl App {
 
         // Create the history store with SQLite backend
         let history_store = Arc::new(Mutex::new(
-            HistoryStore::new(session_token).context("Failed to create history store")?
+            HistoryStore::new(session_token).context("Failed to create history store")?,
         ));
 
         // Create reedline history from the store
@@ -419,6 +313,30 @@ impl App {
         let current_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
 
         info!(mode = ?Mode::Initializing, "App starting");
+
+        // Initialize scrollback system
+        let scrollback_buffer = if config.scrollback.enabled {
+            crate::scrollback::ScrollbackBuffer::with_capacity(
+                config.scrollback.max_lines,
+                config.scrollback.max_line_bytes,
+            )
+        } else {
+            // Create a minimal buffer that won't actually store anything
+            crate::scrollback::ScrollbackBuffer::with_capacity(0, 0)
+        };
+        let capture_state = crate::scrollback::CaptureState::new(cols);
+        let alt_screen_detector = crate::scrollback::AltScreenDetector::new();
+        let raw_capture_fd = if std::env::var_os("WRASHPTY_CAPTURE_RAW").is_some() {
+            let (raw_capture_fd, raw_capture_path) =
+                create_raw_capture_file().context("Failed to enable raw capture file creation")?;
+            info!(
+                raw_capture_path = %raw_capture_path.display(),
+                "Raw capture enabled"
+            );
+            Some(raw_capture_fd)
+        } else {
+            None
+        };
 
         Ok(Self {
             mode: Mode::Initializing,
@@ -446,6 +364,13 @@ impl App {
             last_command_duration: None,
             command_start_time: None,
             pending_resize: false,
+            scrollback_config: config.scrollback,
+            scrollback_buffer,
+            capture_state,
+            alt_screen_detector,
+            scroll_state: crate::types::ScrollState::Live,
+            viewer_state: crate::scrollback::ViewerState::new(),
+            raw_capture_fd,
         })
     }
 
@@ -508,7 +433,12 @@ impl App {
     /// We process ALL markers in the batch, handling state transitions correctly.
     fn run_initializing(&mut self) -> Result<()> {
         match self.pump.run_once()? {
-            PumpResult::MarkerDetected(markers) => {
+            PumpResult::MarkerDetected {
+                markers,
+                captured_bytes,
+            } => {
+                // Feed captured bytes to scrollback (during init, captures shell startup)
+                self.capture_for_scrollback(&captured_bytes);
                 // Process ALL markers in the batch, updating state as we go.
                 for marker in markers {
                     match self.mode {
@@ -533,10 +463,15 @@ impl App {
                             match marker {
                                 MarkerEvent::Precmd { exit_code } => {
                                     self.last_exit_code = exit_code;
-                                    debug!(exit_code, "Received PRECMD in Edit (batched during init)");
+                                    debug!(
+                                        exit_code,
+                                        "Received PRECMD in Edit (batched during init)"
+                                    );
                                 }
                                 MarkerEvent::Prompt => {
-                                    debug!("Received duplicate PROMPT in Edit (batched during init)");
+                                    debug!(
+                                        "Received duplicate PROMPT in Edit (batched during init)"
+                                    );
                                 }
                                 MarkerEvent::Preexec => {
                                     warn!("Unexpected PREEXEC in Edit (batched during init)");
@@ -554,7 +489,9 @@ impl App {
                 info!("PTY EOF during initialization");
                 self.transition_to_terminating();
             }
-            PumpResult::Continue => {
+            PumpResult::Continue { captured_bytes } => {
+                // Feed captured bytes to scrollback
+                self.capture_for_scrollback(&captured_bytes);
                 // Check for initialization timeout
                 if self.startup_time.elapsed() > INITIALIZATION_TIMEOUT {
                     warn!(
@@ -580,13 +517,48 @@ impl App {
     /// cycles can arrive in a single read batch. We process ALL markers in the
     /// batch, handling state transitions correctly to avoid losing markers.
     fn run_passthrough(&mut self) -> Result<()> {
+        // Enable stdin interception when scrollback is available and not in alt-screen
+        // This allows filtering scroll keys (PgUp/PgDown) before forwarding to PTY
+        let should_intercept =
+            self.scrollback_config.enabled && !self.alt_screen_detector.is_in_alt_screen();
+
+        if should_intercept != self.pump.is_stdin_intercepted() {
+            self.pump.set_stdin_intercept(should_intercept);
+        }
+
         match self.pump.run_once()? {
-            PumpResult::MarkerDetected(markers) => {
+            PumpResult::MarkerDetected {
+                markers,
+                captured_bytes,
+            } => {
+                // Feed captured bytes to scrollback
+                self.capture_for_scrollback(&captured_bytes);
+
+                // Process intercepted stdin (if any) for scroll keys
+                if should_intercept {
+                    let stdin_bytes = self.pump.take_stdin_buffer();
+                    if !stdin_bytes.is_empty() {
+                        debug!(
+                            stdin_len = stdin_bytes.len(),
+                            buffer_lines = self.scrollback_buffer.len(),
+                            is_scroll_allowed = self.is_scroll_allowed(),
+                            "Processing stdin for scroll (MarkerDetected)"
+                        );
+                        let to_forward = self.process_stdin_for_scroll(&stdin_bytes);
+                        if !to_forward.is_empty() {
+                            self.pump.write_to_pty(&to_forward)?;
+                        }
+                    }
+                }
+
                 // Process ALL markers in the batch, updating state as we go.
                 // This handles rapid command sequences where markers batch together.
                 for marker in markers {
                     match self.mode {
                         Mode::Passthrough => {
+                            // Record boundary for navigation before processing
+                            self.record_command_boundary(&marker);
+
                             match marker {
                                 MarkerEvent::Precmd { exit_code } => {
                                     self.last_exit_code = exit_code;
@@ -633,7 +605,27 @@ impl App {
                 info!("PTY EOF in Passthrough");
                 self.transition_to_terminating();
             }
-            PumpResult::Continue => {}
+            PumpResult::Continue { captured_bytes } => {
+                // Feed captured bytes to scrollback
+                self.capture_for_scrollback(&captured_bytes);
+
+                // Process intercepted stdin (if any) for scroll keys
+                if should_intercept {
+                    let stdin_bytes = self.pump.take_stdin_buffer();
+                    if !stdin_bytes.is_empty() {
+                        debug!(
+                            stdin_len = stdin_bytes.len(),
+                            buffer_lines = self.scrollback_buffer.len(),
+                            is_scroll_allowed = self.is_scroll_allowed(),
+                            "Processing stdin for scroll (Continue)"
+                        );
+                        let to_forward = self.process_stdin_for_scroll(&stdin_bytes);
+                        if !to_forward.is_empty() {
+                            self.pump.write_to_pty(&to_forward)?;
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }
@@ -717,16 +709,11 @@ impl App {
         if self.chrome.is_active() {
             if let Ok((cols, _rows)) = TerminalGuard::get_size() {
                 let timestamp = chrono::Local::now().format("%H:%M").to_string();
-                let ctx = ChromeContext {
-                    cwd: &self.current_cwd,
-                    git_branch: self.git_branch.as_deref(),
-                    git_dirty: self.git_dirty,
-                    last_exit_code: self.last_exit_code,
-                    last_command: self.last_command.as_deref(),
-                    last_duration: self.last_command_duration,
-                    timestamp: &timestamp,
-                };
-                if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &ctx) {
+                let state = self.topbar_state(&timestamp);
+                if let Err(e) = self
+                    .chrome
+                    .render_context_bar_with_notifications(cols, &state)
+                {
                     warn!("Failed to redraw context bar before prompt: {}", e);
                 }
             }
@@ -800,6 +787,8 @@ impl App {
                 channel_dropped = channel_dropped_bytes,
                 "Processing bytes from background drain"
             );
+            // Keep scrollback capture in sync with output drained during Edit mode.
+            self.capture_for_scrollback(&all_bytes);
             let parsed = self.pump.process_read_bytes(&all_bytes, eof_detected);
 
             // Buffer any output bytes
@@ -1018,6 +1007,13 @@ impl App {
                     "open_panel" => {
                         self.open_panel()?;
                     }
+                    "scroll_up" | "scroll_down" | "scroll_line_up" | "scroll_line_down" => {
+                        // Enter scroll view at the bottom (offset 0) - user can scroll from there
+                        if self.is_scroll_allowed() {
+                            self.scroll_state = crate::types::ScrollState::scrolled_at(0);
+                            self.run_scroll_view()?;
+                        }
+                    }
                     _ => {
                         warn!(command = %cmd, "Unknown host command");
                     }
@@ -1047,6 +1043,8 @@ impl App {
                 bytes = result.bytes.len(),
                 "Buffering background PTY output"
             );
+            // Keep scrollback capture in sync with non-blocking background output.
+            self.capture_for_scrollback(&result.bytes);
             self.editor.buffer_output(&result.bytes);
         }
 
@@ -1136,7 +1134,9 @@ impl App {
     /// Returns an error if terminal operations fail.
     fn run_panel_mode<P: Panel>(&mut self, panel: &mut P) -> Result<PanelResult> {
         // Ensure raw mode is active - reedline may have toggled terminal modes
-        self.terminal_guard.ensure_raw_mode().context("Failed to ensure raw mode for panel")?;
+        self.terminal_guard
+            .ensure_raw_mode()
+            .context("Failed to ensure raw mode for panel")?;
 
         let (cols, rows) =
             TerminalGuard::get_size().context("Failed to get terminal size for panel")?;
@@ -1152,7 +1152,10 @@ impl App {
         // Clamp to ensure at least 1 row remains for the PTY
         let preferred = panel.preferred_height();
         let max_panel_height = rows.saturating_sub(1); // Leave at least 1 row for PTY
-        let panel_height = preferred.min(max_panel_height / 2).max(5).min(max_panel_height);
+        let panel_height = preferred
+            .min(max_panel_height / 2)
+            .max(5)
+            .min(max_panel_height);
 
         // Calculate effective rows and verify it's valid
         let effective_rows = rows.saturating_sub(panel_height);
@@ -1161,7 +1164,10 @@ impl App {
             return Ok(PanelResult::Dismiss);
         }
 
-        debug!(cols, rows, panel_height, effective_rows, preferred, "Entering panel mode");
+        debug!(
+            cols,
+            rows, panel_height, effective_rows, preferred, "Entering panel mode"
+        );
 
         // Expand panel area
         self.chrome
@@ -1246,8 +1252,6 @@ impl App {
             }
             out.flush()?;
         }
-
-        
 
         // Note: We don't disable raw mode here as wrashpty needs it for PTY handling
         // The TerminalGuard manages the overall raw mode state
@@ -1420,8 +1424,8 @@ impl App {
 
     /// Restores terminal state after panel closes without executing a command.
     fn restore_after_panel(&mut self) -> Result<()> {
-        let (cols, rows) = TerminalGuard::get_size()
-            .context("Failed to get terminal size after panel")?;
+        let (cols, rows) =
+            TerminalGuard::get_size().context("Failed to get terminal size after panel")?;
 
         // Re-establish scroll region for chrome
         if self.chrome.is_active() {
@@ -1430,17 +1434,12 @@ impl App {
 
         // Redraw context bar
         let timestamp = chrono::Local::now().format("%H:%M").to_string();
-        let ctx = ChromeContext {
-            cwd: &self.current_cwd,
-            git_branch: self.git_branch.as_deref(),
-            git_dirty: self.git_dirty,
-            last_exit_code: self.last_exit_code,
-            last_command: self.last_command.as_deref(),
-            last_duration: self.last_command_duration,
-            timestamp: &timestamp,
-        };
+        let state = self.topbar_state(&timestamp);
 
-        if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &ctx) {
+        if let Err(e) = self
+            .chrome
+            .render_context_bar_with_notifications(cols, &state)
+        {
             warn!("Failed to redraw context bar after panel: {}", e);
         }
 
@@ -1520,11 +1519,19 @@ impl App {
             .pump
             .run_once_with_timeout(Some(INJECTION_POLL_TIMEOUT))?
         {
-            PumpResult::MarkerDetected(markers) => {
+            PumpResult::MarkerDetected {
+                markers,
+                captured_bytes,
+            } => {
+                // Feed captured bytes to scrollback
+                self.capture_for_scrollback(&captured_bytes);
                 // Process ALL markers in the batch, updating state as we go.
                 // This handles the case where [PREEXEC, PRECMD, PROMPT] arrive
                 // together when a command fails quickly.
                 for marker in markers {
+                    // Record boundary for navigation
+                    self.record_command_boundary(&marker);
+
                     match self.mode {
                         Mode::Injecting => {
                             match marker {
@@ -1555,7 +1562,9 @@ impl App {
                                     debug!(exit_code, "Received PRECMD in Passthrough (batched)");
                                 }
                                 MarkerEvent::Prompt => {
-                                    debug!("Received PROMPT in Passthrough (batched) - transitioning to Edit");
+                                    debug!(
+                                        "Received PROMPT in Passthrough (batched) - transitioning to Edit"
+                                    );
                                     self.transition_to_edit();
                                     // We're now in Edit mode, done with this batch
                                     return Ok(());
@@ -1581,7 +1590,10 @@ impl App {
                 self.injection_start = None;
                 self.transition_to_terminating();
             }
-            PumpResult::Continue => {}
+            PumpResult::Continue { captured_bytes } => {
+                // Feed captured bytes to scrollback
+                self.capture_for_scrollback(&captured_bytes);
+            }
         }
         Ok(())
     }
@@ -1632,463 +1644,7 @@ impl App {
         Ok(self.last_exit_code)
     }
 
-    /// Transitions to Edit mode.
-    ///
-    /// Sets up scroll region and renders context bar if chrome is active.
-    /// Resizes PTY to effective rows (accounting for top bar).
-    ///
-    /// When coming from Passthrough, the scroll region is already set and cursor
-    /// is at the end of command output. We preserve cursor position so the prompt
-    /// appears after the output (natural shell flow).
-    fn transition_to_edit(&mut self) {
-        let from_mode = self.mode;
-        info!(from = ?from_mode, to = ?Mode::Edit, "Mode transition");
-
-        // Calculate command duration if coming from command execution
-        if let Some(start) = self.command_start_time.take() {
-            self.last_command_duration = Some(start.elapsed());
-
-            // Update history metadata with exit status, duration, and cwd
-            // Also learn from the command completion for intelligence
-            if let Ok(mut store) = self.history_store.lock() {
-                let exit_status = Some(self.last_exit_code);
-                let cwd = Some(self.current_cwd.clone());
-                if let Err(e) = store.update_last_command(exit_status, self.last_command_duration, cwd) {
-                    warn!("Failed to update history metadata: {}", e);
-                }
-                // Learn from the command completion
-                store.learn_command_completion(exit_status);
-            }
-        }
-
-        // Update context information using shell's cwd (not parent process)
-        self.current_cwd = self.get_shell_cwd();
-        self.update_git_info();
-
-        // Query terminal size for chrome setup
-        let (cols, rows) = match TerminalGuard::get_size() {
-            Ok(size) => size,
-            Err(e) => {
-                warn!("Failed to get terminal size for Edit mode: {}", e);
-                self.mode = Mode::Edit;
-                return;
-            }
-        };
-
-        // Check minimum size and auto-suspend chrome if needed
-        let _ = self.chrome.check_minimum_size(cols, rows);
-
-        let coming_from_passthrough = from_mode == Mode::Passthrough;
-
-        if self.chrome.is_active() {
-            if coming_from_passthrough {
-                // Coming from Passthrough: cursor is at end of command output.
-                // Re-establish scroll region using cursor-preserving variant.
-                if let Err(e) = self.chrome.setup_scroll_region_preserve_cursor(rows) {
-                    warn!("Failed to restore scroll region: {}", e);
-                }
-            } else {
-                // Initial startup: set up scroll region
-                if let Err(e) = self.chrome.enter_edit_mode(rows) {
-                    warn!("Failed to set up chrome scroll region: {}", e);
-                }
-            }
-
-            // SINGLE RENDER POINT: Render context bar BEFORE reedline starts
-            let timestamp = chrono::Local::now().format("%H:%M").to_string();
-            let ctx = ChromeContext {
-                cwd: &self.current_cwd,
-                git_branch: self.git_branch.as_deref(),
-                git_dirty: self.git_dirty,
-                last_exit_code: self.last_exit_code,
-                last_command: self.last_command.as_deref(),
-                last_duration: self.last_command_duration,
-                timestamp: &timestamp,
-            };
-
-            if let Err(e) = self.chrome.render_context_bar(cols, &ctx) {
-                warn!("Failed to render context bar: {}", e);
-            }
-
-            // Only position cursor for initial startup
-            if !coming_from_passthrough {
-                if let Err(e) = self.chrome.position_cursor_in_scroll_region() {
-                    warn!("Failed to position cursor in scroll region: {}", e);
-                }
-            }
-        }
-
-        // Calculate effective rows for PTY (subtract 1 for top bar if chrome active)
-        let effective_rows = if self.chrome.is_active() {
-            rows.saturating_sub(1)
-        } else {
-            rows
-        };
-
-        // Resize PTY to effective rows
-        if let Err(e) = self.pty.resize(cols, effective_rows) {
-            warn!("Failed to resize PTY for Edit mode: {}", e);
-        }
-        debug!(
-            cols,
-            effective_rows,
-            chrome_active = self.chrome.is_active(),
-            "PTY resized for Edit mode"
-        );
-
-        self.mode = Mode::Edit;
-    }
-
-    /// Updates git information for the current working directory.
-    ///
-    /// Uses a cache to avoid expensive git status queries on every transition.
-    /// The cache is valid for a short duration and is invalidated when the
-    /// working directory changes.
-    fn update_git_info(&mut self) {
-        let git_info = crate::git::get_git_info_cached(&self.current_cwd, &mut self.git_cache);
-        self.git_branch = git_info.branch;
-        self.git_dirty = git_info.dirty;
-    }
-
-    /// Gets the shell's current working directory via /proc/<pid>/cwd.
-    ///
-    /// This reads the symlink at /proc/<pid>/cwd to determine the shell's
-    /// actual working directory, which may differ from the parent process's
-    /// cwd after `cd` commands.
-    ///
-    /// Falls back to the parent process's cwd if the shell's cwd cannot be read.
-    fn get_shell_cwd(&self) -> PathBuf {
-        if let Some(pid) = self.pty.child_pid() {
-            let proc_cwd = format!("/proc/{}/cwd", pid);
-            if let Ok(cwd) = std::fs::read_link(&proc_cwd) {
-                return cwd;
-            }
-        }
-        // Fallback to parent process cwd
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
-    }
-
-    /// Transitions to Passthrough mode.
-    ///
-    /// **Scroll Region**: Re-established in transition_to_injecting() which runs
-    /// before this. We re-apply here as well for safety (belt and suspenders).
-    ///
-    /// **PTY Size**: Keeps PTY at effective_rows (total_rows - 2 when chrome is
-    /// active) to match the scroll region. The shell sees the constrained size
-    /// and formats output accordingly.
-    ///
-    /// **Raw Mode**: Ensures terminal raw mode is active so control characters
-    /// are forwarded as bytes to the PTY rather than generating signals.
-    fn transition_to_passthrough(&mut self) -> Result<()> {
-        info!(from = ?self.mode, to = ?Mode::Passthrough, "Mode transition");
-
-        // Ensure raw mode is active - reedline may have toggled terminal modes.
-        // This is critical for control character passthrough (Ctrl+C -> 0x03, not SIGINT).
-        self.terminal_guard.ensure_raw_mode().context("Failed to ensure raw mode for Passthrough")?;
-
-        // Get terminal size
-        let (cols, rows) =
-            TerminalGuard::get_size().context("Failed to get terminal size for Passthrough")?;
-
-        // Safety: ensure scroll region is set before any output flows.
-        // This should already be set by transition_to_injecting(), but we re-apply
-        // here as a defensive measure in case we enter Passthrough from another path.
-        if self.chrome.is_active() {
-            if let Err(e) = self.chrome.setup_scroll_region_preserve_cursor(rows) {
-                warn!("Failed to ensure scroll region for Passthrough: {}", e);
-            }
-        }
-
-        // Calculate effective rows (matching Edit mode) to keep output constrained
-        // Subtract 1 for top bar when chrome is active
-        let effective_rows = if self.chrome.is_active() {
-            rows.saturating_sub(1)
-        } else {
-            rows
-        };
-
-        // Keep PTY at effective_rows so command output stays within scroll region.
-        self.pty
-            .resize(cols, effective_rows)
-            .context("Failed to resize PTY for Passthrough")?;
-        debug!(
-            cols,
-            effective_rows, "PTY sized for Passthrough (within scroll region)"
-        );
-
-        self.mode = Mode::Passthrough;
-        Ok(())
-    }
-
-    /// Transitions to Injecting mode.
-    ///
-    /// **Critical**: Synchronizes PTY size and scroll region before command execution.
-    /// The terminal may have been resized while reedline was active in Edit mode.
-    /// Since reedline owns SIGWINCH during Edit mode, we sync here to ensure
-    /// the PTY has the correct geometry before command execution.
-    ///
-    /// **Scroll Region**: Reedline/crossterm RESETS the scroll region during Edit mode.
-    /// We MUST re-establish it here BEFORE command output flows, otherwise output
-    /// will not be constrained to the content area and will overflow to the footer row.
-    ///
-    /// **PTY Size**: Uses effective_rows (total_rows - 2 when chrome is active)
-    /// to match the scroll region. This ensures command output stays constrained
-    /// to the content area.
-    ///
-    /// **Raw Mode**: Ensures terminal raw mode is active. Reedline may toggle
-    /// terminal modes during Edit mode, so we must explicitly re-enable raw mode
-    /// here to ensure control characters are forwarded correctly to the PTY.
-    fn transition_to_injecting(&mut self) -> Result<()> {
-        info!(from = ?self.mode, to = ?Mode::Injecting, "Mode transition");
-
-        // Record command start time for duration tracking
-        self.command_start_time = Some(Instant::now());
-
-        // Ensure raw mode is active - reedline may have toggled terminal modes.
-        // This is critical for control character passthrough during command injection.
-        self.terminal_guard.ensure_raw_mode().context("Failed to ensure raw mode for Injecting")?;
-
-        // Sync PTY size - terminal may have been resized during Edit mode
-        let (cols, rows) =
-            TerminalGuard::get_size().context("Failed to get terminal size for transition")?;
-
-        // CRITICAL: Re-establish scroll region BEFORE command output flows.
-        // Reedline/crossterm RESETS the scroll region during Edit mode.
-        // Without this, command output will overflow to the footer row.
-        if self.chrome.is_active() {
-            if let Err(e) = self.chrome.setup_scroll_region_preserve_cursor(rows) {
-                warn!("Failed to re-establish scroll region for Injecting: {}", e);
-            }
-        }
-
-        // Use effective_rows to keep output within scroll region
-        // Subtract 1 for top bar when chrome is active
-        let effective_rows = if self.chrome.is_active() {
-            rows.saturating_sub(1)
-        } else {
-            rows
-        };
-
-        self.pty
-            .resize(cols, effective_rows)
-            .context("Failed to resize PTY on transition to Injecting")?;
-        debug!(
-            cols,
-            effective_rows, "PTY size synchronized for command execution"
-        );
-
-        self.mode = Mode::Injecting;
-        self.injection_start = Some(Instant::now());
-        Ok(())
-    }
-
-    /// Transitions to Terminating mode.
-    fn transition_to_terminating(&mut self) {
-        info!(from = ?self.mode, to = ?Mode::Terminating, "Mode transition");
-
-        // End intelligence session
-        if let Ok(mut store) = self.history_store.lock() {
-            store.end_intelligence_session();
-        }
-
-        self.mode = Mode::Terminating;
-    }
-
-    /// Processes all pending signal events.
-    ///
-    /// This method should be called regularly from the main event loop
-    /// to handle Unix signals that have been delivered to the process.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if any signal handler fails.
-    pub fn handle_signals(&mut self) -> Result<()> {
-        for event in self.signal_handler.check_signals() {
-            match event {
-                SignalEvent::WindowResize => self.handle_sigwinch()?,
-                SignalEvent::ChildExit => self.handle_sigchld()?,
-                SignalEvent::Shutdown => self.transition_to_terminating(),
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Handles terminal window resize signal (SIGWINCH).
-    ///
-    /// Behavior depends on current mode:
-    /// - Edit mode: Let reedline handle SIGWINCH internally via crossterm.
-    ///   PTY will be synchronized when transitioning out of Edit mode.
-    ///   Chrome scroll region is reapplied and bars are redrawn if active.
-    ///   On suspend: clears bars and resets scroll region.
-    ///   On resume: sets up scroll region and draws bars.
-    /// - Passthrough/Injecting/Initializing: Propagate resize to PTY
-    /// - Terminating: Ignored
-    ///
-    /// # Why Edit Mode Doesn't Resize PTY
-    ///
-    /// Reedline has its own internal SIGWINCH handler (via crossterm). If the
-    /// wrapper also handled the signal, both would attempt to manage terminal
-    /// state, causing potential race conditions and corrupted rendering. By
-    /// letting reedline own SIGWINCH during Edit mode, we avoid conflicts.
-    /// The PTY is synchronized in `transition_to_injecting()` before command
-    /// execution.
-    fn handle_sigwinch(&mut self) -> Result<()> {
-        match self.mode {
-            Mode::Edit => {
-                // Let reedline handle SIGWINCH internally via crossterm.
-                // Do NOT resize PTY here - it will be synced on transition.
-                // Do NOT emit terminal sequences here - they interfere with reedline's
-                // internal repaint cycle. Instead, set a flag to defer chrome updates
-                // until the next run_edit() iteration, before reedline takes control.
-                debug!("SIGWINCH in Edit mode - deferring chrome update");
-                self.pending_resize = true;
-            }
-            Mode::Initializing => {
-                // During initialization, chrome isn't fully active yet (scroll region
-                // not set up). Use full terminal size until first PROMPT marker.
-                let (cols, rows) =
-                    TerminalGuard::get_size().context("Failed to get terminal size for resize")?;
-                self.pty
-                    .resize(cols, rows)
-                    .context("Failed to resize PTY")?;
-                info!(cols, rows, mode = ?self.mode, "PTY resized");
-            }
-            Mode::Passthrough | Mode::Injecting => {
-                // We own SIGWINCH in these modes - propagate resize to PTY
-                let (cols, rows) =
-                    TerminalGuard::get_size().context("Failed to get terminal size for resize")?;
-
-                // Calculate effective rows to match scroll region
-                // Subtract 1 for top bar when chrome is active
-                let effective_rows = if self.chrome.is_active() {
-                    rows.saturating_sub(1)
-                } else {
-                    rows
-                };
-
-                // Resize PTY to effective rows (matching scroll region)
-                self.pty
-                    .resize(cols, effective_rows)
-                    .context("Failed to resize PTY")?;
-
-                // Update chrome for new terminal dimensions
-                if self.chrome.is_active() {
-                    // Reapply scroll region for new size (preserving cursor)
-                    if let Err(e) = self.chrome.setup_scroll_region_preserve_cursor(rows) {
-                        warn!("Failed to reapply scroll region on resize: {}", e);
-                    }
-
-                    // Redraw context bar for new dimensions
-                    let timestamp = chrono::Local::now().format("%H:%M").to_string();
-                    let ctx = ChromeContext {
-                        cwd: &self.current_cwd,
-                        git_branch: self.git_branch.as_deref(),
-                        git_dirty: self.git_dirty,
-                        last_exit_code: self.last_exit_code,
-                        last_command: self.last_command.as_deref(),
-                        last_duration: self.last_command_duration,
-                        timestamp: &timestamp,
-                    };
-
-                    if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &ctx) {
-                        warn!("Failed to redraw context bar on resize: {}", e);
-                    }
-                }
-
-                info!(cols, effective_rows, mode = ?self.mode, "PTY resized");
-            }
-            Mode::Terminating => {
-                // Ignore resize during shutdown
-                debug!("SIGWINCH in Terminating mode - ignored");
-            }
-        }
-        Ok(())
-    }
-
-    /// Handles child process exit signal (SIGCHLD).
-    ///
-    /// Checks if the shell has exited and initiates shutdown if so.
-    fn handle_sigchld(&mut self) -> Result<()> {
-        debug!("SIGCHLD handler called");
-
-        if let Some(status) = self.pty.try_wait()? {
-            let code = exit_code_from_status(&status);
-            info!(exit_code = code, "Child exited (SIGCHLD)");
-            self.last_exit_code = code;
-            self.transition_to_terminating();
-        }
-
-        Ok(())
-    }
-
-    /// Returns whether the application should shut down.
-    pub fn should_shutdown(&self) -> bool {
-        self.signal_handler.should_shutdown()
-    }
-
-    /// Toggles chrome display mode.
-    ///
-    /// Switches between Headless and Full modes with full terminal update.
-    /// This can be called from keybinding handlers in future tickets.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if terminal operations fail.
-    #[allow(dead_code)]
-    pub fn toggle_chrome(&mut self) -> Result<()> {
-        let (cols, rows) =
-            TerminalGuard::get_size().context("Failed to get terminal size for chrome toggle")?;
-
-        self.chrome
-            .toggle_with_terminal_update(cols, rows)
-            .context("Failed to toggle chrome")?;
-
-        // Render context bar immediately after enabling chrome
-        if self.chrome.is_active() {
-            let timestamp = chrono::Local::now().format("%H:%M").to_string();
-            let ctx = ChromeContext {
-                cwd: &self.current_cwd,
-                git_branch: self.git_branch.as_deref(),
-                git_dirty: self.git_dirty,
-                last_exit_code: self.last_exit_code,
-                last_command: self.last_command.as_deref(),
-                last_duration: self.last_command_duration,
-                timestamp: &timestamp,
-            };
-
-            if let Err(e) = self.chrome.render_context_bar_with_notifications(cols, &ctx) {
-                warn!("Failed to render context bar after toggle: {}", e);
-            }
-        }
-
-        // Calculate new effective rows based on chrome state
-        // Subtract 1 for top bar when chrome is active
-        let effective_rows = if self.chrome.is_active() {
-            rows.saturating_sub(1)
-        } else {
-            rows
-        };
-
-        // Resize PTY to new effective rows
-        self.pty
-            .resize(cols, effective_rows)
-            .context("Failed to resize PTY after chrome toggle")?;
-
-        debug!(
-            cols,
-            effective_rows,
-            chrome_active = self.chrome.is_active(),
-            "PTY resized after chrome toggle"
-        );
-
-        Ok(())
-    }
-
-    /// Gets the path to the generated bashrc file.
-    pub fn bashrc_path(&self) -> &str {
-        &self.bashrc_path
-    }
+    // Scrollback capture and viewing methods are in scroll_view.rs
 }
 
 impl Drop for App {
@@ -2119,14 +1675,14 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_initialization_timeout_constant() {
+    fn test_initialization_timeout_default_within_expected_range() {
         // Verify timeout is reasonable
         assert!(INITIALIZATION_TIMEOUT >= Duration::from_secs(5));
         assert!(INITIALIZATION_TIMEOUT <= Duration::from_secs(30));
     }
 
     #[test]
-    fn test_termination_timeout_constant() {
+    fn test_termination_timeout_default_within_expected_range() {
         // Verify timeout is reasonable
         assert!(TERMINATION_TIMEOUT >= Duration::from_secs(1));
         assert!(TERMINATION_TIMEOUT <= Duration::from_secs(10));
@@ -2140,7 +1696,7 @@ mod tests {
     }
 
     #[test]
-    fn test_injection_poll_timeout_constant() {
+    fn test_injection_poll_timeout_within_bounds_and_less_than_injection_timeout() {
         // Verify poll timeout is short enough to allow timely timeout detection
         // but not so short as to cause excessive CPU usage
         assert!(INJECTION_POLL_TIMEOUT >= Duration::from_millis(10));
@@ -2154,7 +1710,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_exit_code_from_status_success() {
+    fn test_exit_code_from_status_zero_returns_zero() {
         // Create a mock ExitStatus representing success
         // Note: ExitStatus::with_exit_code is not directly available,
         // but we can test the function with known values
@@ -2165,7 +1721,7 @@ mod tests {
     }
 
     #[test]
-    fn test_exit_code_from_status_failure() {
+    fn test_exit_code_from_status_nonzero_returns_same_code() {
         use portable_pty::ExitStatus;
 
         let status = ExitStatus::with_exit_code(1);
@@ -2183,7 +1739,7 @@ mod tests {
     }
 
     #[test]
-    fn test_exit_code_from_status_max_values() {
+    fn test_exit_code_from_status_255_returns_255() {
         use portable_pty::ExitStatus;
 
         let status = ExitStatus::with_exit_code(255);
@@ -2195,7 +1751,7 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_mode_equality() {
+    fn test_mode_equality_variants_compare_equal_and_not_equal() {
         assert_eq!(Mode::Initializing, Mode::Initializing);
         assert_eq!(Mode::Edit, Mode::Edit);
         assert_eq!(Mode::Passthrough, Mode::Passthrough);
@@ -2207,7 +1763,7 @@ mod tests {
     }
 
     #[test]
-    fn test_mode_debug_format() {
+    fn test_mode_debug_format_contains_variant_names() {
         // Verify Debug implementations for logging
         assert!(format!("{:?}", Mode::Initializing).contains("Initializing"));
         assert!(format!("{:?}", Mode::Edit).contains("Edit"));
@@ -2677,7 +2233,11 @@ mod tests {
             })
             .collect();
 
-        assert_eq!(markers.len(), 3, "All three markers should be parsed from batch");
+        assert_eq!(
+            markers.len(),
+            3,
+            "All three markers should be parsed from batch"
+        );
         assert!(matches!(markers[0], MarkerEvent::Preexec));
         assert!(matches!(markers[1], MarkerEvent::Precmd { exit_code: 127 }));
         assert!(matches!(markers[2], MarkerEvent::Prompt));
@@ -2813,7 +2373,10 @@ mod tests {
 
         // After processing the batch, we should end up in Edit mode
         assert_eq!(mode, Mode::Edit, "Should end in Edit mode after PROMPT");
-        assert_eq!(last_exit_code, 127, "Exit code should be captured from PRECMD");
+        assert_eq!(
+            last_exit_code, 127,
+            "Exit code should be captured from PRECMD"
+        );
     }
 
     #[test]
@@ -2876,10 +2439,7 @@ mod tests {
         let mut last_exit_code = 0;
 
         // During initialization, we might see PRECMD and PROMPT together
-        let markers = vec![
-            MarkerEvent::Precmd { exit_code: 0 },
-            MarkerEvent::Prompt,
-        ];
+        let markers = vec![MarkerEvent::Precmd { exit_code: 0 }, MarkerEvent::Prompt];
 
         for marker in markers {
             match mode {
@@ -2896,11 +2456,8 @@ mod tests {
                 },
                 Mode::Edit => {
                     // Handle remaining markers in Edit context
-                    match marker {
-                        MarkerEvent::Precmd { exit_code } => {
-                            last_exit_code = exit_code;
-                        }
-                        _ => {}
+                    if let MarkerEvent::Precmd { exit_code } = marker {
+                        last_exit_code = exit_code;
                     }
                 }
                 _ => break,
@@ -2954,13 +2511,12 @@ mod tests {
                     }
                     MarkerEvent::Precmd { .. } => {}
                 },
-                Mode::Passthrough => match marker {
-                    MarkerEvent::Prompt => {
+                Mode::Passthrough => {
+                    if marker == &MarkerEvent::Prompt {
                         mode = Mode::Edit;
                         reached_edit = true;
                     }
-                    _ => {}
-                },
+                }
                 Mode::Edit => {
                     reached_edit = true;
                     break;

@@ -103,14 +103,48 @@ pub enum PumpResult {
     /// contains adjacent markers (e.g., PRECMD followed immediately by PROMPT).
     ///
     /// Uses `SmallVec` for zero-allocation in the common 0-2 marker case.
-    MarkerDetected(MarkerVec),
+    /// Includes captured bytes written to stdout for scrollback support.
+    MarkerDetected {
+        /// Markers detected in this read.
+        markers: MarkerVec,
+        /// Bytes written to stdout (for scrollback capture).
+        captured_bytes: Vec<u8>,
+    },
 
     /// Normal operation, no events. Continue pumping.
-    Continue,
+    /// Includes captured bytes written to stdout for scrollback support.
+    Continue {
+        /// Bytes written to stdout (for scrollback capture).
+        /// Empty if no PTY data was read.
+        captured_bytes: Vec<u8>,
+    },
 
     /// The PTY returned EOF (child process terminated).
     /// The caller should initiate shutdown.
     PtyEof,
+}
+
+impl PumpResult {
+    /// Returns captured bytes from this pump iteration.
+    ///
+    /// Returns an empty slice for PtyEof.
+    #[inline]
+    pub fn captured_bytes(&self) -> &[u8] {
+        match self {
+            PumpResult::MarkerDetected { captured_bytes, .. } => captured_bytes,
+            PumpResult::Continue { captured_bytes } => captured_bytes,
+            PumpResult::PtyEof => &[],
+        }
+    }
+
+    /// Returns markers if any were detected.
+    #[inline]
+    pub fn markers(&self) -> Option<&MarkerVec> {
+        match self {
+            PumpResult::MarkerDetected { markers, .. } => Some(markers),
+            _ => None,
+        }
+    }
 }
 
 /// Bidirectional byte pump with marker detection.
@@ -168,6 +202,13 @@ pub struct Pump {
     /// Whether stdin has been closed (EOF, HUP, or error).
     /// Once set, stdin is excluded from subsequent polls to avoid busy-looping.
     stdin_closed: bool,
+
+    /// Whether stdin bytes should be intercepted rather than forwarded to PTY.
+    /// When true, stdin bytes are stored in `stdin_buffer` for caller processing.
+    stdin_intercept: bool,
+
+    /// Buffer for intercepted stdin bytes (when `stdin_intercept` is true).
+    stdin_buffer: Vec<u8>,
 }
 
 impl Pump {
@@ -191,6 +232,8 @@ impl Pump {
             marker_parser: MarkerParser::new(session_token),
             last_activity_time: Instant::now(),
             stdin_closed: false,
+            stdin_intercept: false,
+            stdin_buffer: Vec::new(),
         }
     }
 
@@ -316,7 +359,9 @@ impl Pump {
                     if let Some(result) = self.process_pty_events(&pollfds[pty_idx])? {
                         return Ok(result);
                     }
-                    return Ok(PumpResult::Continue);
+                    return Ok(PumpResult::Continue {
+                        captured_bytes: Vec::new(),
+                    });
                 }
             }
         }
@@ -331,7 +376,9 @@ impl Pump {
             return Ok(result);
         }
 
-        Ok(PumpResult::Continue)
+        Ok(PumpResult::Continue {
+            captured_bytes: Vec::new(),
+        })
     }
 
     /// Process stdin poll events.
@@ -384,6 +431,10 @@ impl Pump {
     ///
     /// Reads available data from stdin and writes it to the PTY master.
     /// This is the input path for user keystrokes during command execution.
+    ///
+    /// When `stdin_intercept` is enabled, bytes are buffered for caller processing
+    /// instead of being forwarded to the PTY. This allows the caller to filter
+    /// scroll keys before forwarding the remainder.
     #[inline]
     fn forward_stdin_to_pty(&mut self) -> Result<()> {
         let mut buf = [0u8; BUFFER_SIZE];
@@ -397,7 +448,13 @@ impl Pump {
                 tracing::debug!("Stdin closed (EOF)");
             }
             Ok(n) => {
-                write_all(self.pty_fd, &buf[..n])?;
+                if self.stdin_intercept {
+                    // Buffer for caller to process (scroll key filtering)
+                    self.stdin_buffer.extend_from_slice(&buf[..n]);
+                } else {
+                    // Normal forwarding to PTY
+                    write_all(self.pty_fd, &buf[..n])?;
+                }
                 // Update activity timestamp on successful I/O
                 self.last_activity_time = Instant::now();
             }
@@ -419,7 +476,8 @@ impl Pump {
     /// marker (if any) is returned for state machine handling.
     ///
     /// This method processes the entire read chunk before returning, ensuring
-    /// no bytes after a marker are lost.
+    /// no bytes after a marker are lost. Captured bytes are included in the
+    /// result for scrollback support.
     #[inline]
     fn forward_pty_to_stdout(&mut self) -> Result<PumpResult> {
         let mut buf = [0u8; BUFFER_SIZE];
@@ -432,11 +490,15 @@ impl Pump {
             }
             Ok(n) => {
                 let mut markers = MarkerVec::new();
+                let mut captured_bytes = Vec::new();
+
                 // Process through marker parser, accumulating all markers
                 for output in self.marker_parser.feed(&buf[..n]) {
                     match output {
                         ParseOutput::Bytes(cow_bytes) => {
                             write_all(STDOUT_FILENO, &cow_bytes)?;
+                            // Capture bytes for scrollback
+                            captured_bytes.extend_from_slice(&cow_bytes);
                         }
                         ParseOutput::Marker(marker) => {
                             tracing::debug!(?marker, "Marker detected");
@@ -449,14 +511,19 @@ impl Pump {
                 self.last_activity_time = Instant::now();
 
                 if markers.is_empty() {
-                    Ok(PumpResult::Continue)
+                    Ok(PumpResult::Continue { captured_bytes })
                 } else {
-                    Ok(PumpResult::MarkerDetected(markers))
+                    Ok(PumpResult::MarkerDetected {
+                        markers,
+                        captured_bytes,
+                    })
                 }
             }
             Err(nix::errno::Errno::EAGAIN) => {
                 // No data available, ignore
-                Ok(PumpResult::Continue)
+                Ok(PumpResult::Continue {
+                    captured_bytes: Vec::new(),
+                })
             }
             Err(nix::errno::Errno::EIO) => {
                 // EIO on PTY read indicates child process exited - treat as EOF
@@ -645,6 +712,64 @@ impl Pump {
             }
         }
     }
+
+    // =========================================================================
+    // Stdin interception for scroll key handling
+    // =========================================================================
+
+    /// Enables or disables stdin interception mode.
+    ///
+    /// When enabled, stdin bytes are buffered instead of being forwarded to the PTY.
+    /// This allows the caller to filter scroll keys (PgUp/PgDown) before forwarding
+    /// the remainder to the shell.
+    ///
+    /// # Arguments
+    ///
+    /// * `intercept` - `true` to intercept stdin, `false` for normal forwarding
+    pub fn set_stdin_intercept(&mut self, intercept: bool) {
+        self.stdin_intercept = intercept;
+        if !intercept {
+            // Clear buffer when disabling intercept
+            self.stdin_buffer.clear();
+        }
+    }
+
+    /// Returns whether stdin interception is currently enabled.
+    #[inline]
+    pub fn is_stdin_intercepted(&self) -> bool {
+        self.stdin_intercept
+    }
+
+    /// Takes the buffered stdin bytes, clearing the internal buffer.
+    ///
+    /// Call this after `run_once()` when stdin interception is enabled to get
+    /// the bytes that were read from stdin during this pump cycle.
+    ///
+    /// # Returns
+    ///
+    /// The intercepted stdin bytes. Empty if no stdin was read or interception is disabled.
+    pub fn take_stdin_buffer(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.stdin_buffer)
+    }
+
+    /// Writes bytes to the PTY.
+    ///
+    /// Use this to forward filtered stdin bytes after scroll key processing.
+    /// Only forwards non-scroll keys to the shell.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - Bytes to write to the PTY
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the write fails.
+    pub fn write_to_pty(&self, bytes: &[u8]) -> Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        write_all(self.pty_fd, bytes)
+    }
 }
 
 /// Writes all bytes to a file descriptor, handling partial writes and EINTR.
@@ -696,22 +821,34 @@ mod tests {
     /// Test that PumpResult variants are correctly constructed.
     #[test]
     fn test_pump_result_variants() {
-        // Single marker
-        let marker = PumpResult::MarkerDetected(smallvec![MarkerEvent::Prompt]);
-        assert!(matches!(marker, PumpResult::MarkerDetected(ref v) if v.len() == 1));
+        // Single marker with captured bytes
+        let marker = PumpResult::MarkerDetected {
+            markers: smallvec![MarkerEvent::Prompt],
+            captured_bytes: vec![b'h', b'i'],
+        };
+        assert!(
+            matches!(marker, PumpResult::MarkerDetected { ref markers, .. } if markers.len() == 1)
+        );
+        assert_eq!(marker.captured_bytes(), b"hi");
 
         // Multiple markers (still inline, no heap allocation)
-        let markers = PumpResult::MarkerDetected(smallvec![
-            MarkerEvent::Precmd { exit_code: 0 },
-            MarkerEvent::Prompt,
-        ]);
-        assert!(matches!(markers, PumpResult::MarkerDetected(ref v) if v.len() == 2));
+        let markers = PumpResult::MarkerDetected {
+            markers: smallvec![MarkerEvent::Precmd { exit_code: 0 }, MarkerEvent::Prompt,],
+            captured_bytes: vec![],
+        };
+        assert!(
+            matches!(markers, PumpResult::MarkerDetected { markers: ref m, .. } if m.len() == 2)
+        );
 
-        let cont = PumpResult::Continue;
-        assert!(matches!(cont, PumpResult::Continue));
+        let cont = PumpResult::Continue {
+            captured_bytes: vec![b'x'],
+        };
+        assert!(matches!(cont, PumpResult::Continue { .. }));
+        assert_eq!(cont.captured_bytes(), b"x");
 
         let eof = PumpResult::PtyEof;
         assert!(matches!(eof, PumpResult::PtyEof));
+        assert_eq!(eof.captured_bytes(), b"");
     }
 
     /// Test that multiple markers in a single read are all captured.
@@ -725,16 +862,46 @@ mod tests {
             MarkerEvent::Prompt,
             MarkerEvent::Preexec,
         ];
-        let result = PumpResult::MarkerDetected(events);
+        let result = PumpResult::MarkerDetected {
+            markers: events,
+            captured_bytes: b"test output".to_vec(),
+        };
 
-        if let PumpResult::MarkerDetected(captured) = result {
+        if let PumpResult::MarkerDetected {
+            markers: captured,
+            captured_bytes,
+        } = result
+        {
             assert_eq!(captured.len(), 3);
             assert_eq!(captured[0], MarkerEvent::Precmd { exit_code: 0 });
             assert_eq!(captured[1], MarkerEvent::Prompt);
             assert_eq!(captured[2], MarkerEvent::Preexec);
+            assert_eq!(captured_bytes, b"test output");
         } else {
             panic!("Expected MarkerDetected");
         }
+    }
+
+    /// Test PumpResult helper methods.
+    #[test]
+    fn test_pump_result_helpers() {
+        let result = PumpResult::MarkerDetected {
+            markers: smallvec![MarkerEvent::Prompt],
+            captured_bytes: b"hello".to_vec(),
+        };
+        assert!(result.markers().is_some());
+        assert_eq!(result.markers().unwrap().len(), 1);
+        assert_eq!(result.captured_bytes(), b"hello");
+
+        let cont = PumpResult::Continue {
+            captured_bytes: b"world".to_vec(),
+        };
+        assert!(cont.markers().is_none());
+        assert_eq!(cont.captured_bytes(), b"world");
+
+        let eof = PumpResult::PtyEof;
+        assert!(eof.markers().is_none());
+        assert!(eof.captured_bytes().is_empty());
     }
 
     /// Test Pump construction.
@@ -762,6 +929,7 @@ mod tests {
 
     /// Test that buffer size is reasonable.
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn test_buffer_size() {
         assert!(BUFFER_SIZE >= 1024, "Buffer too small");
         assert!(BUFFER_SIZE <= 65536, "Buffer too large");
@@ -769,6 +937,7 @@ mod tests {
 
     /// Test timeout constants.
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn test_timeout_constants() {
         assert!(MID_SEQUENCE_TIMEOUT_MS > 0);
         assert!(MID_SEQUENCE_TIMEOUT_MS < 1000);
@@ -779,6 +948,7 @@ mod tests {
     /// Test that run_once_with_timeout accepts Duration parameter.
     /// This is a structural test; full I/O testing is in integration.rs.
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn test_run_once_with_timeout_exists() {
         // Verify the method signature compiles and accepts Duration
         let _: fn(&mut Pump, Option<Duration>) -> Result<PumpResult> = Pump::run_once_with_timeout;

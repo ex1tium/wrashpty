@@ -12,8 +12,7 @@ use std::sync::LazyLock;
 use tracing::debug;
 
 use super::types::{
-    CommandSchema, FlagSchema, HelpFormat, SchemaSource,
-    SubcommandSchema, ValueType,
+    CommandSchema, FlagSchema, HelpFormat, SchemaSource, SubcommandSchema, ValueType,
 };
 
 /// Regex patterns for parsing help output.
@@ -36,6 +35,9 @@ struct HelpPatterns {
     // Value indicators
     value_placeholder: Regex,
     choice_values: Regex,
+
+    // Version extraction
+    version_number: Regex,
 }
 
 impl HelpPatterns {
@@ -79,6 +81,9 @@ impl HelpPatterns {
             choice_values: Regex::new(
                 r"\{([^}]+)\}"
             ).unwrap(),
+
+            // Version number extraction
+            version_number: Regex::new(r"(\d+\.\d+(?:\.\d+)?)").unwrap(),
         }
     }
 }
@@ -187,9 +192,8 @@ impl HelpParser {
         for line in lines.iter().take(5) {
             let line_lower = line.to_lowercase();
             if line_lower.contains("version") || line_lower.contains(" v") {
-                // Try to extract version number
-                let version_re = Regex::new(r"(\d+\.\d+(?:\.\d+)?)").ok()?;
-                if let Some(cap) = version_re.captures(line) {
+                // Try to extract version number using pre-compiled regex
+                if let Some(cap) = PATTERNS.version_number.captures(line) {
                     return Some(cap[1].to_string());
                 }
             }
@@ -218,7 +222,10 @@ impl HelpParser {
     }
 
     /// Identifies sections in the help output.
-    fn identify_sections<'a>(&self, lines: &'a [&'a str]) -> std::collections::HashMap<&'static str, Vec<&'a str>> {
+    fn identify_sections<'a>(
+        &self,
+        lines: &'a [&'a str],
+    ) -> std::collections::HashMap<&'static str, Vec<&'a str>> {
         let mut sections = std::collections::HashMap::new();
         let mut current_section: Option<&'static str> = None;
         let mut section_lines: Vec<&str> = Vec::new();
@@ -280,7 +287,10 @@ impl HelpParser {
     }
 
     /// Identifies sections in the help output (returns owned strings).
-    fn identify_sections_owned(&self, lines: &[String]) -> std::collections::HashMap<&'static str, Vec<String>> {
+    fn identify_sections_owned(
+        &self,
+        lines: &[String],
+    ) -> std::collections::HashMap<&'static str, Vec<String>> {
         let mut sections = std::collections::HashMap::new();
         let mut current_section: Option<&'static str> = None;
         let mut section_lines: Vec<String> = Vec::new();
@@ -367,7 +377,9 @@ impl HelpParser {
                 let name = name.trim();
                 // Validate it looks like a command name
                 if !name.is_empty()
-                    && name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+                    && name
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
                     && name.len() < 30
                 {
                     let mut sub = SubcommandSchema::new(name);
@@ -431,12 +443,18 @@ impl HelpParser {
             value_type = self.infer_value_type(trimmed);
         }
 
-        // Also check for = or < > indicators
-        if trimmed.contains('=') || trimmed.contains('<') || trimmed.contains('[') {
-            if !takes_value {
-                takes_value = true;
-                value_type = ValueType::String;
-            }
+        let definition_part = trimmed
+            .split_once("  ")
+            .map_or(trimmed, |(def, _)| def.trim());
+
+        // Also check for = or < > indicators in the flag definition itself.
+        if (definition_part.contains('=')
+            || definition_part.contains('<')
+            || definition_part.contains('['))
+            && !takes_value
+        {
+            takes_value = true;
+            value_type = ValueType::String;
         }
 
         // Extract description (everything after the flag definition)
@@ -474,14 +492,17 @@ impl HelpParser {
         if line_lower.contains("url") || line_lower.contains("uri") {
             return ValueType::Url;
         }
-        if line_lower.contains("number") || line_lower.contains("count") || line_lower.contains("num") {
+        if line_lower.contains("number")
+            || line_lower.contains("count")
+            || line_lower.contains("num")
+        {
             return ValueType::Number;
         }
 
         // Check for choice values: {a,b,c} or (a|b|c)
         if let Some(caps) = PATTERNS.choice_values.captures(line) {
             let choices: Vec<String> = caps[1]
-                .split(|c| c == ',' || c == '|')
+                .split([',', '|'])
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
@@ -607,13 +628,17 @@ Use "mytool [command] --help" for more information about a command.
         let schema = parser.parse().unwrap();
 
         // Check for verbose flag
-        let verbose = schema.global_flags.iter()
+        let verbose = schema
+            .global_flags
+            .iter()
             .find(|f| f.long.as_deref() == Some("--verbose"));
         assert!(verbose.is_some());
         assert!(!verbose.unwrap().takes_value);
 
         // Check for config flag with value
-        let config = schema.global_flags.iter()
+        let config = schema
+            .global_flags
+            .iter()
             .find(|f| f.long.as_deref() == Some("--config"));
         assert!(config.is_some());
         assert!(config.unwrap().takes_value);
@@ -643,5 +668,23 @@ Use "mytool [command] --help" for more information about a command.
 
         // Should have decent confidence with subcommands and flags
         assert!(schema.confidence > 0.7);
+    }
+
+    #[test]
+    fn test_parse_flag_line_description_brackets_do_not_imply_value() {
+        let help = r#"
+Flags:
+  --color    Enable color output [default: auto]
+"#;
+        let mut parser = HelpParser::new("myapp", help);
+        let schema = parser.parse().unwrap();
+
+        let color = schema
+            .global_flags
+            .iter()
+            .find(|f| f.long.as_deref() == Some("--color"))
+            .unwrap();
+        assert!(!color.takes_value);
+        assert_eq!(color.value_type, ValueType::Bool);
     }
 }

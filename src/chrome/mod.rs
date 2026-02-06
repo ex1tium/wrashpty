@@ -12,9 +12,11 @@ pub mod file_browser;
 pub mod help_panel;
 pub mod history_browser;
 pub mod panel;
+pub mod segments;
 pub mod symbols;
 pub mod tabbed_panel;
 pub mod theme;
 
 // Re-export core types for convenience
-pub use core::{Chrome, ChromeContext, NotificationStyle, SizeCheckResult};
+pub use core::{Chrome, NotificationStyle, SizeCheckResult};
+pub use segments::{GitInfo, ScrollInfo, TopbarState};
