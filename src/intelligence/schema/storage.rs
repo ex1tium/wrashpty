@@ -1,41 +1,10 @@
 //! Schema storage and retrieval from SQLite database.
 
 use rusqlite::{Connection, OptionalExtension};
-use tracing::{debug, info};
+use tracing::info;
 
 use super::types::{CommandSchema, SchemaSource, SubcommandSchema};
 use crate::intelligence::error::CIError;
-
-/// Creates the schema storage tables.
-pub fn create_schema_tables(conn: &Connection) -> Result<(), CIError> {
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS ci_command_schemas (
-            id INTEGER PRIMARY KEY,
-            command TEXT NOT NULL,
-            subcommand TEXT,
-            schema_json TEXT NOT NULL,
-            source TEXT NOT NULL,
-            confidence REAL DEFAULT 1.0,
-            extracted_at INTEGER NOT NULL,
-            last_validated INTEGER,
-            UNIQUE(command, subcommand)
-        )",
-        [],
-    )?;
-
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_schema_command ON ci_command_schemas(command)",
-        [],
-    )?;
-
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_schema_source ON ci_command_schemas(source)",
-        [],
-    )?;
-
-    debug!("Created schema storage tables");
-    Ok(())
-}
 
 /// Schema storage operations.
 pub struct SchemaStore<'a> {
@@ -310,7 +279,7 @@ mod tests {
 
     fn setup_test_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        create_schema_tables(&conn).unwrap();
+        crate::intelligence::db_schema::create_schema(&conn).unwrap();
         conn
     }
 
