@@ -139,14 +139,11 @@ impl SearchState {
             Err(_) => return, // Invalid regex (shouldn't happen with escaped query)
         };
 
-        // Search all lines in buffer
+        // Search all lines in buffer (sanitized to match rendered output)
         for (line_idx, line) in buffer.iter().enumerate() {
-            let content = line.content();
+            let sanitized = super::super::ansi::sanitize_for_display(line.content());
+            let content_str = String::from_utf8_lossy(&sanitized);
 
-            // Convert content to string for searching (lossy for non-UTF8)
-            let content_str = String::from_utf8_lossy(content);
-
-            // Find all matches using regex (preserves byte offsets in original string)
             for mat in regex.find_iter(&content_str) {
                 self.matches.push(SearchMatch {
                     line: line_idx,
@@ -233,14 +230,12 @@ impl SearchState {
         };
 
         // Search only within the specified lines
+        // Search within specified lines (sanitized to match rendered output)
         for &line_idx in within_lines {
             if let Some(line) = buffer.get(line_idx) {
-                let content = line.content();
+                let sanitized = super::super::ansi::sanitize_for_display(line.content());
+                let content_str = String::from_utf8_lossy(&sanitized);
 
-                // Convert content to string for searching (lossy for non-UTF8)
-                let content_str = String::from_utf8_lossy(content);
-
-                // Find all matches using regex (preserves byte offsets in original string)
                 for mat in regex.find_iter(&content_str) {
                     self.matches.push(SearchMatch {
                         line: line_idx,

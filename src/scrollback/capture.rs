@@ -23,6 +23,10 @@ pub struct CaptureState {
     escape_state: EscapeState,
     /// Whether the previous byte was CR and needs disambiguation from CRLF.
     pending_cr: bool,
+    /// Number of UTF-8 continuation bytes still expected for the current character.
+    utf8_remaining: u8,
+    /// Byte index in `partial_line` where the current multi-byte UTF-8 char starts.
+    utf8_start_index: usize,
 }
 
 /// State for tracking escape sequence parsing.
@@ -47,6 +51,8 @@ impl CaptureState {
             terminal_width: terminal_width.max(1),
             escape_state: EscapeState::Normal,
             pending_cr: false,
+            utf8_remaining: 0,
+            utf8_start_index: 0,
         }
     }
 
@@ -95,6 +101,7 @@ impl CaptureState {
             self.column = 0;
             self.escape_state = EscapeState::Normal;
             self.pending_cr = false;
+            self.utf8_remaining = 0;
             Some(line)
         }
     }
@@ -115,6 +122,7 @@ impl CaptureState {
             // Keep only the latest frame to avoid progress-line artifacts.
             self.partial_line.clear();
             self.column = 0;
+            self.utf8_remaining = 0;
         }
 
         match self.escape_state {
@@ -174,15 +182,38 @@ impl CaptureState {
             }
             // UTF-8 start bytes
             b if b >= 0xc0 => {
+                let seq_len = super::ansi::utf8_sequence_len(b);
+                self.utf8_start_index = self.partial_line.len();
                 self.partial_line.push(b);
-                // Simplified: count as width 1, actual width depends on character
-                self.column = self.column.saturating_add(1);
-                self.check_wrap()
+                if seq_len <= 1 {
+                    // Invalid start byte treated as width 1
+                    self.column = self.column.saturating_add(1);
+                    self.check_wrap()
+                } else {
+                    self.utf8_remaining = (seq_len - 1) as u8;
+                    None // wait for continuation bytes
+                }
             }
             // UTF-8 continuation bytes or control chars
             _ => {
                 self.partial_line.push(b);
-                // Continuation bytes don't add width
+                if self.utf8_remaining > 0 && (b & 0xC0) == 0x80 {
+                    self.utf8_remaining -= 1;
+                    if self.utf8_remaining == 0 {
+                        // Complete UTF-8 sequence: decode and measure display width
+                        let start = self.utf8_start_index;
+                        let w = if let Ok(s) = std::str::from_utf8(&self.partial_line[start..]) {
+                            s.chars()
+                                .next()
+                                .and_then(unicode_width::UnicodeWidthChar::width)
+                                .unwrap_or(1) as u16
+                        } else {
+                            1 // invalid UTF-8 fallback
+                        };
+                        self.column = self.column.saturating_add(w);
+                        return self.check_wrap();
+                    }
+                }
                 None
             }
         }
@@ -381,5 +412,62 @@ mod tests {
         assert_eq!(lines.len(), 0);
         // 2 chars + 6 spaces = 8 columns
         assert_eq!(state.column, 8);
+    }
+
+    #[test]
+    fn test_cjk_width_in_capture() {
+        let mut state = CaptureState::new(80);
+        // "你" is U+4F60, encoded as 0xE4 0xBD 0xA0, display width 2
+        let lines: Vec<_> = state.feed("你\n".as_bytes()).collect();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0], "你".as_bytes());
+    }
+
+    #[test]
+    fn test_cjk_column_tracking() {
+        let mut state = CaptureState::new(80);
+        // "a" (width 1) + "你" (width 2) = column 3
+        state.feed("a你".as_bytes()).for_each(drop);
+        assert_eq!(state.column, 3);
+    }
+
+    #[test]
+    fn test_cjk_wrap_detection() {
+        // Terminal width 3: "a" (col 1) + "你" (col 3) should trigger wrap
+        let mut state = CaptureState::new(3);
+        let lines: Vec<_> = state.feed("a你".as_bytes()).collect();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0], "a你".as_bytes());
+        assert_eq!(state.column, 0);
+    }
+
+    #[test]
+    fn test_cjk_no_wrap_when_fits() {
+        // Terminal width 4: "a" (col 1) + "你" (col 3) should NOT wrap
+        let mut state = CaptureState::new(4);
+        let lines: Vec<_> = state.feed("a你".as_bytes()).collect();
+        assert_eq!(lines.len(), 0);
+        assert_eq!(state.column, 3);
+    }
+
+    #[test]
+    fn test_utf8_split_across_feeds() {
+        let mut state = CaptureState::new(80);
+        // "你" is 0xE4 0xBD 0xA0 - split across two feed() calls
+        let lines: Vec<_> = state.feed(&[0xE4]).collect();
+        assert_eq!(lines.len(), 0);
+        assert_eq!(state.column, 0); // width not counted yet
+
+        let lines: Vec<_> = state.feed(&[0xBD, 0xA0]).collect();
+        assert_eq!(lines.len(), 0);
+        assert_eq!(state.column, 2); // now width 2 is counted
+    }
+
+    #[test]
+    fn test_two_byte_utf8_width() {
+        let mut state = CaptureState::new(80);
+        // "é" is U+00E9, 2-byte UTF-8: 0xC3 0xA9, display width 1
+        state.feed("é".as_bytes()).for_each(drop);
+        assert_eq!(state.column, 1);
     }
 }

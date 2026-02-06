@@ -17,17 +17,8 @@ use crate::chrome::theme::Theme;
 /// - No multi-byte UTF-8 character is split
 /// - ANSI escape sequences are not counted toward display width
 fn ansi_aware_truncate(content: &[u8], max_display_cols: usize) -> usize {
+    use super::ansi::{skip_csi, skip_osc, utf8_sequence_len};
     use unicode_width::UnicodeWidthChar;
-
-    fn utf8_sequence_len(first: u8) -> usize {
-        match first {
-            0x00..=0x7F => 1,
-            0xC2..=0xDF => 2,
-            0xE0..=0xEF => 3,
-            0xF0..=0xF4 => 4,
-            _ => 1,
-        }
-    }
 
     let mut width: usize = 0;
     let mut i = 0;
@@ -39,29 +30,10 @@ fn ansi_aware_truncate(content: &[u8], max_display_cols: usize) -> usize {
         if b == 0x1b && i + 1 < content.len() {
             let next = content[i + 1];
             if next == b'[' {
-                // CSI: skip until final byte
-                i += 2;
-                while i < content.len() && !(0x40..=0x7E).contains(&content[i]) {
-                    i += 1;
-                }
-                if i < content.len() {
-                    i += 1;
-                }
+                i = skip_csi(content, i + 2);
                 continue;
             } else if next == b']' {
-                // OSC: skip until BEL or ST
-                i += 2;
-                while i < content.len() {
-                    if content[i] == 0x07 {
-                        i += 1;
-                        break;
-                    }
-                    if content[i] == 0x1b && i + 1 < content.len() && content[i + 1] == b'\\' {
-                        i += 2;
-                        break;
-                    }
-                    i += 1;
-                }
+                i = skip_osc(content, i + 2);
                 continue;
             } else {
                 i += 2;
@@ -132,10 +104,11 @@ fn write_truncated_content<W: Write>(
     content: &[u8],
     max_display_cols: usize,
 ) -> io::Result<()> {
-    let safe_len = ansi_aware_truncate(content, max_display_cols);
-    out.write_all(&content[..safe_len])?;
+    let sanitized = super::ansi::sanitize_for_display(content);
+    let safe_len = ansi_aware_truncate(&sanitized, max_display_cols);
+    out.write_all(&sanitized[..safe_len])?;
 
-    if safe_len < content.len() {
+    if safe_len < sanitized.len() {
         out.write_all(b"\x1b[0m")?;
     }
 
@@ -688,9 +661,10 @@ impl ScrollViewer {
     ) -> io::Result<()> {
         use crate::chrome::segments::color_to_bg_ansi;
 
-        let truncate_len = ansi_aware_truncate(content, max_cols);
-        let was_truncated = truncate_len < content.len();
-        let truncated = &content[..truncate_len];
+        let sanitized = super::ansi::sanitize_for_display(content);
+        let truncate_len = ansi_aware_truncate(&sanitized, max_cols);
+        let was_truncated = truncate_len < sanitized.len();
+        let truncated = &sanitized[..truncate_len];
         let content_str = String::from_utf8_lossy(truncated);
         let mut pos = 0;
 

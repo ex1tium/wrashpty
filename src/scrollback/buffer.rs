@@ -84,15 +84,7 @@ impl ScrollLine {
     /// - Skips ANSI OSC sequences (ESC ] ... ST or BEL)
     /// - Uses UnicodeWidthChar for accurate character widths
     fn calculate_display_width(content: &[u8], terminal_width: u16) -> u16 {
-        fn utf8_sequence_len(first: u8) -> usize {
-            match first {
-                0x00..=0x7F => 1,
-                0xC2..=0xDF => 2,
-                0xE0..=0xEF => 3,
-                0xF0..=0xF4 => 4,
-                _ => 1,
-            }
-        }
+        use super::ansi::{skip_csi, skip_osc, utf8_sequence_len};
 
         let mut width: u16 = 0;
         let mut i = 0;
@@ -104,29 +96,10 @@ impl ScrollLine {
             if b == 0x1b && i + 1 < content.len() {
                 let next = content[i + 1];
                 if next == b'[' {
-                    // CSI sequence: skip until final byte (0x40-0x7E)
-                    i += 2;
-                    while i < content.len() && !(0x40..=0x7E).contains(&content[i]) {
-                        i += 1;
-                    }
-                    if i < content.len() {
-                        i += 1; // Skip final byte
-                    }
+                    i = skip_csi(content, i + 2);
                     continue;
                 } else if next == b']' {
-                    // OSC sequence: skip until BEL (0x07) or ST (ESC \)
-                    i += 2;
-                    while i < content.len() {
-                        if content[i] == 0x07 {
-                            i += 1;
-                            break;
-                        }
-                        if content[i] == 0x1b && i + 1 < content.len() && content[i + 1] == b'\\' {
-                            i += 2;
-                            break;
-                        }
-                        i += 1;
-                    }
+                    i = skip_osc(content, i + 2);
                     continue;
                 } else {
                     // Other escape sequence, skip ESC and next byte
