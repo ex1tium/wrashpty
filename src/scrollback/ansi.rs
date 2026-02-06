@@ -58,6 +58,22 @@ pub(crate) fn skip_osc(content: &[u8], mut pos: usize) -> usize {
     pos
 }
 
+/// Skips an ST-terminated sequence body starting at `pos`.
+///
+/// DCS (`ESC P`), SOS (`ESC X`), PM (`ESC ^`), and APC (`ESC _`) are all
+/// terminated by ST (`ESC \`). Unlike OSC, they are NOT terminated by BEL.
+/// Returns the position immediately after the ST, or `content.len()`
+/// if the sequence is unterminated.
+pub(crate) fn skip_st_terminated(content: &[u8], mut pos: usize) -> usize {
+    while pos < content.len() {
+        if content[pos] == 0x1b && pos + 1 < content.len() && content[pos + 1] == b'\\' {
+            return pos + 2;
+        }
+        pos += 1;
+    }
+    pos
+}
+
 /// Sanitizes captured line content for safe display in scrollback.
 ///
 /// Preserves SGR (Select Graphic Rendition) sequences for colors/styles
@@ -97,6 +113,11 @@ pub(crate) fn sanitize_for_display(content: &[u8]) -> Vec<u8> {
                 // OSC sequence: skip entirely
                 i = skip_osc(content, i + 2);
                 continue;
+            } else if matches!(next, b'P' | b'X' | b'^' | b'_') {
+                // DCS (P), SOS (X), PM (^), APC (_): ST-terminated sequences.
+                // Skip entire payload to avoid dumping sixel/DCS data into output.
+                i = skip_st_terminated(content, i + 2);
+                continue;
             } else {
                 // Other 2-byte escape: skip
                 i += 2;
@@ -117,8 +138,28 @@ pub(crate) fn sanitize_for_display(content: &[u8]) -> Vec<u8> {
             continue;
         }
 
-        // Printable ASCII and UTF-8: pass through
-        out.push(b);
+        // Printable ASCII: pass through directly
+        if b < 0x80 {
+            out.push(b);
+            i += 1;
+            continue;
+        }
+
+        // UTF-8 multi-byte: validate before passing through
+        let seq_len = utf8_sequence_len(b);
+        if seq_len > 1 && i + seq_len <= content.len() {
+            // Verify all continuation bytes have the form 10xxxxxx
+            let valid = content[i + 1..i + seq_len]
+                .iter()
+                .all(|&c| (c & 0xC0) == 0x80);
+            if valid {
+                out.extend_from_slice(&content[i..i + seq_len]);
+                i += seq_len;
+                continue;
+            }
+        }
+
+        // Invalid UTF-8 start byte or truncated sequence: skip
         i += 1;
     }
 
@@ -347,5 +388,134 @@ mod tests {
     fn test_sanitize_for_display_del_stripped() {
         let input = b"abc\x7Fd";
         assert_eq!(sanitize_for_display(input), b"abcd");
+    }
+
+    // --- skip_st_terminated ---
+
+    #[test]
+    fn test_skip_st_terminated_finds_st() {
+        // DCS payload terminated by ESC backslash
+        let content = b"some;dcs;payload\x1b\\ rest";
+        assert_eq!(skip_st_terminated(content, 0), 18); // after ESC backslash
+    }
+
+    #[test]
+    fn test_skip_st_terminated_unterminated_returns_len() {
+        let content = b"unterminated payload";
+        assert_eq!(skip_st_terminated(content, 0), content.len());
+    }
+
+    #[test]
+    fn test_skip_st_terminated_empty_returns_zero() {
+        assert_eq!(skip_st_terminated(b"", 0), 0);
+    }
+
+    #[test]
+    fn test_skip_st_terminated_esc_alone_not_st() {
+        // ESC without backslash is not ST
+        let content = b"payload\x1bX more";
+        assert_eq!(skip_st_terminated(content, 0), content.len());
+    }
+
+    // --- sanitize_for_display: DCS/SOS/PM/APC ---
+
+    #[test]
+    fn test_sanitize_for_display_dcs_stripped() {
+        // DCS sequence: ESC P <payload> ESC backslash
+        let input = b"before\x1bPq;1;1;10;#2NAAAAAA\x1b\\after";
+        assert_eq!(sanitize_for_display(input), b"beforeafter");
+    }
+
+    #[test]
+    fn test_sanitize_for_display_apc_stripped() {
+        // APC sequence: ESC _ <payload> ESC backslash
+        let input = b"text\x1b_some-apc-data\x1b\\more";
+        assert_eq!(sanitize_for_display(input), b"textmore");
+    }
+
+    #[test]
+    fn test_sanitize_for_display_sos_stripped() {
+        // SOS sequence: ESC X <payload> ESC backslash
+        let input = b"text\x1bXsos-payload\x1b\\more";
+        assert_eq!(sanitize_for_display(input), b"textmore");
+    }
+
+    #[test]
+    fn test_sanitize_for_display_pm_stripped() {
+        // PM sequence: ESC ^ <payload> ESC backslash
+        let input = b"text\x1b^pm-payload\x1b\\more";
+        assert_eq!(sanitize_for_display(input), b"textmore");
+    }
+
+    #[test]
+    fn test_sanitize_for_display_unterminated_dcs_strips_to_end() {
+        // Unterminated DCS — everything after ESC P is consumed
+        let input = b"before\x1bPunterminated";
+        assert_eq!(sanitize_for_display(input), b"before");
+    }
+
+    #[test]
+    fn test_sanitize_for_display_dcs_not_terminated_by_bel() {
+        // Unlike OSC, DCS is NOT terminated by BEL — BEL is part of payload
+        let input = b"before\x1bPpayload\x07after\x1b\\end";
+        assert_eq!(sanitize_for_display(input), b"beforeend");
+    }
+
+    // --- sanitize_for_display: UTF-8 validation ---
+
+    #[test]
+    fn test_sanitize_for_display_valid_utf8_multibyte_preserved() {
+        // 2-byte: é (U+00E9) = 0xC3 0xA9
+        let input = b"caf\xc3\xa9";
+        assert_eq!(sanitize_for_display(input), b"caf\xc3\xa9");
+    }
+
+    #[test]
+    fn test_sanitize_for_display_valid_utf8_3byte_preserved() {
+        // 3-byte: 你 (U+4F60) = 0xE4 0xBD 0xA0
+        let input = b"hi\xe4\xbd\xa0";
+        assert_eq!(sanitize_for_display(input), b"hi\xe4\xbd\xa0");
+    }
+
+    #[test]
+    fn test_sanitize_for_display_valid_utf8_4byte_preserved() {
+        // 4-byte: 🌍 (U+1F30D) = 0xF0 0x9F 0x8C 0x8D
+        let input = b"earth\xf0\x9f\x8c\x8d";
+        assert_eq!(sanitize_for_display(input), b"earth\xf0\x9f\x8c\x8d");
+    }
+
+    #[test]
+    fn test_sanitize_for_display_truncated_utf8_stripped() {
+        // Truncated 3-byte sequence: only 2 bytes present
+        let input = b"text\xe4\xbd";
+        assert_eq!(sanitize_for_display(input), b"text");
+    }
+
+    #[test]
+    fn test_sanitize_for_display_invalid_continuation_stripped() {
+        // 2-byte start followed by non-continuation byte
+        let input = b"text\xc3Xmore";
+        assert_eq!(sanitize_for_display(input), b"textXmore");
+    }
+
+    #[test]
+    fn test_sanitize_for_display_bare_continuation_bytes_stripped() {
+        // Bare continuation bytes (0x80-0xBF) without a valid start byte
+        let input = b"text\x80\xBFmore";
+        assert_eq!(sanitize_for_display(input), b"textmore");
+    }
+
+    #[test]
+    fn test_sanitize_for_display_overlong_start_byte_stripped() {
+        // 0xC0, 0xC1 are overlong encodings — utf8_sequence_len returns 1
+        let input = b"text\xc0\x80more";
+        assert_eq!(sanitize_for_display(input), b"textmore");
+    }
+
+    #[test]
+    fn test_sanitize_for_display_mixed_valid_invalid_utf8() {
+        // Valid 2-byte, then invalid continuation, then valid ASCII
+        let input = b"\xc3\xa9\xc3Xok";
+        assert_eq!(sanitize_for_display(input), b"\xc3\xa9Xok");
     }
 }
