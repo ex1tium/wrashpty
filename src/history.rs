@@ -204,7 +204,14 @@ fn get_last_history_line(path: &PathBuf) -> Result<Option<String>, HistoryError>
     if file_len < 8192 {
         let reader = BufReader::new(file);
         let mut last_line = None;
-        for line in reader.lines().map_while(Result::ok) {
+        for line_result in reader.lines() {
+            let line = match line_result {
+                Ok(l) => l,
+                Err(e) => {
+                    warn!("Error reading history line: {}", e);
+                    continue;
+                }
+            };
             if !line.trim().is_empty() && !line.starts_with('#') {
                 last_line = Some(line);
             }
@@ -226,7 +233,14 @@ fn get_last_history_line(path: &PathBuf) -> Result<Option<String>, HistoryError>
         lines.next(); // Skip potentially partial line
     }
 
-    for line in lines.map_while(Result::ok) {
+    for line_result in lines {
+        let line = match line_result {
+            Ok(l) => l,
+            Err(e) => {
+                warn!("Error reading history line: {}", e);
+                continue;
+            }
+        };
         if !line.trim().is_empty() && !line.starts_with('#') {
             last_line = Some(line);
         }
@@ -258,7 +272,15 @@ pub fn dedupe_bash_history() -> Result<usize, HistoryError> {
     let mut deduped: Vec<String> = Vec::new();
     let mut removed = 0;
 
-    for line in reader.lines().map_while(Result::ok) {
+    for line_result in reader.lines() {
+        let line = match line_result {
+            Ok(l) => l,
+            Err(e) => {
+                warn!("Error reading history line: {}", e);
+                continue;
+            }
+        };
+
         // Skip empty lines
         if line.trim().is_empty() {
             continue;

@@ -7,6 +7,7 @@
 #![allow(dead_code)]
 
 use anyhow::{Context, Result};
+use nix::fcntl::{FcntlArg, OFlag, fcntl};
 use nix::sys::termios::{LocalFlags, SetArg, Termios, tcgetattr, tcsetattr};
 use portable_pty::{Child, CommandBuilder, ExitStatus, MasterPty, PtySize, native_pty_system};
 use std::io::Write;
@@ -98,6 +99,21 @@ impl Pty {
             .master
             .take_writer()
             .context("Failed to get PTY writer")?;
+
+        // Set the master fd to non-blocking so the drain loop can observe
+        // EAGAIN and check the stop flag promptly.
+        {
+            let master_fd = pair
+                .master
+                .as_raw_fd()
+                .context("PTY master fd not available for O_NONBLOCK")?;
+            let flags = OFlag::from_bits_truncate(
+                fcntl(master_fd, FcntlArg::F_GETFL)
+                    .context("Failed to get PTY master flags")?,
+            );
+            fcntl(master_fd, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK))
+                .context("Failed to set O_NONBLOCK on PTY master")?;
+        }
 
         tracing::info!(rows, cols, "Spawned Bash on PTY ({}x{})", cols, rows);
 
