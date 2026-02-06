@@ -132,14 +132,14 @@ mod tests {
     // --- utf8_sequence_len ---
 
     #[test]
-    fn test_utf8_len_ascii() {
+    fn test_utf8_sequence_len_ascii_returns_1() {
         assert_eq!(utf8_sequence_len(b'A'), 1);
         assert_eq!(utf8_sequence_len(b' '), 1);
         assert_eq!(utf8_sequence_len(0x7F), 1);
     }
 
     #[test]
-    fn test_utf8_len_multibyte() {
+    fn test_utf8_sequence_len_multibyte_returns_expected_lengths() {
         // 2-byte: U+00C0..U+07FF (first byte 0xC2..0xDF)
         assert_eq!(utf8_sequence_len(0xC2), 2);
         assert_eq!(utf8_sequence_len(0xDF), 2);
@@ -152,7 +152,7 @@ mod tests {
     }
 
     #[test]
-    fn test_utf8_len_invalid_start() {
+    fn test_utf8_sequence_len_invalid_start_returns_1() {
         // Continuation bytes and other invalid start bytes return 1
         assert_eq!(utf8_sequence_len(0x80), 1);
         assert_eq!(utf8_sequence_len(0xBF), 1);
@@ -165,13 +165,17 @@ mod tests {
     // --- is_csi_final_byte ---
 
     #[test]
-    fn test_csi_final_byte_boundaries() {
+    fn test_is_csi_final_byte_valid_range_returns_true() {
         assert!(is_csi_final_byte(0x40)); // '@' - lower bound
         assert!(is_csi_final_byte(0x7E)); // '~' - upper bound
         assert!(is_csi_final_byte(b'm')); // SGR
         assert!(is_csi_final_byte(b'H')); // CUP (cursor position)
         assert!(is_csi_final_byte(b'J')); // ED (erase display)
         assert!(is_csi_final_byte(b'K')); // EL (erase line)
+    }
+
+    #[test]
+    fn test_is_csi_final_byte_non_final_returns_false() {
         assert!(!is_csi_final_byte(b';')); // parameter separator
         assert!(!is_csi_final_byte(b'?')); // private mode prefix
         assert!(!is_csi_final_byte(b'0')); // digit parameter
@@ -182,34 +186,34 @@ mod tests {
     // --- skip_csi ---
 
     #[test]
-    fn test_skip_csi_sgr() {
+    fn test_skip_csi_sgr_sequence_returns_pos_after_final() {
         // ESC[31m - "31m" is what skip_csi sees (pos starts after ESC[)
         let content = b"31m rest";
         assert_eq!(skip_csi(content, 0), 3); // skips "31m", lands after 'm'
     }
 
     #[test]
-    fn test_skip_csi_cursor_move() {
+    fn test_skip_csi_cursor_move_returns_pos_after_final() {
         // ESC[10;5H
         let content = b"10;5H rest";
         assert_eq!(skip_csi(content, 0), 5); // skips "10;5H"
     }
 
     #[test]
-    fn test_skip_csi_private_mode() {
+    fn test_skip_csi_private_mode_returns_pos_after_final() {
         // ESC[?1049h (alt screen)
         let content = b"?1049h";
         assert_eq!(skip_csi(content, 0), 6);
     }
 
     #[test]
-    fn test_skip_csi_unterminated() {
+    fn test_skip_csi_unterminated_returns_content_len() {
         let content = b"31;42";
         assert_eq!(skip_csi(content, 0), 5); // returns content.len()
     }
 
     #[test]
-    fn test_skip_csi_empty() {
+    fn test_skip_csi_empty_returns_zero() {
         let content = b"";
         assert_eq!(skip_csi(content, 0), 0);
     }
@@ -217,27 +221,27 @@ mod tests {
     // --- skip_osc ---
 
     #[test]
-    fn test_skip_osc_bel_terminated() {
+    fn test_skip_osc_bel_terminated_returns_pos_after_bel() {
         // ESC]0;title BEL
         let content = b"0;my-title\x07 rest";
         assert_eq!(skip_osc(content, 0), 11); // skips up to and including BEL
     }
 
     #[test]
-    fn test_skip_osc_st_terminated() {
+    fn test_skip_osc_st_terminated_returns_pos_after_st() {
         // ESC]0;title ESC\ (ST)
         let content = b"0;my-title\x1b\\ rest";
         assert_eq!(skip_osc(content, 0), 12); // skips up to and including ESC backslash
     }
 
     #[test]
-    fn test_skip_osc_unterminated() {
+    fn test_skip_osc_unterminated_returns_content_len() {
         let content = b"0;my-title";
         assert_eq!(skip_osc(content, 0), 10); // returns content.len()
     }
 
     #[test]
-    fn test_skip_osc_empty() {
+    fn test_skip_osc_empty_returns_zero() {
         let content = b"";
         assert_eq!(skip_osc(content, 0), 0);
     }
@@ -245,13 +249,13 @@ mod tests {
     // --- sanitize_for_display ---
 
     #[test]
-    fn test_sanitize_preserves_sgr() {
+    fn test_sanitize_for_display_sgr_preserved() {
         let input = b"\x1b[31mred\x1b[0m";
         assert_eq!(sanitize_for_display(input), b"\x1b[31mred\x1b[0m");
     }
 
     #[test]
-    fn test_sanitize_preserves_complex_sgr() {
+    fn test_sanitize_for_display_complex_sgr_preserved() {
         // Bold + 256-color foreground + RGB background
         let input = b"\x1b[1;38;5;196;48;2;0;128;255mtext\x1b[0m";
         assert_eq!(
@@ -261,86 +265,86 @@ mod tests {
     }
 
     #[test]
-    fn test_sanitize_strips_cursor_move() {
+    fn test_sanitize_for_display_cursor_move_stripped() {
         let input = b"hello\x1b[10;5Hworld";
         assert_eq!(sanitize_for_display(input), b"helloworld");
     }
 
     #[test]
-    fn test_sanitize_strips_screen_clear() {
+    fn test_sanitize_for_display_screen_clear_stripped() {
         let input = b"before\x1b[2Jafter";
         assert_eq!(sanitize_for_display(input), b"beforeafter");
     }
 
     #[test]
-    fn test_sanitize_strips_erase_line() {
+    fn test_sanitize_for_display_erase_line_stripped() {
         let input = b"text\x1b[K";
         assert_eq!(sanitize_for_display(input), b"text");
     }
 
     #[test]
-    fn test_sanitize_strips_osc() {
+    fn test_sanitize_for_display_osc_bel_stripped() {
         let input = b"text\x1b]0;my-title\x07more";
         assert_eq!(sanitize_for_display(input), b"textmore");
     }
 
     #[test]
-    fn test_sanitize_strips_osc_st() {
+    fn test_sanitize_for_display_osc_st_stripped() {
         let input = b"text\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\more";
         assert_eq!(sanitize_for_display(input), b"textlinkmore");
     }
 
     #[test]
-    fn test_sanitize_strips_bel() {
+    fn test_sanitize_for_display_bel_control_stripped() {
         let input = b"hello\x07world";
         assert_eq!(sanitize_for_display(input), b"helloworld");
     }
 
     #[test]
-    fn test_sanitize_strips_backspace() {
+    fn test_sanitize_for_display_backspace_stripped() {
         let input = b"abc\x08d";
         assert_eq!(sanitize_for_display(input), b"abcd");
     }
 
     #[test]
-    fn test_sanitize_preserves_tab() {
+    fn test_sanitize_for_display_tab_preserved() {
         let input = b"col1\tcol2";
         assert_eq!(sanitize_for_display(input), b"col1\tcol2");
     }
 
     #[test]
-    fn test_sanitize_preserves_utf8() {
+    fn test_sanitize_for_display_utf8_preserved() {
         let input = "hello 你好 🌍".as_bytes();
         assert_eq!(sanitize_for_display(input), input);
     }
 
     #[test]
-    fn test_sanitize_mixed_sgr_and_cursor() {
+    fn test_sanitize_for_display_mixed_sgr_and_cursor_keeps_sgr_only() {
         // SGR preserved, cursor move stripped
         let input = b"\x1b[31m\x1b[10;5Hred\x1b[0m";
         assert_eq!(sanitize_for_display(input), b"\x1b[31mred\x1b[0m");
     }
 
     #[test]
-    fn test_sanitize_empty() {
+    fn test_sanitize_for_display_empty_returns_empty() {
         assert_eq!(sanitize_for_display(b""), b"");
     }
 
     #[test]
-    fn test_sanitize_plain_text() {
+    fn test_sanitize_for_display_plain_text_unchanged() {
         let input = b"just plain text";
         assert_eq!(sanitize_for_display(input), input);
     }
 
     #[test]
-    fn test_sanitize_strips_private_mode() {
+    fn test_sanitize_for_display_private_mode_stripped() {
         // ESC[?25h (show cursor) and ESC[?25l (hide cursor)
         let input = b"\x1b[?25ltext\x1b[?25h";
         assert_eq!(sanitize_for_display(input), b"text");
     }
 
     #[test]
-    fn test_sanitize_strips_del() {
+    fn test_sanitize_for_display_del_stripped() {
         let input = b"abc\x7Fd";
         assert_eq!(sanitize_for_display(input), b"abcd");
     }
