@@ -62,7 +62,12 @@ impl App {
         // Parse bytes into lines and add to buffer
         if self.scrollback_buffer.is_capture_active() {
             for line in self.capture_state.feed(bytes) {
-                self.scrollback_buffer.push_line(line);
+                let dropped = self.scrollback_buffer.push_line(line);
+                if dropped > 0 {
+                    self.viewer_state
+                        .boundaries
+                        .adjust_for_dropped_lines(dropped);
+                }
             }
         }
 
@@ -1306,6 +1311,16 @@ impl App {
     /// Inner scroll view loop (separated for RAII cleanup).
     pub(super) fn run_scroll_view_inner(&mut self) -> Result<()> {
         use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+
+        // Flush any partial line from capture so it appears in scrollback
+        if let Some(partial) = self.capture_state.flush() {
+            let dropped = self.scrollback_buffer.push_line(partial);
+            if dropped > 0 {
+                self.viewer_state
+                    .boundaries
+                    .adjust_for_dropped_lines(dropped);
+            }
+        }
 
         // Initial render
         if let Err(e) = self.render_scrollback_view() {

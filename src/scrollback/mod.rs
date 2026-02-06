@@ -28,6 +28,7 @@
 //! returns to live view and forwards the key to the shell.
 
 mod alt_screen;
+mod ansi;
 mod boundaries;
 mod buffer;
 mod capture;
