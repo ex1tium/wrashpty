@@ -158,11 +158,12 @@ impl HistoryStore {
         let is_first_run = !db_path.exists();
 
         // Create the reedline history instance
-        // Pass None for session_id to use all sessions, and None for timestamp retention
+        // Second parameter is optional session_id metadata; None means no session metadata
+        // is recorded with history entries for this instance.
         let reedline_history = SqliteBackedHistory::with_file(
             db_path.clone(),
-            None, // No session filtering
-            None, // No timestamp retention filtering
+            None, // No session_id metadata is recorded.
+            None, // No session_timestamp metadata is recorded.
         )?;
 
         // Set restrictive permissions on the DB file (owner read/write only)

@@ -233,39 +233,27 @@ impl<'a> SchemaStore<'a> {
             |row| row.get(0),
         )?;
 
-        let confidence: f64 = match self.conn.query_row(
-            "SELECT confidence FROM ci_command_schemas
-             WHERE command = ?1 AND subcommand IS NULL",
-            [command],
-            |row| row.get(0),
-        ) {
-            Ok(value) => value,
-            Err(e) => {
-                debug!(
-                    command = command,
-                    error = %e,
-                    "Falling back to default confidence in schema stats"
-                );
-                0.0
-            }
-        };
+        let confidence: f64 = self
+            .conn
+            .query_row(
+                "SELECT confidence FROM ci_command_schemas
+                 WHERE command = ?1 AND subcommand IS NULL",
+                [command],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or(0.0);
 
-        let source: String = match self.conn.query_row(
-            "SELECT source FROM ci_command_schemas
-             WHERE command = ?1 AND subcommand IS NULL",
-            [command],
-            |row| row.get(0),
-        ) {
-            Ok(value) => value,
-            Err(e) => {
-                debug!(
-                    command = command,
-                    error = %e,
-                    "Falling back to default source in schema stats"
-                );
-                "unknown".to_string()
-            }
-        };
+        let source: String = self
+            .conn
+            .query_row(
+                "SELECT source FROM ci_command_schemas
+                 WHERE command = ?1 AND subcommand IS NULL",
+                [command],
+                |row| row.get(0),
+            )
+            .optional()?
+            .unwrap_or_else(|| "unknown".to_string());
 
         Ok(SchemaStats {
             command: command.to_string(),
