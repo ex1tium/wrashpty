@@ -17,6 +17,8 @@
 //!    - Flag values (`ci_flag_values`) for `--flag <value>` positions
 //!    - Pipe commands (`ci_pipe_chains`) for post-pipe positions
 //!    - Command schemas (`ci_command_schemas`) for subcommands/flags/value choices
+//!    - Session transitions (`ci_transitions`) for likely next commands
+//!    - Templates (`ci_templates`) for reusable command patterns
 //!
 //! # Scoring and Ranking
 //!
@@ -31,6 +33,8 @@ use super::fuzzy;
 use super::patterns;
 use super::schema::{CommandSchema, FlagSchema, SchemaStore, SubcommandSchema, ValueType};
 use super::scoring::{self, ContextMatch};
+use super::sessions;
+use super::templates;
 use super::types::{
     PositionType, Suggestion, SuggestionContext, SuggestionMetadata, SuggestionSource,
 };
@@ -146,7 +150,11 @@ fn gather_suggestions(conn: &Connection, context: &SuggestionContext) -> Vec<Sug
     // 3. Schema source: extracted/bootstrapped command definitions
     suggestions.extend(suggest_from_schema(conn, context));
 
-    // 4. Supplementary sources for specific contexts
+    // 4. Session transitions and template completions
+    suggestions.extend(suggest_from_session_transitions(conn, context));
+    suggestions.extend(suggest_from_templates(conn, context));
+
+    // 5. Supplementary sources for specific contexts
     match &context.position {
         PositionType::FlagValue { flag } => {
             // Add specialized flag value suggestions
@@ -168,7 +176,7 @@ fn gather_suggestions(conn: &Connection, context: &SuggestionContext) -> Vec<Sug
         _ => {}
     }
 
-    // 5. Fuzzy search fallback: if partial text is provided and might be a typo
+    // 6. Fuzzy search fallback: if partial text is provided and might be a typo
     if !context.partial.is_empty() && context.partial.len() >= 2 {
         suggestions.extend(suggest_from_fuzzy_search(conn, &context.partial, 5));
     }
@@ -179,6 +187,76 @@ fn gather_suggestions(conn: &Connection, context: &SuggestionContext) -> Vec<Sug
 /// Suggests from user patterns.
 fn suggest_user_patterns(conn: &Connection, context: &SuggestionContext) -> Vec<Suggestion> {
     user_patterns::suggest_from_patterns(conn, context).unwrap_or_default()
+}
+
+/// Suggests likely next commands from session transition history.
+fn suggest_from_session_transitions(
+    conn: &Connection,
+    context: &SuggestionContext,
+) -> Vec<Suggestion> {
+    if !matches!(context.position, PositionType::Command) {
+        return Vec::new();
+    }
+
+    let transition_seed = context.last_command.as_deref().or_else(|| {
+        context
+            .session
+            .as_ref()
+            .and_then(|session| session.recent_commands.last().map(String::as_str))
+    });
+
+    transition_seed
+        .map(|last| sessions::suggest_next(conn, last))
+        .unwrap_or_default()
+}
+
+/// Suggests template-based command completions.
+fn suggest_from_templates(conn: &Connection, context: &SuggestionContext) -> Vec<Suggestion> {
+    if matches!(context.position, PositionType::AfterPipe) {
+        return Vec::new();
+    }
+
+    let now = chrono::Utc::now().timestamp();
+    let context_match = if context.preceding_tokens.is_empty() {
+        ContextMatch::Generic
+    } else {
+        ContextMatch::Exact
+    };
+
+    templates::suggest_templates(conn, context)
+        .into_iter()
+        .filter_map(|completion| {
+            let score = scoring::compute_score(
+                completion.template.frequency,
+                now,
+                None,
+                context_match,
+                SuggestionSource::Template,
+            ) * completion.confidence.max(0.1);
+
+            let preview = completion.preview;
+            let text = template_token_for_context(&preview, context)?;
+            Some(Suggestion {
+                text,
+                source: SuggestionSource::Template,
+                score,
+                metadata: SuggestionMetadata {
+                    frequency: completion.template.frequency,
+                    last_seen: Some(now),
+                    template_preview: Some(preview),
+                    ..Default::default()
+                },
+            })
+        })
+        .collect()
+}
+
+fn template_token_for_context(preview: &str, context: &SuggestionContext) -> Option<String> {
+    let token_index = context.preceding_tokens.len();
+    preview
+        .split_whitespace()
+        .nth(token_index)
+        .map(ToString::to_string)
 }
 
 /// Suggests from stored command schemas.
@@ -620,6 +698,7 @@ mod tests {
     use crate::intelligence::db_schema;
     use crate::intelligence::schema::{SchemaSource, store_schema};
     use crate::intelligence::schema::{SubcommandSchema, ValueType};
+    use crate::intelligence::tokenizer::compute_command_hash;
     use crate::intelligence::types::AnalyzedToken;
 
     fn setup_test_db() -> Connection {
@@ -984,5 +1063,96 @@ mod tests {
         let texts: Vec<&str> = suggestions.iter().map(|s| s.text.as_str()).collect();
         assert!(texts.contains(&"json"), "expected 'json' in {:?}", texts);
         assert!(texts.contains(&"yaml"), "expected 'yaml' in {:?}", texts);
+    }
+
+    #[test]
+    fn test_session_transition_source_is_used_in_main_suggest_pipeline() {
+        let conn = setup_test_db();
+        let now = chrono::Utc::now().timestamp();
+        let from_command = "git status";
+        let to_command = "git commit -m test";
+        let from_hash = compute_command_hash(from_command);
+        let to_hash = compute_command_hash(to_command);
+
+        conn.execute(
+            "INSERT INTO ci_commands
+             (command_line, command_hash, token_ids, token_count, timestamp)
+             VALUES (?1, ?2, '[]', 0, ?3)",
+            rusqlite::params![to_command, to_hash, now],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO ci_transitions
+             (from_command_hash, to_command_hash, frequency, last_seen)
+             VALUES (?1, ?2, 4, ?3)",
+            rusqlite::params![from_hash, to_hash, now],
+        )
+        .unwrap();
+
+        let context = SuggestionContext {
+            position: PositionType::Command,
+            last_command: Some(from_command.to_string()),
+            ..Default::default()
+        };
+
+        let suggestions = suggest(&conn, &context, 10);
+        let transition = suggestions
+            .iter()
+            .find(|s| s.text == to_command && s.source == SuggestionSource::SessionTransition);
+        assert!(
+            transition.is_some(),
+            "expected session transition suggestion in {:?}",
+            suggestions
+                .iter()
+                .map(|s| (&s.text, s.source))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_template_source_suggests_next_token_in_main_pipeline() {
+        let conn = setup_test_db();
+        let now = chrono::Utc::now().timestamp();
+        let template = "git checkout <BRANCH>";
+        let template_hash = compute_command_hash(template);
+
+        conn.execute(
+            "INSERT INTO ci_templates
+             (template, template_hash, base_command_id, placeholder_count, placeholders, frequency, last_seen, example_command)
+             VALUES (?1, ?2, NULL, 1, '[]', 6, ?3, 'git checkout main')",
+            rusqlite::params![template, template_hash, now],
+        )
+        .unwrap();
+
+        let context = SuggestionContext {
+            preceding_tokens: vec![AnalyzedToken::new(
+                "git",
+                crate::chrome::command_edit::TokenType::Command,
+                0,
+            )],
+            partial: "ch".to_string(),
+            position: PositionType::Subcommand,
+            ..Default::default()
+        };
+
+        let suggestions = suggest(&conn, &context, 10);
+        let template_suggestion = suggestions
+            .iter()
+            .find(|s| s.text == "checkout" && s.source == SuggestionSource::Template);
+        assert!(
+            template_suggestion.is_some(),
+            "expected template-derived token suggestion in {:?}",
+            suggestions
+                .iter()
+                .map(|s| (&s.text, s.source))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            template_suggestion
+                .and_then(|s| s.metadata.template_preview.as_deref())
+                .is_some(),
+            "template suggestion should preserve preview metadata"
+        );
     }
 }
