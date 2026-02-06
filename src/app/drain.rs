@@ -33,6 +33,8 @@ pub(super) struct DrainResult {
     pub bytes: Vec<u8>,
     /// Whether EOF was detected.
     pub eof: bool,
+    /// Whether the drain loop stopped due to local stop flag (not PTY EOF).
+    pub drain_stopped: bool,
     /// Number of bytes dropped due to channel backpressure before this chunk.
     pub dropped_bytes: usize,
 }
@@ -87,10 +89,16 @@ impl Drop for DrainGuard {
 /// count is tracked. The dropped count is reported with the next successfully
 /// sent chunk so users are informed about dropped background output.
 pub(super) fn pty_drain_loop(pty_fd: RawFd, stop: Arc<AtomicBool>, tx: SyncSender<DrainResult>) {
-    fn send_final_result(tx: &SyncSender<DrainResult>, dropped_bytes: usize) {
+    fn send_final_result(
+        tx: &SyncSender<DrainResult>,
+        dropped_bytes: usize,
+        eof: bool,
+        drain_stopped: bool,
+    ) {
         let final_result = DrainResult {
             bytes: Vec::new(),
-            eof: true,
+            eof,
+            drain_stopped,
             dropped_bytes,
         };
         let _ = tx.try_send(final_result);
@@ -111,7 +119,7 @@ pub(super) fn pty_drain_loop(pty_fd: RawFd, stop: Arc<AtomicBool>, tx: SyncSende
             Err(nix::errno::Errno::EINTR) => continue,
             Err(e) => {
                 warn!("Edit-mode PTY drain poll failed: {}", e);
-                send_final_result(&tx, pending_dropped_bytes);
+                send_final_result(&tx, pending_dropped_bytes, true, false);
                 final_result_sent = true;
                 break;
             }
@@ -120,7 +128,7 @@ pub(super) fn pty_drain_loop(pty_fd: RawFd, stop: Arc<AtomicBool>, tx: SyncSende
         if let Some(revents) = pollfds[0].revents() {
             if revents.contains(PollFlags::POLLHUP) || revents.contains(PollFlags::POLLERR) {
                 // EOF detected - notify receiver, then stop.
-                send_final_result(&tx, pending_dropped_bytes);
+                send_final_result(&tx, pending_dropped_bytes, true, false);
                 final_result_sent = true;
                 break;
             }
@@ -131,13 +139,14 @@ pub(super) fn pty_drain_loop(pty_fd: RawFd, stop: Arc<AtomicBool>, tx: SyncSende
                     match read(pty_fd, &mut buf) {
                         Ok(0) => {
                             // EOF - use try_send to avoid blocking
-                            send_final_result(&tx, pending_dropped_bytes);
+                            send_final_result(&tx, pending_dropped_bytes, true, false);
                             return;
                         }
                         Ok(n) => {
                             let result = DrainResult {
                                 bytes: buf[..n].to_vec(),
                                 eof: false,
+                                drain_stopped: false,
                                 dropped_bytes: pending_dropped_bytes,
                             };
                             // Use try_send for backpressure - don't block PTY reads
@@ -160,12 +169,12 @@ pub(super) fn pty_drain_loop(pty_fd: RawFd, stop: Arc<AtomicBool>, tx: SyncSende
                         Err(nix::errno::Errno::EAGAIN) => break,
                         Err(nix::errno::Errno::EIO) => {
                             // EIO means PTY closed - use try_send to avoid blocking
-                            send_final_result(&tx, pending_dropped_bytes);
+                            send_final_result(&tx, pending_dropped_bytes, true, false);
                             return;
                         }
                         Err(e) => {
                             warn!("Edit-mode PTY drain read failed: {}", e);
-                            send_final_result(&tx, pending_dropped_bytes);
+                            send_final_result(&tx, pending_dropped_bytes, true, false);
                             final_result_sent = true;
                             break;
                         }
@@ -177,7 +186,7 @@ pub(super) fn pty_drain_loop(pty_fd: RawFd, stop: Arc<AtomicBool>, tx: SyncSende
 
     // Stop-flag termination should still notify the receiver that draining ended.
     if !final_result_sent {
-        send_final_result(&tx, pending_dropped_bytes);
+        send_final_result(&tx, pending_dropped_bytes, false, true);
     }
 }
 
@@ -207,6 +216,7 @@ mod tests {
             .recv_timeout(Duration::from_millis((EDIT_MODE_DRAIN_POLL_MS * 4) as u64))
             .expect("expected drain result after EOF");
         assert!(result.eof);
+        assert!(!result.drain_stopped);
         assert!(result.bytes.is_empty());
 
         stop.store(true, Ordering::Relaxed);
@@ -239,6 +249,7 @@ mod tests {
         assert_eq!(first_result.bytes, first);
         assert_eq!(first_result.dropped_bytes, 0);
         assert!(!first_result.eof);
+        assert!(!first_result.drain_stopped);
 
         write(write_fd, third).expect("third write should succeed");
         thread::sleep(Duration::from_millis((EDIT_MODE_DRAIN_POLL_MS * 2) as u64));
@@ -249,6 +260,7 @@ mod tests {
         assert_eq!(next_result.bytes, third);
         assert_eq!(next_result.dropped_bytes, dropped.len());
         assert!(!next_result.eof);
+        assert!(!next_result.drain_stopped);
 
         close(write_fd).expect("write end should close");
         stop.store(true, Ordering::Relaxed);
@@ -256,7 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pty_drain_loop_stop_flag_sends_final_eof_result() {
+    fn test_pty_drain_loop_stop_flag_sends_final_stop_result() {
         let (read_fd, _write_fd) = pipe().expect("pipe should be created");
         let (tx, rx) = mpsc::sync_channel(2);
         let stop = Arc::new(AtomicBool::new(false));
@@ -270,8 +282,9 @@ mod tests {
 
         let result = rx
             .recv_timeout(Duration::from_millis((EDIT_MODE_DRAIN_POLL_MS * 4) as u64))
-            .expect("final EOF result should be sent on stop");
-        assert!(result.eof);
+            .expect("final stop result should be sent on stop");
+        assert!(!result.eof);
+        assert!(result.drain_stopped);
         assert!(result.bytes.is_empty());
 
         handle.join().expect("drain thread should join");

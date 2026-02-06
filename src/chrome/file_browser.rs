@@ -896,7 +896,9 @@ impl Panel for FileBrowserPanel {
                 let actual_idx = self.scroll_offset + display_idx;
                 let is_selected = actual_idx == self.selection;
 
-                let icon = if entry.is_dir { "📁" } else { "📄" };
+                // Use single-column ASCII markers to avoid wide-glyph
+                // rendering drift against panel borders in some terminals.
+                let icon = if entry.is_dir { "d" } else { "f" };
                 let icon_color = if entry.is_dir {
                     self.theme.dir_color
                 } else {
