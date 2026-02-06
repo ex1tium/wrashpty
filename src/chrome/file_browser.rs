@@ -17,7 +17,7 @@ use ratatui_widgets::paragraph::{Paragraph, Wrap};
 use tracing::debug;
 
 use super::command_edit::{
-    superscript_number, token_type_style, CommandEditState, CommandToken, TokenType,
+    CommandEditState, CommandToken, TokenType, superscript_number, token_type_style,
 };
 use super::panel::{Panel, PanelResult};
 use super::theme::Theme;
@@ -804,7 +804,7 @@ impl Panel for FileBrowserPanel {
         let truncated_path = if crate::ui::text_width::display_width(&path_str) > max_path_width {
             // Truncate from the left (show the end of the path)
             let target_width = max_path_width.saturating_sub(3); // room for "..."
-                                                                 // Walk backwards through chars to find how much of the tail fits.
+            // Walk backwards through chars to find how much of the tail fits.
             let mut width = 0;
             let mut start_idx = path_str.len();
             for (idx, ch) in path_str.char_indices().rev() {
