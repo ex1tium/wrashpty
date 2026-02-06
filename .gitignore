@@ -6,6 +6,7 @@
 
 # Log files
 /tmp/wrashpty.log
+debug.log
 
 # Editor artifacts
 .idea/
