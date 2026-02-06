@@ -84,6 +84,16 @@ impl ScrollLine {
     /// - Skips ANSI OSC sequences (ESC ] ... ST or BEL)
     /// - Uses UnicodeWidthChar for accurate character widths
     fn calculate_display_width(content: &[u8], terminal_width: u16) -> u16 {
+        fn utf8_sequence_len(first: u8) -> usize {
+            match first {
+                0x00..=0x7F => 1,
+                0xC2..=0xDF => 2,
+                0xE0..=0xEF => 3,
+                0xF0..=0xF4 => 4,
+                _ => 1,
+            }
+        }
+
         let mut width: u16 = 0;
         let mut i = 0;
 
@@ -138,18 +148,39 @@ impl ScrollLine {
                 continue;
             }
 
-            // Try to decode UTF-8 character and get its width
-            if let Ok(s) = std::str::from_utf8(&content[i..]) {
-                if let Some(c) = s.chars().next() {
-                    let char_width = c.width().unwrap_or(0) as u16;
-                    width = width.saturating_add(char_width);
-                    i += c.len_utf8();
-                    continue;
+            // Decode only the next UTF-8 codepoint so invalid bytes later
+            // in the line don't invalidate already-decodable characters.
+            let expected_len = utf8_sequence_len(b);
+            let mut decoded = false;
+
+            if expected_len == 1 {
+                let c = b as char;
+                width = width.saturating_add(c.width().unwrap_or(0) as u16);
+                i += 1;
+                decoded = true;
+            } else {
+                let mut attempt_len = expected_len;
+                while attempt_len > 1 {
+                    let end = i + attempt_len;
+                    if end <= content.len() {
+                        if let Ok(s) = std::str::from_utf8(&content[i..end]) {
+                            if let Some(c) = s.chars().next() {
+                                width = width.saturating_add(c.width().unwrap_or(0) as u16);
+                                i += c.len_utf8();
+                                decoded = true;
+                                break;
+                            }
+                        }
+                    }
+                    attempt_len -= 1;
                 }
             }
 
-            // Fallback: invalid UTF-8 byte, skip it
-            i += 1;
+            if !decoded {
+                // Treat invalid bytes as width 1 replacement glyphs.
+                width = width.saturating_add(1);
+                i += 1;
+            }
         }
 
         width.min(terminal_width)
@@ -266,6 +297,9 @@ impl ScrollbackBuffer {
     /// Number of lines dropped to make room (0 or 1).
     pub fn push_line(&mut self, content: Vec<u8>) -> usize {
         if !self.capture_active {
+            return 0;
+        }
+        if self.max_lines == 0 || self.max_line_bytes == 0 {
             return 0;
         }
 

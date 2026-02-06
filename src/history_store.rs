@@ -889,16 +889,22 @@ impl HistoryStore {
     }
 
     /// Returns whether intelligence is available and enabled.
-    pub fn has_intelligence(&self) -> bool {
+    pub fn is_intelligence_enabled(&self) -> bool {
         self.intelligence
             .as_ref()
             .map(|ci| ci.is_enabled())
             .unwrap_or(false)
     }
 
+    /// Returns whether intelligence is available and enabled.
+    #[deprecated(note = "Use is_intelligence_enabled() instead")]
+    pub fn has_intelligence(&self) -> bool {
+        self.is_intelligence_enabled()
+    }
+
     /// Enables or disables intelligence.
     ///
-    /// The setting is persisted to the database.
+    /// The setting is persisted to the database on a best-effort basis.
     pub fn set_intelligence_enabled(&mut self, enabled: bool) {
         if let Some(ref mut ci) = self.intelligence {
             ci.set_enabled(enabled);

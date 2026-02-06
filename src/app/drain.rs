@@ -12,6 +12,7 @@ use std::thread::JoinHandle;
 
 use nix::poll::{PollFd, PollFlags, poll};
 use nix::unistd::read;
+use tracing::warn;
 
 /// Poll interval for background PTY drain during Edit mode (milliseconds).
 pub(super) const EDIT_MODE_DRAIN_POLL_MS: i32 = 50;
@@ -86,6 +87,15 @@ impl Drop for DrainGuard {
 /// count is tracked. The dropped count is reported with the next successfully
 /// sent chunk so users are informed about dropped background output.
 pub(super) fn pty_drain_loop(pty_fd: RawFd, stop: Arc<AtomicBool>, tx: SyncSender<DrainResult>) {
+    fn send_final_result(tx: &SyncSender<DrainResult>, dropped_bytes: usize) {
+        let final_result = DrainResult {
+            bytes: Vec::new(),
+            eof: true,
+            dropped_bytes,
+        };
+        let _ = tx.try_send(final_result);
+    }
+
     let mut buf = [0u8; DRAIN_BUFFER_SIZE];
     let mut pending_dropped_bytes: usize = 0;
 
@@ -98,23 +108,17 @@ pub(super) fn pty_drain_loop(pty_fd: RawFd, stop: Arc<AtomicBool>, tx: SyncSende
         match poll(&mut pollfds, EDIT_MODE_DRAIN_POLL_MS) {
             Ok(_) => {}
             Err(nix::errno::Errno::EINTR) => continue,
-            Err(_) => break,
+            Err(e) => {
+                warn!("Edit-mode PTY drain poll failed: {}", e);
+                send_final_result(&tx, pending_dropped_bytes);
+                break;
+            }
         }
 
         if let Some(revents) = pollfds[0].revents() {
             if revents.contains(PollFlags::POLLHUP) || revents.contains(PollFlags::POLLERR) {
-                // EOF detected - use try_send to avoid blocking if channel is full.
-                // If we can't send the EOF marker, just break - the receiver will
-                // detect EOF when it processes the channel contents.
-                let eof_result = DrainResult {
-                    bytes: Vec::new(),
-                    eof: true,
-                    dropped_bytes: pending_dropped_bytes,
-                };
-                match tx.try_send(eof_result) {
-                    Ok(()) | Err(TrySendError::Full(_)) => {}
-                    Err(TrySendError::Disconnected(_)) => {}
-                }
+                // EOF detected - notify receiver, then stop.
+                send_final_result(&tx, pending_dropped_bytes);
                 break;
             }
 
@@ -124,12 +128,7 @@ pub(super) fn pty_drain_loop(pty_fd: RawFd, stop: Arc<AtomicBool>, tx: SyncSende
                     match read(pty_fd, &mut buf) {
                         Ok(0) => {
                             // EOF - use try_send to avoid blocking
-                            let eof_result = DrainResult {
-                                bytes: Vec::new(),
-                                eof: true,
-                                dropped_bytes: pending_dropped_bytes,
-                            };
-                            let _ = tx.try_send(eof_result);
+                            send_final_result(&tx, pending_dropped_bytes);
                             return;
                         }
                         Ok(n) => {
@@ -158,15 +157,14 @@ pub(super) fn pty_drain_loop(pty_fd: RawFd, stop: Arc<AtomicBool>, tx: SyncSende
                         Err(nix::errno::Errno::EAGAIN) => break,
                         Err(nix::errno::Errno::EIO) => {
                             // EIO means PTY closed - use try_send to avoid blocking
-                            let eof_result = DrainResult {
-                                bytes: Vec::new(),
-                                eof: true,
-                                dropped_bytes: pending_dropped_bytes,
-                            };
-                            let _ = tx.try_send(eof_result);
+                            send_final_result(&tx, pending_dropped_bytes);
                             return;
                         }
-                        Err(_) => break,
+                        Err(e) => {
+                            warn!("Edit-mode PTY drain read failed: {}", e);
+                            send_final_result(&tx, pending_dropped_bytes);
+                            break;
+                        }
                     }
                 }
             }

@@ -27,7 +27,7 @@ impl FilterState {
     }
 
     /// Returns true if there are any matching lines.
-    pub fn has_matches(&self) -> bool {
+    pub fn is_any_match(&self) -> bool {
         !self.matching_lines.is_empty()
     }
 
@@ -37,7 +37,7 @@ impl FilterState {
     }
 
     /// Returns true if the given line index passes the filter.
-    pub fn line_visible(&self, line_index: usize) -> bool {
+    pub fn is_line_visible(&self, line_index: usize) -> bool {
         self.matching_lines.binary_search(&line_index).is_ok()
     }
 
@@ -95,7 +95,7 @@ impl FilterState {
             }
         }
 
-        // Ensure sorted for binary_search in line_visible
+        // Ensure sorted for binary_search in is_line_visible
         self.matching_lines.sort_unstable();
     }
 
@@ -114,7 +114,7 @@ impl FilterState {
         if self.pattern.is_empty() {
             // If pattern is empty, show all base lines
             self.matching_lines = base_lines.to_vec();
-            // Ensure sorted for binary_search in line_visible
+            // Ensure sorted for binary_search in is_line_visible
             self.matching_lines.sort_unstable();
             return;
         }
@@ -144,7 +144,7 @@ impl FilterState {
             }
         }
 
-        // Ensure sorted for binary_search in line_visible
+        // Ensure sorted for binary_search in is_line_visible
         self.matching_lines.sort_unstable();
     }
 
@@ -203,20 +203,20 @@ mod tests {
     fn test_filter_state_default() {
         let state = FilterState::default();
         assert!(state.pattern.is_empty());
-        assert!(!state.has_matches());
+        assert!(!state.is_any_match());
     }
 
     #[test]
-    fn test_line_visible() {
+    fn test_is_line_visible() {
         let state = FilterState {
             matching_lines: vec![0, 5, 10, 15],
             ..Default::default()
         };
 
-        assert!(state.line_visible(0));
-        assert!(state.line_visible(5));
-        assert!(!state.line_visible(3));
-        assert!(!state.line_visible(100));
+        assert!(state.is_line_visible(0));
+        assert!(state.is_line_visible(5));
+        assert!(!state.is_line_visible(3));
+        assert!(!state.is_line_visible(100));
     }
 
     #[test]
@@ -244,10 +244,10 @@ mod tests {
         state.perform_filter(&buffer);
 
         assert_eq!(state.match_count(), 2);
-        assert!(state.line_visible(0));
-        assert!(!state.line_visible(1));
-        assert!(state.line_visible(2));
-        assert!(!state.line_visible(3));
+        assert!(state.is_line_visible(0));
+        assert!(!state.is_line_visible(1));
+        assert!(state.is_line_visible(2));
+        assert!(!state.is_line_visible(3));
     }
 
     #[test]
@@ -277,8 +277,8 @@ mod tests {
         state.perform_filter(&buffer);
 
         assert_eq!(state.match_count(), 1);
-        assert!(state.line_visible(0));
-        assert!(!state.line_visible(1));
+        assert!(state.is_line_visible(0));
+        assert!(!state.is_line_visible(1));
     }
 
     #[test]

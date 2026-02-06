@@ -46,7 +46,7 @@ impl App {
         }
 
         // Check for alt-screen transitions
-        for event in self.alt_screen_detector.feed(bytes) {
+        for event in self.alt_screen_detector.parse_bytes(bytes) {
             match event {
                 crate::scrollback::AltScreenEvent::Enter => {
                     debug!("Alt-screen entered, suspending scrollback capture");
@@ -357,7 +357,7 @@ impl App {
                             .modifiers
                             .contains(crossterm::event::KeyModifiers::CONTROL)
                     {
-                        if search.has_matches() {
+                        if search.is_match_available() {
                             // Cache search results for filter mode
                             let search_lines = search.matched_line_indices();
                             self.viewer_state.last_search_lines = Some(search_lines);
@@ -405,7 +405,7 @@ impl App {
                     match input.handle_input(key) {
                         crate::scrollback::MiniInputResult::Submit => {
                             // Store search results for filter+search combination
-                            if search.has_matches() {
+                            if search.is_match_available() {
                                 self.viewer_state.last_search_lines =
                                     Some(search.matched_line_indices());
                             } else {
@@ -610,7 +610,7 @@ impl App {
                                 .contains(crossterm::event::KeyModifiers::CONTROL) =>
                         {
                             // Ctrl+S: Enter search-within-filter mode
-                            if filter.has_matches() {
+                            if filter.is_any_match() {
                                 // Run search within the filtered lines
                                 match self.run_search_within_filter_mode(&filter, filter_offset) {
                                     Ok((new_offset, did_navigate)) => {
@@ -1023,7 +1023,21 @@ impl App {
 
             match self.detect_scroll_action_prefix(remaining) {
                 Some((action, consumed)) => {
-                    // Consume the sequence
+                    let should_handle = match action {
+                        ScrollAction::PageUp | ScrollAction::LineUp | ScrollAction::Home => {
+                            self.can_scroll()
+                        }
+                        ScrollAction::PageDown | ScrollAction::LineDown | ScrollAction::End => {
+                            self.scroll_state.is_scrolled()
+                        }
+                    };
+
+                    // If this sequence should be forwarded, don't consume it.
+                    if !should_handle {
+                        break;
+                    }
+
+                    // Consume the handled sequence.
                     remaining = &remaining[consumed..];
                     did_scroll = true;
 
@@ -1036,15 +1050,9 @@ impl App {
                             }
                         }
                         ScrollAction::PageDown => {
-                            if self.scroll_state.is_scrolled() {
-                                self.scroll_down(self.viewport_height());
-                                // Always render - we stay at offset=0 instead of auto-exiting
-                                needs_render = true;
-                            } else {
-                                // At bottom - don't consume, forward to PTY
-                                // But we've already consumed it from remaining...
-                                // For simplicity, just consume it (shell rarely uses PgDown)
-                            }
+                            self.scroll_down(self.viewport_height());
+                            // Always render - we stay at offset=0 instead of auto-exiting
+                            needs_render = true;
                         }
                         ScrollAction::LineUp => {
                             if self.can_scroll() {
@@ -1053,11 +1061,9 @@ impl App {
                             }
                         }
                         ScrollAction::LineDown => {
-                            if self.scroll_state.is_scrolled() {
-                                self.scroll_down(1);
-                                // Always render - we stay at offset=0 instead of auto-exiting
-                                needs_render = true;
-                            }
+                            self.scroll_down(1);
+                            // Always render - we stay at offset=0 instead of auto-exiting
+                            needs_render = true;
                         }
                         ScrollAction::Home => {
                             if self.can_scroll() {
@@ -1066,10 +1072,8 @@ impl App {
                             }
                         }
                         ScrollAction::End => {
-                            if self.scroll_state.is_scrolled() {
-                                self.scroll_to_bottom();
-                                needs_render = false;
-                            }
+                            self.scroll_to_bottom();
+                            needs_render = false;
                         }
                     }
                 }

@@ -89,12 +89,12 @@ mod tests {
     }
 
     #[test]
-    fn test_scroll_segment_id() {
+    fn test_scroll_segment_id_default_returns_scroll() {
         assert_eq!(ScrollSegment.id(), "scroll");
     }
 
     #[test]
-    fn test_scroll_segment_hidden_when_not_scrolled() {
+    fn test_render_when_no_scroll_returns_none() {
         let theme = Theme::for_preset(ThemePreset::Amber);
         let symbols = Symbols::for_set(SymbolSet::Fallback);
         let state = test_state();
@@ -104,7 +104,7 @@ mod tests {
     }
 
     #[test]
-    fn test_scroll_segment_renders_when_scrolled() {
+    fn test_render_when_scrolled_returns_content_with_priority_and_fields() {
         let theme = Theme::for_preset(ThemePreset::Amber);
         let symbols = Symbols::for_set(SymbolSet::Fallback);
         let mut state = test_state();
@@ -126,7 +126,7 @@ mod tests {
     }
 
     #[test]
-    fn test_scroll_segment_mode_indicators() {
+    fn test_render_modes_various_indicators_present() {
         let theme = Theme::for_preset(ThemePreset::Amber);
         let symbols = Symbols::for_set(SymbolSet::Fallback);
         let mut state = test_state();

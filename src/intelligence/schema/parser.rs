@@ -443,8 +443,15 @@ impl HelpParser {
             value_type = self.infer_value_type(trimmed);
         }
 
-        // Also check for = or < > indicators
-        if (trimmed.contains('=') || trimmed.contains('<') || trimmed.contains('[')) && !takes_value
+        let definition_part = trimmed
+            .split_once("  ")
+            .map_or(trimmed, |(def, _)| def.trim());
+
+        // Also check for = or < > indicators in the flag definition itself.
+        if (definition_part.contains('=')
+            || definition_part.contains('<')
+            || definition_part.contains('['))
+            && !takes_value
         {
             takes_value = true;
             value_type = ValueType::String;
@@ -661,5 +668,23 @@ Use "mytool [command] --help" for more information about a command.
 
         // Should have decent confidence with subcommands and flags
         assert!(schema.confidence > 0.7);
+    }
+
+    #[test]
+    fn test_parse_flag_line_description_brackets_do_not_imply_value() {
+        let help = r#"
+Flags:
+  --color    Enable color output [default: auto]
+"#;
+        let mut parser = HelpParser::new("myapp", help);
+        let schema = parser.parse().unwrap();
+
+        let color = schema
+            .global_flags
+            .iter()
+            .find(|f| f.long.as_deref() == Some("--color"))
+            .unwrap();
+        assert!(!color.takes_value);
+        assert_eq!(color.value_type, ValueType::Bool);
     }
 }

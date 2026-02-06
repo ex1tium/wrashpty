@@ -174,6 +174,11 @@ impl App {
         let (cols, rows) =
             TerminalGuard::get_size().context("Failed to get terminal size for Passthrough")?;
 
+        // Always reset DECSTBM first to avoid inheriting stale scroll-region state.
+        if let Err(e) = crate::chrome::Chrome::reset_scroll_region() {
+            warn!("Failed to reset scroll region before Passthrough: {}", e);
+        }
+
         // Safety: ensure scroll region is set before any output flows.
         // This should already be set by transition_to_injecting(), but we re-apply
         // here as a defensive measure in case we enter Passthrough from another path.

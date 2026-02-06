@@ -23,7 +23,7 @@ fn safe_utf8_truncate(content: &[u8], max_len: usize) -> usize {
     while end > 0 {
         // Check if this is a valid UTF-8 start byte or ASCII
         let byte = content[end - 1];
-        if byte < 0x80 || byte >= 0xC0 {
+        if !(0x80..0xC0).contains(&byte) {
             // ASCII byte or UTF-8 start byte - this is a valid boundary after it
             break;
         }
@@ -940,22 +940,22 @@ mod tests {
     }
 
     #[test]
-    fn test_max_offset_empty_buffer() {
+    fn test_max_offset_empty_buffer_returns_zero() {
         assert_eq!(ScrollViewer::max_offset(0, 10), 0);
     }
 
     #[test]
-    fn test_max_offset_buffer_smaller_than_viewport() {
+    fn test_max_offset_buffer_smaller_than_viewport_returns_zero() {
         assert_eq!(ScrollViewer::max_offset(5, 10), 0);
     }
 
     #[test]
-    fn test_max_offset_buffer_larger_than_viewport() {
+    fn test_max_offset_buffer_larger_than_viewport_returns_difference() {
         assert_eq!(ScrollViewer::max_offset(100, 10), 90);
     }
 
     #[test]
-    fn test_clamp_offset() {
+    fn test_clamp_offset_various_behaviors_returns_expected() {
         // Within range
         assert_eq!(ScrollViewer::clamp_offset(50, 100, 10), 50);
         // Above max
@@ -965,7 +965,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_to_buffer() {
+    fn test_render_to_buffer_with_three_lines_renders_three() {
         let buffer = create_test_buffer(&["line1", "line2", "line3"]);
         let mut output = Vec::new();
         let options = RenderOptions::default();
@@ -981,7 +981,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_with_offset() {
+    fn test_render_with_offset_offset2_shows_expected_lines() {
         let buffer = create_test_buffer(&["line1", "line2", "line3", "line4", "line5"]);
         let mut output = Vec::new();
         let options = RenderOptions::default();
@@ -997,7 +997,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_with_chrome() {
+    fn test_render_with_chrome_topbar_reserved_rows_renders_content() {
         let buffer = create_test_buffer(&["line1", "line2", "line3", "line4", "line5"]);
         let mut output = Vec::new();
 
@@ -1023,7 +1023,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_with_line_numbers() {
+    fn test_render_with_line_numbers_shows_gutter() {
         let buffer = create_test_buffer(&["hello", "world"]);
         let mut output = Vec::new();
 
@@ -1047,7 +1047,7 @@ mod tests {
     }
 
     #[test]
-    fn test_first_visible_line_calculation() {
+    fn test_first_visible_line_calculation_bottom_and_scrolled_expected_values() {
         let buffer = create_test_buffer(&["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]);
         let mut output = Vec::new();
 
@@ -1084,7 +1084,7 @@ mod tests {
     }
 
     #[test]
-    fn test_boundary_markers() {
+    fn test_boundary_markers_begin_and_end_markers_present() {
         let buffer = create_test_buffer(&["line1", "line2"]);
         let mut output = Vec::new();
 
