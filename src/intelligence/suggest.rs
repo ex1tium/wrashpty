@@ -155,6 +155,11 @@ fn gather_suggestions(conn: &Connection, context: &SuggestionContext) -> Vec<Sug
         PositionType::AfterPipe => {
             // Add learned pipe chain suggestions
             suggestions.extend(suggest_pipe_commands(conn, context));
+
+            // Fallback to frequent commands if no learned pipe transitions exist yet.
+            if suggestions.is_empty() {
+                suggestions.extend(suggest_from_historical_frequency(conn, 10));
+            }
         }
         PositionType::Command => {
             // For command position, add historical frequency suggestions as fallback
