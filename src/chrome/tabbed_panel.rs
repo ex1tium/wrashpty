@@ -151,6 +151,40 @@ impl TabbedPanel {
             self.save_active_tab();
         }
     }
+
+    fn render_tab_hint(&self, buffer: &mut Buffer, sep_area: Rect, hint: &str) {
+        let hint_display_width = crate::ui::text_width::display_width(hint) as u16;
+        let hint_start = sep_area.x + sep_area.width.saturating_sub(hint_display_width + 2);
+        let mut col: u16 = 0;
+
+        for ch in hint.chars() {
+            let ch_w = unicode_width::UnicodeWidthChar::width(ch)
+                .unwrap_or(1)
+                .max(1) as u16;
+            let x = hint_start + col;
+            if x + ch_w <= sep_area.x + sep_area.width {
+                if let Some(cell) = buffer.cell_mut((x, sep_area.y)) {
+                    cell.set_char(ch);
+                    cell.set_style(Style::default().fg(self.theme.text_secondary));
+                }
+
+                // Explicitly clear continuation cells so separator glyphs don't leak
+                // into the visual width of wide characters.
+                if ch_w > 1 {
+                    for i in 1..ch_w {
+                        let trailing_x = x + i;
+                        if trailing_x < sep_area.x + sep_area.width {
+                            if let Some(cell) = buffer.cell_mut((trailing_x, sep_area.y)) {
+                                cell.set_char(' ');
+                                cell.set_style(Style::default().fg(self.theme.text_secondary));
+                            }
+                        }
+                    }
+                }
+            }
+            col += ch_w;
+        }
+    }
 }
 
 // Note: Default is removed since TabbedPanel now requires a theme parameter
@@ -220,20 +254,7 @@ impl Panel for TabbedPanel {
             }
             // Add hint for tab switching at the right side
             let hint = "Ctrl+←→ switch tabs";
-            let hint_display_width = crate::ui::text_width::display_width(hint) as u16;
-            let hint_start = sep_area.x + sep_area.width.saturating_sub(hint_display_width + 2);
-            let mut col: u16 = 0;
-            for ch in hint.chars() {
-                let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
-                let x = hint_start + col;
-                if x + ch_w <= sep_area.x + sep_area.width {
-                    if let Some(cell) = buffer.cell_mut((x, sep_area.y)) {
-                        cell.set_char(ch);
-                        cell.set_style(Style::default().fg(self.theme.text_secondary));
-                    }
-                }
-                col += ch_w;
-            }
+            self.render_tab_hint(buffer, sep_area, hint);
         }
 
         // Render active panel content
@@ -306,5 +327,31 @@ mod tests {
         assert_eq!(panel.active_tab(), 3);
         panel.prev_tab();
         assert_eq!(panel.active_tab(), 2);
+    }
+
+    #[test]
+    fn test_render_tab_hint_clears_wide_char_continuation_cell() {
+        let panel = TabbedPanel::new(&AMBER_THEME);
+        let sep_area = Rect::new(0, 0, 12, 1);
+        let mut buffer = Buffer::empty(sep_area);
+
+        for x in sep_area.x..sep_area.x + sep_area.width {
+            if let Some(cell) = buffer.cell_mut((x, sep_area.y)) {
+                cell.set_char('─');
+            }
+        }
+
+        let hint = "📁a";
+        panel.render_tab_hint(&mut buffer, sep_area, hint);
+
+        let hint_display_width = crate::ui::text_width::display_width(hint) as u16;
+        let hint_start = sep_area.x + sep_area.width.saturating_sub(hint_display_width + 2);
+
+        let lead = buffer.cell((hint_start, sep_area.y)).unwrap();
+        assert_eq!(lead.symbol(), "📁");
+
+        // Trailing continuation cell must be cleared, not left as the separator glyph.
+        let trailing = buffer.cell((hint_start + 1, sep_area.y)).unwrap();
+        assert_eq!(trailing.symbol(), " ");
     }
 }

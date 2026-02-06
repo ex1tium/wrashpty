@@ -86,7 +86,13 @@ impl MiniInput {
                     // Ctrl+W: delete word backward
                     if self.cursor > 0 {
                         let before = &self.buffer[..self.cursor];
-                        let word_start = before
+                        // Trim trailing whitespace first, then find previous word boundary.
+                        // This matches common shell behavior for "word erase".
+                        let trimmed_end = before
+                            .rfind(|c: char| !c.is_whitespace())
+                            .map(|i| i + 1)
+                            .unwrap_or(0);
+                        let word_start = before[..trimmed_end]
                             .rfind(|c: char| c.is_whitespace())
                             .map(|i| i + 1)
                             .unwrap_or(0);
@@ -430,6 +436,17 @@ mod tests {
         let mut input = MiniInput::new("Search");
         input.buffer = "hello world".to_string();
         input.cursor = 11; // At end
+
+        assert_eq!(input.handle_input(ctrl_key('w')), MiniInputResult::Changed);
+        assert_eq!(input.buffer, "hello ");
+        assert_eq!(input.cursor, 6);
+    }
+
+    #[test]
+    fn test_handle_input_ctrl_w_deletes_word_with_trailing_spaces() {
+        let mut input = MiniInput::new("Search");
+        input.buffer = "hello world   ".to_string();
+        input.cursor = input.buffer.len(); // At end after trailing spaces
 
         assert_eq!(input.handle_input(ctrl_key('w')), MiniInputResult::Changed);
         assert_eq!(input.buffer, "hello ");

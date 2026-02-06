@@ -174,18 +174,17 @@ impl App {
         let (cols, rows) =
             TerminalGuard::get_size().context("Failed to get terminal size for Passthrough")?;
 
-        // Always reset DECSTBM first to avoid inheriting stale scroll-region state.
-        if let Err(e) = crate::chrome::Chrome::reset_scroll_region() {
-            warn!("Failed to reset scroll region before Passthrough: {}", e);
-        }
-
-        // Safety: ensure scroll region is set before any output flows.
-        // This should already be set by transition_to_injecting(), but we re-apply
-        // here as a defensive measure in case we enter Passthrough from another path.
-        if self.chrome.is_active() {
-            if let Err(e) = self.chrome.setup_scroll_region_preserve_cursor(rows) {
-                warn!("Failed to ensure scroll region for Passthrough: {}", e);
-            }
+        // Reset DECSTBM and (if active) re-apply chrome margins atomically while
+        // preserving cursor. `ESC[r` can move cursor to home, so preserving cursor
+        // must wrap the reset itself.
+        if let Err(e) = self
+            .chrome
+            .reset_and_setup_scroll_region_preserve_cursor(rows)
+        {
+            warn!(
+                "Failed to reset/reapply scroll region safely for Passthrough: {}",
+                e
+            );
         }
 
         // Calculate effective rows (matching Edit mode) to keep output constrained

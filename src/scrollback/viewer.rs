@@ -588,8 +588,8 @@ impl ScrollViewer {
             current_row += 1;
         }
 
-        // Get current match line for special highlighting
-        let current_match = search.current();
+        // Get exact current match for special highlighting
+        let current_match = search.current().copied();
 
         for (i, line) in lines.iter().enumerate() {
             let line_index = first_visible_line + i - 1; // Convert to 0-indexed
@@ -628,8 +628,9 @@ impl ScrollViewer {
                     out,
                     line.content(),
                     content_cols,
+                    line_index,
                     &line_matches,
-                    current_match.map(|m| m.line == line_index && m.start == line_matches[0].start),
+                    current_match,
                     theme,
                 )?;
             }
@@ -680,8 +681,9 @@ impl ScrollViewer {
         out: &mut W,
         content: &[u8],
         max_cols: usize,
+        line_index: usize,
         matches: &[&super::features::SearchMatch],
-        is_current: Option<bool>,
+        current_match: Option<super::features::SearchMatch>,
         theme: &Theme,
     ) -> io::Result<()> {
         use crate::chrome::segments::color_to_bg_ansi;
@@ -708,8 +710,15 @@ impl ScrollViewer {
                 }
             }
 
-            // Determine highlight color based on whether this is the current match
-            let is_current_match = is_current.unwrap_or(false);
+            // Determine highlight color based on whether this exact match
+            // (line + range) is the current match.
+            let is_current_match = current_match
+                .map(|m| {
+                    m.line == line_index
+                        && m.start == search_match.start
+                        && m.end == search_match.end
+                })
+                .unwrap_or(false);
             let bg_color = if is_current_match {
                 theme.search_current_bg
             } else {
@@ -915,8 +924,8 @@ impl ScrollViewer {
         // Track first visible line
         let first_visible_line = lines.first().map(|(idx, _)| *idx + 1).unwrap_or(1);
 
-        // Get current search match for special highlighting
-        let current_match = search.current();
+        // Get exact current search match for special highlighting
+        let current_match = search.current().copied();
 
         for (original_idx, line) in &lines {
             let line_number = *original_idx + 1; // Convert to 1-indexed
@@ -954,9 +963,9 @@ impl ScrollViewer {
                     out,
                     line.content(),
                     content_cols,
+                    *original_idx,
                     &line_matches,
-                    current_match
-                        .map(|m| m.line == *original_idx && m.start == line_matches[0].start),
+                    current_match,
                     theme,
                 )?;
             }
@@ -1276,6 +1285,7 @@ mod tests {
             &mut out,
             b"\x1b[31mhello\x1b[0m",
             1,
+            0,
             &[],
             None,
             &crate::chrome::theme::AMBER_THEME,
@@ -1287,6 +1297,44 @@ mod tests {
             rendered.ends_with("\x1b[0m"),
             "truncated highlighted line should end with reset: {rendered:?}"
         );
+    }
+
+    #[test]
+    fn test_render_line_with_highlights_marks_only_current_match() {
+        use crate::chrome::segments::color_to_bg_ansi;
+        use crate::scrollback::features::SearchMatch;
+
+        let mut out = Vec::new();
+        let first = SearchMatch {
+            line: 42,
+            start: 0,
+            end: 3,
+        };
+        let second = SearchMatch {
+            line: 42,
+            start: 4,
+            end: 7,
+        };
+        let matches = vec![&first, &second];
+
+        ScrollViewer::render_line_with_highlights(
+            &mut out,
+            b"abc def",
+            20,
+            42,
+            &matches,
+            Some(second),
+            &crate::chrome::theme::AMBER_THEME,
+        )
+        .unwrap();
+
+        let rendered = String::from_utf8_lossy(&out);
+        let current_bg = color_to_bg_ansi(crate::chrome::theme::AMBER_THEME.search_current_bg);
+        let other_bg = color_to_bg_ansi(crate::chrome::theme::AMBER_THEME.search_other_bg);
+
+        assert_ne!(current_bg, other_bg);
+        assert_eq!(rendered.matches(&current_bg).count(), 1);
+        assert_eq!(rendered.matches(&other_bg).count(), 1);
     }
 
     #[test]
