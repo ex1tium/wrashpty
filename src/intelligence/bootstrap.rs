@@ -8,6 +8,7 @@ use rusqlite::Connection;
 use tracing::{debug, info};
 
 use super::error::CIError;
+use super::schema::{store_schema, CommandSchema, SchemaSource, SubcommandSchema};
 
 /// Seeds the command hierarchy, merging with existing data.
 ///
@@ -31,6 +32,7 @@ pub fn bootstrap_if_empty(conn: &Connection) -> Result<(), CIError> {
 
     info!("Bootstrapping command hierarchy with initial knowledge");
     seed_command_knowledge(conn)?;
+    seed_bootstrap_schemas(conn)?;
 
     // Mark bootstrap as completed
     conn.execute(
@@ -56,6 +58,67 @@ fn seed_command_knowledge(conn: &Connection) -> Result<(), CIError> {
 
     conn.execute_batch("COMMIT")?;
     Ok(())
+}
+
+/// Seeds schema rows based on the bootstrapped hierarchy.
+///
+/// This keeps schema-backed suggestions aligned with the same canonical
+/// bootstrap data used for hierarchy suggestions.
+fn seed_bootstrap_schemas(conn: &Connection) -> Result<(), CIError> {
+    let mut stmt = conn.prepare(
+        "SELECT t.id, t.text
+         FROM ci_command_hierarchy h
+         JOIN ci_tokens t ON t.id = h.token_id
+         WHERE h.position = 0
+         ORDER BY t.text",
+    )?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
+
+    for row in rows {
+        let (base_token_id, command) = row?;
+        let mut schema = CommandSchema::new(&command, SchemaSource::Bootstrap);
+        schema.subcommands = load_nested_subcommands(conn, base_token_id)?;
+        store_schema(conn, &schema)?;
+    }
+
+    debug!("Seeded bootstrap schemas");
+    Ok(())
+}
+
+/// Loads nested subcommands for a hierarchy token.
+fn load_nested_subcommands(
+    conn: &Connection,
+    parent_token_id: i64,
+) -> Result<Vec<SubcommandSchema>, CIError> {
+    let mut stmt = conn.prepare(
+        "SELECT t.id, t.text
+         FROM ci_command_hierarchy h
+         JOIN ci_tokens t ON t.id = h.token_id
+         WHERE h.parent_token_id = ?1
+         ORDER BY h.frequency DESC, t.text ASC",
+    )?;
+
+    let rows = stmt.query_map(rusqlite::params![parent_token_id], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
+
+    let mut subcommands = Vec::new();
+    for row in rows {
+        let (token_id, name) = row?;
+        if name.starts_with('-') {
+            // Hierarchy may contain command-like flags; schema subcommands should not.
+            continue;
+        }
+
+        let mut sub = SubcommandSchema::new(&name);
+        sub.subcommands = load_nested_subcommands(conn, token_id)?;
+        subcommands.push(sub);
+    }
+
+    Ok(subcommands)
 }
 
 /// Seeds all command knowledge.
@@ -559,5 +622,35 @@ mod tests {
             )
             .unwrap();
         assert!(add_after_remote);
+    }
+
+    #[test]
+    fn test_bootstrap_seeds_command_schemas() {
+        let conn = setup_test_db();
+        bootstrap_if_empty(&conn).unwrap();
+
+        let command_schema_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM ci_command_schemas WHERE subcommand IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            command_schema_count > 0,
+            "bootstrap should create base command schemas"
+        );
+
+        let has_nested_git_remote_add: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM ci_command_schemas
+                    WHERE command = 'git' AND subcommand = 'remote add'
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(has_nested_git_remote_add);
     }
 }
