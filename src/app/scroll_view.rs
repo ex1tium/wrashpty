@@ -59,14 +59,43 @@ impl App {
             }
         }
 
+        // Optional raw byte dump for debugging capture issues.
+        // Set WRASHPTY_CAPTURE_RAW=1 to write raw PTY bytes to /tmp/wrashpty-raw.bin
+        if self.raw_capture_fd.is_some() {
+            use std::io::Write;
+            if let Some(ref mut fd) = self.raw_capture_fd {
+                let _ = fd.write_all(bytes);
+            }
+        }
+
         // Parse bytes into lines and add to buffer
         if self.scrollback_buffer.is_capture_active() {
-            for line in self.capture_state.feed(bytes) {
-                let dropped = self.scrollback_buffer.push_line(line);
-                if dropped > 0 {
-                    self.viewer_state
-                        .boundaries
-                        .adjust_for_dropped_lines(dropped);
+            for captured in self.capture_state.feed(bytes) {
+                match captured {
+                    crate::scrollback::CapturedLine::Append(content) => {
+                        let dropped = self.scrollback_buffer.push_line(content);
+                        if dropped > 0 {
+                            self.viewer_state
+                                .boundaries
+                                .adjust_for_dropped_lines(dropped);
+                        }
+                    }
+                    crate::scrollback::CapturedLine::Overwrite {
+                        lines_back,
+                        content,
+                    } => {
+                        let len = self.scrollback_buffer.len();
+                        if lines_back > 0 && lines_back <= len {
+                            self.scrollback_buffer
+                                .replace_line(len - lines_back, content);
+                        }
+                    }
+                    crate::scrollback::CapturedLine::EraseBelow { lines_back } => {
+                        let len = self.scrollback_buffer.len();
+                        if lines_back > 0 && lines_back <= len {
+                            self.scrollback_buffer.erase_from(len - lines_back);
+                        }
+                    }
                 }
             }
         }
@@ -469,6 +498,11 @@ impl App {
         let mut out = std::io::stdout();
 
         // Render using the search-aware viewer
+        let boundary_lines = if self.viewer_state.show_command_separators() {
+            &self.viewer_state.boundaries.prompt_lines
+        } else {
+            &[] as &[usize]
+        };
         crate::scrollback::ScrollViewer::render_with_search(
             &mut out,
             &self.scrollback_buffer,
@@ -480,6 +514,7 @@ impl App {
             true, // show boundary markers
             search,
             self.chrome.theme(),
+            boundary_lines,
         )?;
 
         out.flush()?;
@@ -1195,6 +1230,11 @@ impl App {
 
         // Render scrollback content (starting at row 2 to preserve topbar)
         // Show boundary markers (BEGIN/END) at buffer boundaries
+        let boundary_lines = if self.viewer_state.show_command_separators() {
+            &self.viewer_state.boundaries.prompt_lines
+        } else {
+            &[] as &[usize]
+        };
         crate::scrollback::ScrollViewer::render_with_chrome(
             &mut stdout,
             &self.scrollback_buffer,
@@ -1205,6 +1245,7 @@ impl App {
             self.viewer_state.show_timestamps(),
             true, // show_boundary_markers
             Some(self.chrome.theme()),
+            boundary_lines,
         )?;
 
         // Render help bar if enabled
@@ -1313,12 +1354,32 @@ impl App {
         use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 
         // Flush any partial line from capture so it appears in scrollback
-        if let Some(partial) = self.capture_state.flush() {
-            let dropped = self.scrollback_buffer.push_line(partial);
-            if dropped > 0 {
-                self.viewer_state
-                    .boundaries
-                    .adjust_for_dropped_lines(dropped);
+        if let Some(captured) = self.capture_state.flush() {
+            match captured {
+                crate::scrollback::CapturedLine::Append(content) => {
+                    let dropped = self.scrollback_buffer.push_line(content);
+                    if dropped > 0 {
+                        self.viewer_state
+                            .boundaries
+                            .adjust_for_dropped_lines(dropped);
+                    }
+                }
+                crate::scrollback::CapturedLine::Overwrite {
+                    lines_back,
+                    content,
+                } => {
+                    let len = self.scrollback_buffer.len();
+                    if lines_back > 0 && lines_back <= len {
+                        self.scrollback_buffer
+                            .replace_line(len - lines_back, content);
+                    }
+                }
+                crate::scrollback::CapturedLine::EraseBelow { lines_back } => {
+                    let len = self.scrollback_buffer.len();
+                    if lines_back > 0 && lines_back <= len {
+                        self.scrollback_buffer.erase_from(len - lines_back);
+                    }
+                }
             }
         }
 
@@ -1489,6 +1550,23 @@ impl App {
                     debug!(
                         show_timestamps = self.viewer_state.show_timestamps(),
                         "Toggled timestamps"
+                    );
+                    if let Err(e) = self.render_scrollback_view() {
+                        warn!("Failed to render scrollback: {}", e);
+                        self.scroll_to_bottom();
+                        break;
+                    }
+                }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Char('b'),
+                    modifiers,
+                    ..
+                }) if modifiers.contains(KeyModifiers::CONTROL) => {
+                    // Ctrl+B: toggle command boundary separators
+                    self.viewer_state.toggle_command_separators();
+                    debug!(
+                        show_separators = self.viewer_state.show_command_separators(),
+                        "Toggled command separators"
                     );
                     if let Err(e) = self.render_scrollback_view() {
                         warn!("Failed to render scrollback: {}", e);
