@@ -740,6 +740,8 @@ impl App {
                 channel_dropped = channel_dropped_bytes,
                 "Processing bytes from background drain"
             );
+            // Keep scrollback capture in sync with output drained during Edit mode.
+            self.capture_for_scrollback(&all_bytes);
             let parsed = self.pump.process_read_bytes(&all_bytes, eof_detected);
 
             // Buffer any output bytes
@@ -994,6 +996,8 @@ impl App {
                 bytes = result.bytes.len(),
                 "Buffering background PTY output"
             );
+            // Keep scrollback capture in sync with non-blocking background output.
+            self.capture_for_scrollback(&result.bytes);
             self.editor.buffer_output(&result.bytes);
         }
 

@@ -582,14 +582,15 @@ impl ScrollViewer {
     fn render_line_with_highlights<W: Write>(
         out: &mut W,
         content: &[u8],
-        _max_cols: usize,
+        max_cols: usize,
         matches: &[&super::features::SearchMatch],
         is_current: Option<bool>,
         theme: &Theme,
     ) -> io::Result<()> {
         use crate::chrome::segments::color_to_bg_ansi;
 
-        let content_str = String::from_utf8_lossy(content);
+        let truncated = &content[..content.len().min(max_cols)];
+        let content_str = String::from_utf8_lossy(truncated);
         let mut pos = 0;
 
         // Sort matches by start position
@@ -598,8 +599,8 @@ impl ScrollViewer {
 
         for search_match in sorted_matches {
             // Clamp indices to valid range
-            let match_start = search_match.start.min(content_str.len());
-            let match_end = search_match.end.min(content_str.len());
+            let match_start = search_match.start.min(truncated.len());
+            let match_end = search_match.end.min(truncated.len());
 
             // Write text before match (using safe .get() to handle edge cases)
             if match_start > pos {

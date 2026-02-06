@@ -1,6 +1,6 @@
 //! Schema storage and retrieval from SQLite database.
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use tracing::{debug, info};
 
 use super::types::{CommandSchema, SchemaSource, SubcommandSchema};
@@ -141,7 +141,7 @@ impl<'a> SchemaStore<'a> {
                 [command],
                 |row| row.get(0),
             )
-            .ok();
+            .optional()?;
 
         match result {
             Some(json) => {
@@ -167,7 +167,7 @@ impl<'a> SchemaStore<'a> {
                 [command, subcommand],
                 |row| row.get(0),
             )
-            .ok();
+            .optional()?;
 
         match result {
             Some(json) => {

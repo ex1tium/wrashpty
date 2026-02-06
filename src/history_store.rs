@@ -658,6 +658,20 @@ impl HistoryStore {
     ) -> Result<Vec<String>, HistoryStoreError> {
         let conn = self.open_connection()?;
 
+        fn escape_like_prefix(input: &str) -> String {
+            let mut escaped = String::with_capacity(input.len());
+            for ch in input.chars() {
+                match ch {
+                    '%' | '_' | '\\' => {
+                        escaped.push('\\');
+                        escaped.push(ch);
+                    }
+                    _ => escaped.push(ch),
+                }
+            }
+            escaped
+        }
+
         // Build the prefix pattern for LIKE matching
         let prefix = if preceding.is_empty() {
             String::new()
@@ -665,11 +679,13 @@ impl HistoryStore {
             format!("{} ", preceding.join(" "))
         };
 
-        let pattern = format!("{}%", prefix);
+        let escaped_prefix = escape_like_prefix(&prefix);
+        let pattern = format!("{}%", escaped_prefix);
 
         // Query commands that match the prefix
-        let mut stmt =
-            conn.prepare("SELECT command_line FROM history WHERE command_line LIKE ?1 LIMIT 1000")?;
+        let mut stmt = conn.prepare(
+            "SELECT command_line FROM history WHERE command_line LIKE ?1 ESCAPE '\\' LIMIT 1000",
+        )?;
 
         let rows = stmt.query_map([&pattern], |row| {
             let cmd: String = row.get(0)?;

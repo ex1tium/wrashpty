@@ -98,6 +98,7 @@ pub(super) fn pty_drain_loop(pty_fd: RawFd, stop: Arc<AtomicBool>, tx: SyncSende
 
     let mut buf = [0u8; DRAIN_BUFFER_SIZE];
     let mut pending_dropped_bytes: usize = 0;
+    let mut final_result_sent = false;
 
     while !stop.load(Ordering::Relaxed) {
         // SAFETY: pty_fd is valid for the duration of Edit mode
@@ -111,6 +112,7 @@ pub(super) fn pty_drain_loop(pty_fd: RawFd, stop: Arc<AtomicBool>, tx: SyncSende
             Err(e) => {
                 warn!("Edit-mode PTY drain poll failed: {}", e);
                 send_final_result(&tx, pending_dropped_bytes);
+                final_result_sent = true;
                 break;
             }
         }
@@ -119,6 +121,7 @@ pub(super) fn pty_drain_loop(pty_fd: RawFd, stop: Arc<AtomicBool>, tx: SyncSende
             if revents.contains(PollFlags::POLLHUP) || revents.contains(PollFlags::POLLERR) {
                 // EOF detected - notify receiver, then stop.
                 send_final_result(&tx, pending_dropped_bytes);
+                final_result_sent = true;
                 break;
             }
 
@@ -163,11 +166,119 @@ pub(super) fn pty_drain_loop(pty_fd: RawFd, stop: Arc<AtomicBool>, tx: SyncSende
                         Err(e) => {
                             warn!("Edit-mode PTY drain read failed: {}", e);
                             send_final_result(&tx, pending_dropped_bytes);
+                            final_result_sent = true;
                             break;
                         }
                     }
                 }
             }
+        }
+    }
+
+    // Stop-flag termination should still notify the receiver that draining ended.
+    if !final_result_sent {
+        send_final_result(&tx, pending_dropped_bytes);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::fd::AsRawFd;
+    use std::sync::mpsc::{self, RecvTimeoutError};
+    use std::thread;
+    use std::time::Duration;
+
+    use nix::unistd::{close, pipe, write};
+
+    #[test]
+    fn test_pty_drain_loop_eof_on_pipe_close_returns_final_result() {
+        let (read_fd, write_fd) = pipe().expect("pipe should be created");
+        let (tx, rx) = mpsc::sync_channel(4);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = Arc::clone(&stop);
+
+        let handle = thread::spawn(move || {
+            pty_drain_loop(read_fd.as_raw_fd(), stop_clone, tx);
+        });
+
+        close(write_fd).expect("write end should close");
+        let result = rx
+            .recv_timeout(Duration::from_millis((EDIT_MODE_DRAIN_POLL_MS * 4) as u64))
+            .expect("expected drain result after EOF");
+        assert!(result.eof);
+        assert!(result.bytes.is_empty());
+
+        stop.store(true, Ordering::Relaxed);
+        handle.join().expect("drain thread should join");
+    }
+
+    #[test]
+    fn test_pty_drain_loop_backpressure_reports_dropped_on_next_success() {
+        let (read_fd, write_fd) = pipe().expect("pipe should be created");
+        let (tx, rx) = mpsc::sync_channel(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = Arc::clone(&stop);
+
+        let handle = thread::spawn(move || {
+            pty_drain_loop(read_fd.as_raw_fd(), stop_clone, tx);
+        });
+
+        let first = b"first";
+        let dropped = b"second";
+        let third = b"third";
+
+        write(write_fd, first).expect("first write should succeed");
+        thread::sleep(Duration::from_millis((EDIT_MODE_DRAIN_POLL_MS * 2) as u64));
+        write(write_fd, dropped).expect("second write should succeed");
+        thread::sleep(Duration::from_millis((EDIT_MODE_DRAIN_POLL_MS * 2) as u64));
+
+        let first_result = rx
+            .recv_timeout(Duration::from_millis((EDIT_MODE_DRAIN_POLL_MS * 4) as u64))
+            .expect("first result should be delivered");
+        assert_eq!(first_result.bytes, first);
+        assert_eq!(first_result.dropped_bytes, 0);
+        assert!(!first_result.eof);
+
+        write(write_fd, third).expect("third write should succeed");
+        thread::sleep(Duration::from_millis((EDIT_MODE_DRAIN_POLL_MS * 2) as u64));
+
+        let next_result = rx
+            .recv_timeout(Duration::from_millis((EDIT_MODE_DRAIN_POLL_MS * 4) as u64))
+            .expect("next successful send should be delivered");
+        assert_eq!(next_result.bytes, third);
+        assert_eq!(next_result.dropped_bytes, dropped.len());
+        assert!(!next_result.eof);
+
+        close(write_fd).expect("write end should close");
+        stop.store(true, Ordering::Relaxed);
+        handle.join().expect("drain thread should join");
+    }
+
+    #[test]
+    fn test_pty_drain_loop_stop_flag_sends_final_eof_result() {
+        let (read_fd, _write_fd) = pipe().expect("pipe should be created");
+        let (tx, rx) = mpsc::sync_channel(2);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_clone = Arc::clone(&stop);
+
+        let handle = thread::spawn(move || {
+            pty_drain_loop(read_fd.as_raw_fd(), stop_clone, tx);
+        });
+
+        stop.store(true, Ordering::Relaxed);
+
+        let result = rx
+            .recv_timeout(Duration::from_millis((EDIT_MODE_DRAIN_POLL_MS * 4) as u64))
+            .expect("final EOF result should be sent on stop");
+        assert!(result.eof);
+        assert!(result.bytes.is_empty());
+
+        handle.join().expect("drain thread should join");
+
+        match rx.recv_timeout(Duration::from_millis(20)) {
+            Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => {}
+            Ok(_) => panic!("unexpected extra drain result"),
         }
     }
 }
