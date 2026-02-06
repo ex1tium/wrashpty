@@ -175,8 +175,7 @@ pub(super) fn pty_drain_loop(pty_fd: RawFd, stop: Arc<AtomicBool>, tx: SyncSende
                         Err(e) => {
                             warn!("Edit-mode PTY drain read failed: {}", e);
                             send_final_result(&tx, pending_dropped_bytes, true, false);
-                            final_result_sent = true;
-                            break;
+                            return;
                         }
                     }
                 }

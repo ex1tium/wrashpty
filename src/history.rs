@@ -8,16 +8,23 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 
-use anyhow::Context;
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
-/// Errors that can occur when loading history.
+/// Errors that can occur when loading or writing history.
 #[derive(Debug, Error)]
 pub enum HistoryError {
     /// The user's home directory could not be determined.
     #[error("could not determine home directory")]
     HomeDirNotFound,
+
+    /// An I/O error occurred while reading or writing the history file.
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+
+    /// Failed to persist a temporary file to the history path.
+    #[error(transparent)]
+    PersistError(#[from] tempfile::PersistError),
 }
 
 /// Maximum number of history entries to load.
@@ -43,7 +50,7 @@ const MAX_HISTORY_LINES: usize = 10_000;
 /// Missing or unreadable history files are handled gracefully by returning
 /// an empty vector.
 pub fn load_history() -> Result<Vec<String>, HistoryError> {
-    let history_path = get_history_path().map_err(|_| HistoryError::HomeDirNotFound)?;
+    let history_path = get_history_path()?;
 
     if !history_path.exists() {
         info!(path = %history_path.display(), "History file does not exist, starting with empty history");
@@ -122,8 +129,8 @@ pub fn load_history() -> Result<Vec<String>, HistoryError> {
 /// # Errors
 ///
 /// Returns an error if the home directory cannot be determined.
-fn get_history_path() -> anyhow::Result<PathBuf> {
-    let home = dirs::home_dir().context("Could not determine home directory")?;
+fn get_history_path() -> Result<PathBuf, HistoryError> {
+    let home = dirs::home_dir().ok_or(HistoryError::HomeDirNotFound)?;
     Ok(home.join(".bash_history"))
 }
 
@@ -141,7 +148,7 @@ fn get_history_path() -> anyhow::Result<PathBuf> {
 ///
 /// Returns an error if the home directory cannot be determined or the file
 /// cannot be written. Missing history file is created automatically.
-pub fn append_to_bash_history(command: &str) -> anyhow::Result<()> {
+pub fn append_to_bash_history(command: &str) -> Result<(), HistoryError> {
     use std::fs::OpenOptions;
     use std::io::Write;
 
@@ -164,12 +171,10 @@ pub fn append_to_bash_history(command: &str) -> anyhow::Result<()> {
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&history_path)
-        .with_context(|| format!("Failed to open {} for appending", history_path.display()))?;
+        .open(&history_path)?;
 
     // Write command with newline
-    writeln!(file, "{}", command)
-        .with_context(|| format!("Failed to write to {}", history_path.display()))?;
+    writeln!(file, "{}", command)?;
 
     debug!(
         command_len = command.len(),
@@ -180,7 +185,7 @@ pub fn append_to_bash_history(command: &str) -> anyhow::Result<()> {
 }
 
 /// Gets the last non-empty line from a file.
-fn get_last_history_line(path: &PathBuf) -> anyhow::Result<Option<String>> {
+fn get_last_history_line(path: &PathBuf) -> Result<Option<String>, HistoryError> {
     use std::fs::File;
     use std::io::{BufRead, BufReader, Seek, SeekFrom};
 
@@ -238,7 +243,7 @@ fn get_last_history_line(path: &PathBuf) -> anyhow::Result<Option<String>> {
 /// # Returns
 ///
 /// The number of duplicate entries removed.
-pub fn dedupe_bash_history() -> anyhow::Result<usize> {
+pub fn dedupe_bash_history() -> Result<usize, HistoryError> {
     use std::io::{BufRead, BufReader, Write};
 
     let history_path = get_history_path()?;
@@ -280,35 +285,28 @@ pub fn dedupe_bash_history() -> anyhow::Result<usize> {
         // Use NamedTempFile for RAII cleanup - if any operation fails before persist(),
         // the temp file is automatically removed when dropped.
         let parent_dir = history_path.parent().unwrap_or(std::path::Path::new("."));
-        let mut temp_file = tempfile::NamedTempFile::new_in(parent_dir)
-            .with_context(|| format!("Failed to create temp file in {}", parent_dir.display()))?;
+        let mut temp_file = tempfile::NamedTempFile::new_in(parent_dir)?;
 
         // Get original file permissions if it exists
         let permissions = fs::metadata(&history_path).ok().map(|m| m.permissions());
 
         // Write deduplicated history to temp file
         for line in &deduped {
-            writeln!(temp_file, "{}", line).context("Failed to write to temp file")?;
+            writeln!(temp_file, "{}", line)?;
         }
 
         // Flush and sync to ensure all data is written to disk
-        temp_file.flush().context("Failed to flush temp file")?;
-        temp_file
-            .as_file()
-            .sync_all()
-            .context("Failed to sync temp file")?;
+        temp_file.flush()?;
+        temp_file.as_file().sync_all()?;
 
         // Preserve original permissions if we captured them
         if let Some(perms) = permissions {
-            fs::set_permissions(temp_file.path(), perms)
-                .context("Failed to set permissions on temp file")?;
+            fs::set_permissions(temp_file.path(), perms)?;
         }
 
         // Atomically persist temp file to history file.
         // This consumes the NamedTempFile, preventing automatic deletion on success.
-        temp_file.persist(&history_path).with_context(|| {
-            format!("Failed to persist temp file to {}", history_path.display())
-        })?;
+        temp_file.persist(&history_path)?;
 
         info!(removed, "Deduplicated bash_history");
     }
