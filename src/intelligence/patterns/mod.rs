@@ -106,6 +106,15 @@ pub fn learn_command(
     // Learn command hierarchy (unified position-aware learning)
     hierarchy::learn_hierarchy(conn, &tokens, &token_ids, is_success, now)?;
 
+    // Keep schema store in sync with learned command structure.
+    if let Err(e) = super::sync::upsert_schema_from_tokens(conn, &tokens) {
+        debug!(
+            command = %command,
+            error = %e,
+            "Schema learning skipped for command"
+        );
+    }
+
     // Extract templates from the command
     if let Err(e) = templates::extract_template(conn, command) {
         debug!("Template extraction skipped for '{}': {}", command, e);

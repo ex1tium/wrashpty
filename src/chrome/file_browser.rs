@@ -17,9 +17,8 @@ use ratatui_widgets::paragraph::{Paragraph, Wrap};
 use tracing::debug;
 
 use super::command_edit::{
-    CommandEditState, CommandToken, TokenType, superscript_number, token_type_style,
+    superscript_number, token_type_style, CommandEditState, CommandToken, TokenType,
 };
-use super::command_knowledge::COMMAND_KNOWLEDGE;
 use super::panel::{Panel, PanelResult};
 use super::theme::Theme;
 use crate::history_store::HistoryStore;
@@ -107,14 +106,7 @@ impl FileBrowserPanel {
                 }
                 edit_state.set_cwd(self.current_dir.clone());
                 edit_state.set_file_context(FileContext::new(&entry.name, entry.is_dir));
-
-                // Add file-type specific suggestions for the command position
-                let file_suggestions: Vec<String> = COMMAND_KNOWLEDGE
-                    .commands_for_filetype(&entry.name)
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect();
-                edit_state.add_suggestions(file_suggestions);
+                edit_state.update_suggestions();
 
                 self.edit_filename = Some(entry.name.clone());
                 self.edit_mode = Some(edit_state);
@@ -238,60 +230,11 @@ impl FileBrowserPanel {
         self.entries.get(self.selection)
     }
 
-    /// Updates suggestions based on file context.
-    ///
-    /// For command position (first token): suggests file-type appropriate commands.
-    /// After pipe: suggests pipeable commands.
-    /// Other positions: uses intelligent suggestions from history.
+    /// Updates suggestions from the unified intelligence pipeline.
     fn update_suggestions_with_file_context(&mut self) {
         let Some(edit_state) = &mut self.edit_mode else {
             return;
         };
-        let filename = self.edit_filename.clone().unwrap_or_default();
-
-        // Check if we're editing after a pipe
-        let editing_after_pipe = if edit_state.selected > 0 {
-            edit_state
-                .tokens
-                .get(edit_state.selected.saturating_sub(1))
-                .map(|t| t.text == "|")
-                .unwrap_or(false)
-        } else {
-            false
-        };
-
-        if editing_after_pipe {
-            // After pipe: suggest pipeable commands
-            edit_state.suggestions = COMMAND_KNOWLEDGE
-                .pipeable_commands()
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
-            edit_state.suggestion_index = None;
-            return;
-        }
-
-        // Check if we're at the command position (first non-locked token)
-        let is_command_position = edit_state.selected == 0
-            || (edit_state.selected > 0
-                && edit_state
-                    .tokens
-                    .iter()
-                    .take(edit_state.selected)
-                    .all(|t| t.locked));
-
-        if is_command_position {
-            // Command position: suggest file-type appropriate commands
-            edit_state.suggestions = COMMAND_KNOWLEDGE
-                .commands_for_filetype(&filename)
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
-            edit_state.suggestion_index = None;
-            return;
-        }
-
-        // Other positions: use intelligent suggestions
         edit_state.update_suggestions();
     }
 }
@@ -479,8 +422,7 @@ impl FileBrowserPanel {
             let token_width = superscript_len + 1 + text_display_width + 1 + 3;
 
             if i == edit_state.selected {
-                selected_x_end =
-                    selected_x_start + superscript_len + 1 + text_display_width + 1;
+                selected_x_end = selected_x_start + superscript_len + 1 + text_display_width + 1;
                 break;
             }
             selected_x_start += token_width;
@@ -862,7 +804,7 @@ impl Panel for FileBrowserPanel {
         let truncated_path = if crate::ui::text_width::display_width(&path_str) > max_path_width {
             // Truncate from the left (show the end of the path)
             let target_width = max_path_width.saturating_sub(3); // room for "..."
-            // Walk backwards through chars to find how much of the tail fits
+                                                                 // Walk backwards through chars to find how much of the tail fits.
             let mut width = 0;
             let mut start_idx = path_str.len();
             for (idx, ch) in path_str.char_indices().rev() {

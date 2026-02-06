@@ -341,7 +341,7 @@ fn count_flag_value_pairs(tokens: &[super::types::AnalyzedToken]) -> usize {
 ///
 /// This function keeps `ci_command_schemas` populated from real usage data so
 /// schema-backed suggestions are available without a separate subsystem.
-fn upsert_schema_from_tokens(
+pub(crate) fn upsert_schema_from_tokens(
     conn: &Connection,
     tokens: &[super::types::AnalyzedToken],
 ) -> Result<(), CIError> {
