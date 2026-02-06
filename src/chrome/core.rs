@@ -389,6 +389,41 @@ impl Chrome {
         Ok(())
     }
 
+    /// Resets and re-establishes scroll region while preserving cursor position.
+    ///
+    /// This emits a single atomic sequence:
+    /// 1. Save cursor
+    /// 2. Reset DECSTBM to full screen
+    /// 3. Re-apply chrome scroll region if active (rows 2..N)
+    /// 4. Restore cursor
+    ///
+    /// This avoids cursor corruption caused by `ESC[r` moving cursor to home
+    /// before a later "preserve cursor" operation.
+    pub fn reset_and_setup_scroll_region_preserve_cursor(&self, total_rows: u16) -> io::Result<()> {
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
+
+        // Save original cursor BEFORE any DECSTBM changes.
+        write!(out, "\x1b[s")?;
+        // Reset to full-screen margins (can move cursor to home in many terminals).
+        write!(out, "\x1b[r")?;
+        // Re-apply chrome margins only when chrome is active.
+        if self.is_active() {
+            write!(out, "\x1b[2;{}r", total_rows)?;
+        }
+        // Restore the original cursor position after margin changes.
+        write!(out, "\x1b[u")?;
+        out.flush()?;
+
+        debug!(
+            chrome_active = self.is_active(),
+            top = 2,
+            bottom = total_rows,
+            "Scroll region reset/reapplied, cursor preserved"
+        );
+        Ok(())
+    }
+
     /// Positions the cursor at the start of the scroll region.
     ///
     /// Moves cursor to row 2, column 1 (the first line of the content area
