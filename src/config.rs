@@ -32,8 +32,6 @@ pub struct ScrollbackConfig {
     pub max_lines: usize,
     /// Maximum bytes per line before truncation.
     pub max_line_bytes: usize,
-    /// Whether to preserve ANSI color codes in scrollback.
-    pub preserve_colors: bool,
 }
 
 impl Default for ScrollbackConfig {
@@ -42,7 +40,6 @@ impl Default for ScrollbackConfig {
             enabled: true,
             max_lines: 10_000,
             max_line_bytes: 4096,
-            preserve_colors: true,
         }
     }
 }
@@ -224,6 +221,5 @@ mod tests {
         assert!(config.enabled);
         assert_eq!(config.max_lines, 10_000);
         assert_eq!(config.max_line_bytes, 4096);
-        assert!(config.preserve_colors);
     }
 }
