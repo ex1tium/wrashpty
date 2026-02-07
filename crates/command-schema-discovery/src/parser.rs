@@ -97,6 +97,7 @@ struct HelpPatterns {
 
     // Version extraction
     version_number: Regex,
+    banner_version: Regex,
 }
 
 impl HelpPatterns {
@@ -145,6 +146,9 @@ impl HelpPatterns {
 
             // Version number extraction
             version_number: Regex::new(r"(\d+\.\d+(?:\.\d+)?)").unwrap(),
+            // Generic banner style: "apt 2.8.3 (amd64)"
+            banner_version: Regex::new(r"^\s*[A-Za-z][A-Za-z0-9+._-]*\s+(\d+\.\d+(?:\.\d+)?)\b")
+                .unwrap(),
         }
     }
 }
@@ -391,6 +395,12 @@ impl HelpParser {
                 if let Some(cap) = PATTERNS.version_number.captures(line) {
                     return Some(cap[1].to_string());
                 }
+            }
+
+            // Fallback banner style where tool wrapper prints a parent tool
+            // name plus version (e.g. apt-get/apt-cache via "apt 2.8.3").
+            if let Some(cap) = PATTERNS.banner_version.captures(trimmed) {
+                return Some(cap[1].to_string());
             }
         }
         None
@@ -822,7 +832,12 @@ impl HelpParser {
                 && token
                     .chars()
                     .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || matches!(ch, '_' | '[' | ']' | '.' | '+' | '<' | '>'));
-            if !has_placeholder_markers && !looks_upper_placeholder {
+            let looks_lower_with_index = token.chars().any(|ch| ch.is_ascii_lowercase())
+                && token.chars().any(|ch| ch.is_ascii_digit())
+                && token
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '[' | ']' | '.'));
+            if !has_placeholder_markers && !looks_upper_placeholder && !looks_lower_with_index {
                 continue;
             }
 
@@ -2265,7 +2280,7 @@ impl HelpParser {
     fn apply_choice_table_hints(
         &self,
         lines: &[IndexedLine],
-        flags: &mut Vec<FlagSchema>,
+        flags: &mut [FlagSchema],
         recognized: &mut HashSet<usize>,
     ) {
         static VALID_ARGUMENTS_FOR_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -3170,6 +3185,11 @@ apt 2.8.3 (amd64)
 Usage: apt [options] command
 "#;
 
+    const APT_GET_VERSION_BANNER_HELP: &str = r#"
+apt 2.8.3 (amd64)
+Usage: apt-get [options] command
+"#;
+
     const LESS_DOTTED_HELP_ROW: &str = r#"
 Options:
   -a, --alpha        ........  Toggle alpha mode.
@@ -3849,6 +3869,13 @@ Special settings:
     #[test]
     fn test_extract_version_from_command_banner_without_word_version() {
         let mut parser = HelpParser::new("apt", APT_VERSION_BANNER_HELP);
+        let schema = parser.parse().unwrap();
+        assert_eq!(schema.version.as_deref(), Some("2.8.3"));
+    }
+
+    #[test]
+    fn test_extract_version_from_parent_banner_for_wrapped_tool_name() {
+        let mut parser = HelpParser::new("apt-get", APT_GET_VERSION_BANNER_HELP);
         let schema = parser.parse().unwrap();
         assert_eq!(schema.version.as_deref(), Some("2.8.3"));
     }
