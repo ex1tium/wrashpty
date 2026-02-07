@@ -12,6 +12,9 @@
   - [x] Update `src/intelligence/schema/mod.rs` exports
 - [x] Phase 2: Core package format/validation/merge
 - [x] Phase 3: Discovery CLI + fixture tests
+  - [x] Parser pipeline now emits weighted format scores + coverage diagnostics
+  - [x] `schema-discover extract` now writes `extraction-report.json` sidecar in output dir
+  - [x] Add probe-attempt metadata (per-flag argv/exit status/timeout/error) to extraction report
 - [x] Phase 4: Curated schema repository + validation workflow
   - [x] Added `schemas/curated/*.json` baseline (17 commands)
   - [x] Validation command wired and passing: `cargo run -p command-schema-discovery -- validate schemas/curated`
@@ -25,9 +28,20 @@
 - [x] Phase 8: Runtime probing removal + legacy migration cutoff
   - [x] 8a: Gate `upsert_schema_from_tokens` with `SchemaIndex` (curated commands skip learned schema writes)
   - [x] 8b: Add schema-version migration to purge legacy `bootstrap/help` rows from `ci_command_schemas`
-- [ ] Phase 9: Explicit overlay strategy for uncurated commands
-- [ ] Phase 10: Lean schema pack export/import
-- [ ] Phase 11: Cleanup, docs, and quality gates
+- [x] Phase 9: Explicit overlay strategy for uncurated commands
+  - [x] `SchemaIndex` split into embedded + runtime overlays with embedded precedence
+  - [x] Runtime overlays loaded only from `ci_command_schemas` learned base-command rows
+  - [x] `SchemaStore` scoped to `pub(crate)` and convenience free functions removed
+- [x] Phase 10: Lean schema pack export/import
+  - [x] Added curated schema-pack export from embedded schema index
+  - [x] Added schema-pack import into learned overlay layer (curated commands skipped)
+  - [x] Exposed schema-pack import/export APIs via `CommandIntelligence`
+- [x] Phase 11: Cleanup, docs, and quality gates
+  - [x] Updated module docs to reflect schema-first architecture and explicit overlay semantics
+  - [x] Verified final gates: `cargo fmt --check`, `cargo clippy --workspace -- -D warnings`, `cargo test --workspace`
+  - [x] Verified cleanup gates: no `probe_command_help`/`extract_command_schema`/`HelpParser`/`maybe_extract` hits in `src/`
+  - [x] Verified no `command_schema_discovery` references in `src/`
+  - [ ] Optional: parser hardening expansion in discovery crate (kept as follow-up, non-blocking)
 
 ## Invariants
 
