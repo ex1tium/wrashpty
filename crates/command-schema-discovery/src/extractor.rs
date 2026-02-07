@@ -62,6 +62,13 @@ struct ProbeRun {
     attempts: Vec<ProbeAttempt>,
 }
 
+#[derive(Debug)]
+struct DirectProbeOutcome {
+    attempt: ProbeAttempt,
+    accepted_output: Option<String>,
+    spawn_not_found: bool,
+}
+
 /// Probes a command's help output and returns the raw text.
 pub fn probe_command_help(command: &str) -> Option<String> {
     probe_command_help_with_metadata(command).help_output
@@ -78,6 +85,26 @@ fn probe_command_help_with_metadata(command: &str) -> ProbeRun {
     }
 
     let mut attempts = Vec::with_capacity(HELP_FLAGS.len());
+    let base_command = parts[0].to_ascii_lowercase();
+
+    for suffix in command_specific_probe_suffixes(base_command.as_str()) {
+        let mut cmd_parts: Vec<String> = parts.iter().map(|part| (*part).to_string()).collect();
+        cmd_parts.extend(suffix.iter().map(|part| (*part).to_string()));
+        let label = suffix.join(" ");
+
+        debug!(command = ?cmd_parts, "Probing command-specific help");
+        let outcome = try_direct_probe(&cmd_parts, &label);
+        if outcome.spawn_not_found {
+            continue;
+        }
+        attempts.push(outcome.attempt);
+        if let Some(help_text) = outcome.accepted_output {
+            return ProbeRun {
+                help_output: Some(adapt_help_output_for_command(command, help_text)),
+                attempts,
+            };
+        }
+    }
 
     for help_flag in HELP_FLAGS {
         let mut cmd_parts: Vec<String> = parts.iter().map(|part| (*part).to_string()).collect();
@@ -92,122 +119,191 @@ fn probe_command_help_with_metadata(command: &str) -> ProbeRun {
         }
 
         debug!(command = ?cmd_parts, "Probing help");
-        let mut attempt = ProbeAttempt::new(help_flag, cmd_parts.clone());
-
-        let spawn_result = Command::new(&cmd_parts[0])
-            .args(&cmd_parts[1..])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn();
-
-        match spawn_result {
-            Ok(mut child) => {
-                // Take ownership of pipes before waiting so we can read both streams.
-                let mut stdout_pipe = child.stdout.take();
-                let mut stderr_pipe = child.stderr.take();
-
-                let timeout = Duration::from_millis(HELP_TIMEOUT_MS);
-                match wait_for_child_with_timeout(&mut child, timeout) {
-                    Ok(Some(status)) => {
-                        attempt.exit_code = status.code();
-                        // Process completed within timeout, read from pipes directly
-                        let mut stdout_buf = Vec::new();
-                        let mut stderr_buf = Vec::new();
-                        let mut io_errors = Vec::new();
-
-                        if let Some(ref mut pipe) = stdout_pipe {
-                            if let Err(e) = pipe.read_to_end(&mut stdout_buf) {
-                                debug!(command = ?cmd_parts, error = %e, "Failed to read stdout");
-                                io_errors.push(format!("stdout read failed: {e}"));
-                            }
-                        }
-                        if let Some(ref mut pipe) = stderr_pipe {
-                            if let Err(e) = pipe.read_to_end(&mut stderr_buf) {
-                                debug!(command = ?cmd_parts, error = %e, "Failed to read stderr");
-                                io_errors.push(format!("stderr read failed: {e}"));
-                            }
-                        }
-                        if !io_errors.is_empty() {
-                            attempt.error = Some(io_errors.join("; "));
-                        }
-
-                        // Some commands output help to stderr
-                        let stdout = String::from_utf8_lossy(&stdout_buf);
-                        let stderr = String::from_utf8_lossy(&stderr_buf);
-                        let (help_text, output_source) = if stdout.len() > stderr.len() {
-                            (stdout.to_string(), "stdout")
-                        } else {
-                            (stderr.to_string(), "stderr")
-                        };
-                        attempt.output_source = Some(output_source.to_string());
-                        attempt.output_len = help_text.len();
-
-                        // Validate it looks like help output
-                        if is_help_output(&help_text) {
-                            attempt.accepted = true;
-                            attempts.push(attempt);
-                            debug!(
-                                command = command,
-                                help_flag = help_flag,
-                                length = help_text.len(),
-                                "Got help output"
-                            );
-                            return ProbeRun {
-                                help_output: Some(help_text),
-                                attempts,
-                            };
-                        }
-                        attempts.push(attempt);
-                    }
-                    Ok(None) => {
-                        // Timeout expired, kill the process
-                        attempt.timed_out = true;
-                        debug!(
-                            command = ?cmd_parts,
-                            timeout_ms = HELP_TIMEOUT_MS,
-                            "Help command timed out, killing process"
-                        );
-                        let _ = child.kill();
-                        let _ = child.wait(); // Reap the zombie process
-                        attempts.push(attempt);
-                    }
-                    Err(e) => {
-                        attempt.error = Some(format!("wait failed: {e}"));
-                        debug!(command = ?cmd_parts, error = %e, "Failed to wait on help command");
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        attempts.push(attempt);
-                    }
-                }
+        let outcome = try_direct_probe(&cmd_parts, help_flag);
+        if outcome.spawn_not_found {
+            // Shell builtin fallback (e.g. `cd`) for commands that don't exist
+            // as standalone executables.
+            debug!(
+                command = ?cmd_parts,
+                "Direct spawn failed, trying shell fallback probe"
+            );
+            let shell_probe = probe_shell_help(&parts, help_flag);
+            attempts.push(shell_probe.attempt);
+            if let Some(help_text) = shell_probe.accepted_output {
+                return ProbeRun {
+                    help_output: Some(adapt_help_output_for_command(command, help_text)),
+                    attempts,
+                };
             }
-            Err(e) => {
-                // Shell builtin fallback (e.g. `cd`) for commands that don't exist
-                // as standalone executables.
-                if e.kind() == ErrorKind::NotFound {
-                    debug!(
-                        command = ?cmd_parts,
-                        "Direct spawn failed, trying shell fallback probe"
-                    );
-                    let shell_probe = probe_shell_help(&parts, help_flag);
-                    attempts.push(shell_probe.attempt);
-                    if let Some(help_text) = shell_probe.accepted_output {
-                        return ProbeRun {
-                            help_output: Some(help_text),
-                            attempts,
-                        };
-                    }
-                } else {
-                    attempt.error = Some(format!("spawn failed: {e}"));
-                    debug!(command = ?cmd_parts, error = %e, "Failed to spawn help command");
-                    attempts.push(attempt);
-                }
-            }
+            continue;
+        }
+
+        attempts.push(outcome.attempt);
+        if let Some(help_text) = outcome.accepted_output {
+            debug!(
+                command = command,
+                help_flag = help_flag,
+                length = help_text.len(),
+                "Got help output"
+            );
+            return ProbeRun {
+                help_output: Some(adapt_help_output_for_command(command, help_text)),
+                attempts,
+            };
         }
     }
 
     ProbeRun {
         help_output: None,
         attempts,
+    }
+}
+
+fn command_specific_probe_suffixes(base_command: &str) -> Vec<Vec<&'static str>> {
+    match base_command {
+        "ps" => vec![
+            vec!["--help", "all"],
+            vec!["--help", "simple"],
+            vec!["--help", "list"],
+            vec!["--help", "output"],
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn adapt_help_output_for_command(command: &str, help_text: String) -> String {
+    let base_command = command
+        .split_whitespace()
+        .next()
+        .unwrap_or(command)
+        .to_ascii_lowercase();
+    match base_command.as_str() {
+        "service" => adapt_service_help_output(&help_text),
+        _ => help_text,
+    }
+}
+
+fn adapt_service_help_output(help_text: &str) -> String {
+    if !help_text.contains("Usage: service") {
+        return help_text.to_string();
+    }
+    if help_text.contains("\nOptions:") || help_text.contains("\nFlags:") {
+        return help_text.to_string();
+    }
+
+    let mut adapted = help_text.trim_end().to_string();
+    adapted.push_str(
+        "\n\nOptions:\n  --status-all    list all services and current status\n  --full-restart  run a full restart for a service\n\nArguments:\n  service_name    service to operate on\n  command         service command to execute\n",
+    );
+    adapted
+}
+
+fn try_direct_probe(cmd_parts: &[String], help_flag: &str) -> DirectProbeOutcome {
+    let mut attempt = ProbeAttempt::new(help_flag, cmd_parts.to_vec());
+    let spawn_result = Command::new(&cmd_parts[0])
+        .args(&cmd_parts[1..])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+
+    match spawn_result {
+        Ok(mut child) => {
+            let mut stdout_pipe = child.stdout.take();
+            let mut stderr_pipe = child.stderr.take();
+
+            let timeout = Duration::from_millis(HELP_TIMEOUT_MS);
+            match wait_for_child_with_timeout(&mut child, timeout) {
+                Ok(Some(status)) => {
+                    attempt.exit_code = status.code();
+                    let mut stdout_buf = Vec::new();
+                    let mut stderr_buf = Vec::new();
+                    let mut io_errors = Vec::new();
+
+                    if let Some(ref mut pipe) = stdout_pipe
+                        && let Err(e) = pipe.read_to_end(&mut stdout_buf)
+                    {
+                        debug!(command = ?cmd_parts, error = %e, "Failed to read stdout");
+                        io_errors.push(format!("stdout read failed: {e}"));
+                    }
+                    if let Some(ref mut pipe) = stderr_pipe
+                        && let Err(e) = pipe.read_to_end(&mut stderr_buf)
+                    {
+                        debug!(command = ?cmd_parts, error = %e, "Failed to read stderr");
+                        io_errors.push(format!("stderr read failed: {e}"));
+                    }
+                    if !io_errors.is_empty() {
+                        attempt.error = Some(io_errors.join("; "));
+                    }
+
+                    let stdout = String::from_utf8_lossy(&stdout_buf);
+                    let stderr = String::from_utf8_lossy(&stderr_buf);
+                    let (help_text, output_source) = if stdout.len() > stderr.len() {
+                        (stdout.to_string(), "stdout")
+                    } else {
+                        (stderr.to_string(), "stderr")
+                    };
+                    attempt.output_source = Some(output_source.to_string());
+                    attempt.output_len = help_text.len();
+
+                    if is_help_output(&help_text) {
+                        attempt.accepted = true;
+                        return DirectProbeOutcome {
+                            attempt,
+                            accepted_output: Some(help_text),
+                            spawn_not_found: false,
+                        };
+                    }
+
+                    DirectProbeOutcome {
+                        attempt,
+                        accepted_output: None,
+                        spawn_not_found: false,
+                    }
+                }
+                Ok(None) => {
+                    attempt.timed_out = true;
+                    debug!(
+                        command = ?cmd_parts,
+                        timeout_ms = HELP_TIMEOUT_MS,
+                        "Help command timed out, killing process"
+                    );
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    DirectProbeOutcome {
+                        attempt,
+                        accepted_output: None,
+                        spawn_not_found: false,
+                    }
+                }
+                Err(e) => {
+                    attempt.error = Some(format!("wait failed: {e}"));
+                    debug!(command = ?cmd_parts, error = %e, "Failed to wait on help command");
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    DirectProbeOutcome {
+                        attempt,
+                        accepted_output: None,
+                        spawn_not_found: false,
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            if e.kind() == ErrorKind::NotFound {
+                return DirectProbeOutcome {
+                    attempt,
+                    accepted_output: None,
+                    spawn_not_found: true,
+                };
+            }
+            attempt.error = Some(format!("spawn failed: {e}"));
+            debug!(command = ?cmd_parts, error = %e, "Failed to spawn help command");
+            DirectProbeOutcome {
+                attempt,
+                accepted_output: None,
+                spawn_not_found: false,
+            }
+        }
     }
 }
 
@@ -783,6 +879,25 @@ mod tests {
         assert!(is_help_output(
             "Illegal option --\nUsage: /usr/bin/which [-as] args"
         ));
+    }
+
+    #[test]
+    fn test_command_specific_probe_suffixes_for_ps() {
+        let suffixes = command_specific_probe_suffixes("ps");
+        assert!(
+            suffixes
+                .iter()
+                .any(|suffix| suffix == &vec!["--help", "all"])
+        );
+    }
+
+    #[test]
+    fn test_adapt_service_help_output_adds_structured_sections() {
+        let raw = "Usage: service < option > | --status-all | [ service_name [ command | --full-restart ] ]\n";
+        let adapted = adapt_service_help_output(raw);
+        assert!(adapted.contains("Options:"));
+        assert!(adapted.contains("--status-all"));
+        assert!(adapted.contains("Arguments:"));
     }
 
     #[test]
