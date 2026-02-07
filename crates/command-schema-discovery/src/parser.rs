@@ -346,6 +346,11 @@ impl HelpParser {
             &mut schema.global_flags,
             &mut recognized_indices,
         );
+        self.apply_choice_table_hints(
+            &indexed_lines,
+            &mut schema.global_flags,
+            &mut recognized_indices,
+        );
 
         // Calculate confidence based on what we extracted
         schema.confidence = self.calculate_confidence(&schema);
@@ -362,7 +367,24 @@ impl HelpParser {
 
     /// Extracts version string if present.
     fn extract_version(&self, lines: &[&str]) -> Option<String> {
+        let base_command = self
+            .command
+            .split_whitespace()
+            .next()
+            .unwrap_or(&self.command)
+            .to_ascii_lowercase();
+
         for line in lines.iter().take(5) {
+            let trimmed = line.trim();
+            let trimmed_lower = trimmed.to_ascii_lowercase();
+
+            // Common pattern: "<command> 1.2.3 (...)"
+            if trimmed_lower.starts_with(&(base_command.clone() + " "))
+                && let Some(cap) = PATTERNS.version_number.captures(trimmed)
+            {
+                return Some(cap[1].to_string());
+            }
+
             let line_lower = line.to_lowercase();
             if line_lower.contains("version") || line_lower.contains(" v") {
                 // Try to extract version number using pre-compiled regex
@@ -498,7 +520,6 @@ impl HelpParser {
         }
 
         let negatives = [
-            "environment",
             "variable",
             "option",
             "flag",
@@ -1092,16 +1113,22 @@ impl HelpParser {
             return true;
         }
 
-        let mut hint_text = definition.to_ascii_lowercase();
-        if let Some(desc) = description {
-            hint_text.push(' ');
-            hint_text.push_str(&desc.to_ascii_lowercase());
+        let definition_lower = definition.to_ascii_lowercase();
+        if definition_lower.contains("...")
+            && (definition.contains('<')
+                || definition.contains('[')
+                || definition.contains('=')
+                || definition.split_whitespace().count() == 1)
+        {
+            return true;
         }
 
-        hint_text.contains("...") ||
-            hint_text.contains("multiple times") ||
-            hint_text.contains("more than once") ||
-            hint_text.contains("repeatable")
+        let description_lower = description.unwrap_or_default().to_ascii_lowercase();
+        description_lower.contains("multiple times")
+            || description_lower.contains("more than once")
+            || description_lower.contains("repeatable")
+            || description_lower.contains("can be used multiple times")
+            || description_lower.contains("may be repeated")
     }
 
     fn extract_flag_relationships(description: &str) -> (Vec<String>, Vec<String>) {
@@ -2235,6 +2262,248 @@ impl HelpParser {
         }
     }
 
+    fn apply_choice_table_hints(
+        &self,
+        lines: &[IndexedLine],
+        flags: &mut Vec<FlagSchema>,
+        recognized: &mut HashSet<usize>,
+    ) {
+        static VALID_ARGUMENTS_FOR_RE: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"(?i)^valid arguments for\s+((?:--?)[a-zA-Z0-9?@][a-zA-Z0-9?@.-]*)\s*:\s*$")
+                .unwrap()
+        });
+        static PLACEHOLDER_VALUES_RE: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"^([A-Z][A-Z0-9_-]{1,})\s+is one of the following\s*:\s*$").unwrap()
+        });
+        static PLACEHOLDER_DETERMINES_RE: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"^([A-Z][A-Z0-9_-]{1,})\s+determines\b.*:\s*$").unwrap()
+        });
+        static GENERIC_VALUES_HEADER_RE: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(
+                r"(?i)^.*\b(here are the values|possible values|available values)\b.*:?\s*$",
+            )
+            .unwrap()
+        });
+        static FLAG_REF_RE: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"(--[a-zA-Z][-a-zA-Z0-9.]*|-[a-zA-Z0-9?@]{1,3})").unwrap()
+        });
+
+        #[derive(Clone)]
+        enum ChoiceTarget {
+            Flag(String),
+            Placeholder(String),
+        }
+
+        for idx in 0..lines.len() {
+            let trimmed = lines[idx].text.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            let target = if let Some(cap) = VALID_ARGUMENTS_FOR_RE.captures(trimmed) {
+                let (normalized, _) = Self::normalize_flag_token(&cap[1]);
+                Some(ChoiceTarget::Flag(normalized))
+            } else if let Some(cap) = PLACEHOLDER_VALUES_RE.captures(trimmed) {
+                Some(ChoiceTarget::Placeholder(
+                    cap.get(1).map_or("", |m| m.as_str()).to_string(),
+                ))
+            } else if let Some(cap) = PLACEHOLDER_DETERMINES_RE.captures(trimmed) {
+                Some(ChoiceTarget::Placeholder(
+                    cap.get(1).map_or("", |m| m.as_str()).to_string(),
+                ))
+            } else if GENERIC_VALUES_HEADER_RE.is_match(trimmed) {
+                let context_start = idx.saturating_sub(3);
+                let mut from_context: Option<ChoiceTarget> = None;
+                for context_line in lines[context_start..idx].iter().rev() {
+                    let context = context_line.text.trim();
+                    if context.is_empty() {
+                        continue;
+                    }
+                    if let Some(cap) = PLACEHOLDER_VALUES_RE.captures(context) {
+                        from_context = Some(ChoiceTarget::Placeholder(
+                            cap.get(1).map_or("", |m| m.as_str()).to_string(),
+                        ));
+                        break;
+                    }
+                    if let Some(cap) = PLACEHOLDER_DETERMINES_RE.captures(context) {
+                        from_context = Some(ChoiceTarget::Placeholder(
+                            cap.get(1).map_or("", |m| m.as_str()).to_string(),
+                        ));
+                        break;
+                    }
+                    if let Some(cap) = FLAG_REF_RE.captures(context) {
+                        let (normalized, _) = Self::normalize_flag_token(&cap[1]);
+                        from_context = Some(ChoiceTarget::Flag(normalized));
+                        break;
+                    }
+                }
+                from_context
+            } else {
+                None
+            };
+
+            let Some(target) = target else {
+                continue;
+            };
+
+            let mut choices: Vec<String> = Vec::new();
+            let mut recognized_rows: Vec<usize> = Vec::new();
+            let mut probe = idx + 1;
+            let mut started_rows = false;
+            while probe < lines.len() {
+                let row = lines[probe].text.trim();
+                if row.is_empty() {
+                    if started_rows {
+                        break;
+                    }
+                    probe += 1;
+                    continue;
+                }
+                if Self::is_usage_line(row) || Self::is_section_header_line(row) {
+                    break;
+                }
+                if row.starts_with('-') {
+                    break;
+                }
+                let Some((left, _)) = Self::split_two_columns(row) else {
+                    break;
+                };
+                let row_choices = Self::parse_choice_tokens(left);
+                if row_choices.is_empty() {
+                    break;
+                }
+                started_rows = true;
+                for choice in row_choices {
+                    if !choices.contains(&choice) {
+                        choices.push(choice);
+                    }
+                }
+                recognized_rows.push(lines[probe].index);
+                probe += 1;
+            }
+
+            if choices.len() < 2 {
+                continue;
+            }
+
+            let target_index = match target {
+                ChoiceTarget::Flag(flag_name) => flags.iter().position(|flag| {
+                    flag.short.as_deref() == Some(flag_name.as_str())
+                        || flag.long.as_deref() == Some(flag_name.as_str())
+                }),
+                ChoiceTarget::Placeholder(placeholder) => {
+                    self.resolve_flag_for_placeholder(
+                        lines,
+                        idx,
+                        placeholder.as_str(),
+                        flags,
+                        &FLAG_REF_RE,
+                    )
+                }
+            };
+
+            let Some(flag_index) = target_index else {
+                continue;
+            };
+
+            let flag = &mut flags[flag_index];
+            flag.takes_value = true;
+            match &mut flag.value_type {
+                ValueType::Choice(existing) => {
+                    for choice in choices {
+                        if !existing.contains(&choice) {
+                            existing.push(choice);
+                        }
+                    }
+                }
+                _ => {
+                    flag.value_type = ValueType::Choice(choices);
+                }
+            }
+            recognized.insert(lines[idx].index);
+            recognized.extend(recognized_rows);
+        }
+    }
+
+    fn resolve_flag_for_placeholder(
+        &self,
+        lines: &[IndexedLine],
+        idx: usize,
+        placeholder: &str,
+        flags: &[FlagSchema],
+        flag_ref_re: &Regex,
+    ) -> Option<usize> {
+        let placeholder_lower = placeholder.to_ascii_lowercase();
+        let mut candidates = flags
+            .iter()
+            .enumerate()
+            .filter(|(_, flag)| {
+                flag.takes_value
+                    && (flag
+                        .long
+                        .as_deref()
+                        .is_some_and(|long| long.trim_start_matches("--").contains(&placeholder_lower))
+                        || flag
+                            .description
+                            .as_deref()
+                            .is_some_and(|desc| desc.to_ascii_lowercase().contains(&placeholder_lower)))
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        candidates.sort_unstable();
+        candidates.dedup();
+        if candidates.len() == 1 {
+            return candidates.into_iter().next();
+        }
+
+        let context_start = idx.saturating_sub(3);
+        let mut referenced = Vec::new();
+        for line in &lines[context_start..=idx] {
+            for cap in flag_ref_re.captures_iter(line.text.as_str()) {
+                let (normalized, _) = Self::normalize_flag_token(&cap[1]);
+                if let Some(found) = flags.iter().position(|flag| {
+                    flag.short.as_deref() == Some(normalized.as_str())
+                        || flag.long.as_deref() == Some(normalized.as_str())
+                }) {
+                    if !referenced.contains(&found) {
+                        referenced.push(found);
+                    }
+                }
+            }
+        }
+        if referenced.len() == 1 {
+            return referenced.into_iter().next();
+        }
+
+        None
+    }
+
+    fn parse_choice_tokens(left_column: &str) -> Vec<String> {
+        let mut choices = Vec::new();
+        for raw in left_column.split(',') {
+            let token = raw.trim();
+            if token.is_empty() {
+                continue;
+            }
+            if !token
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+            {
+                continue;
+            }
+            if token.chars().all(|ch| ch.is_ascii_digit()) {
+                continue;
+            }
+            if Self::looks_like_placeholder_subcommand_token(token) {
+                continue;
+            }
+            if !choices.contains(&token.to_string()) {
+                choices.push(token.to_string());
+            }
+        }
+        choices
+    }
+
     fn build_diagnostics(
         &self,
         lines: &[IndexedLine],
@@ -2293,6 +2562,9 @@ impl HelpParser {
             return false;
         }
         if PATTERNS.line_of_dashes.is_match(trimmed) {
+            return false;
+        }
+        if Self::looks_like_keybinding_row(trimmed) {
             return false;
         }
         if Self::is_usage_line(trimmed)
@@ -2387,9 +2659,26 @@ impl HelpParser {
             return Self::looks_like_flag_row_start(left);
         }
 
-        left.split(',')
+        let left_tokens = left
+            .split(',')
             .map(str::trim)
             .filter(|token| !token.is_empty())
+            .collect::<Vec<_>>();
+        if left_tokens.is_empty() {
+            return false;
+        }
+        if left_tokens
+            .iter()
+            .all(|token| Self::looks_like_non_command_value_token(token))
+        {
+            return false;
+        }
+        if right.trim_start().starts_with(':') {
+            return false;
+        }
+
+        left_tokens
+            .into_iter()
             .all(Self::looks_like_command_token)
     }
 
@@ -2410,8 +2699,19 @@ impl HelpParser {
         if token.starts_with('-') {
             return false;
         }
+        if token == "_" {
+            return false;
+        }
         if token.chars().all(|ch| ch == '.') {
             return true;
+        }
+        if token.chars().all(|ch| ch.is_ascii_digit()) {
+            return false;
+        }
+        if Self::looks_like_placeholder_subcommand_token(token)
+            || Self::looks_like_non_command_value_token(token)
+        {
+            return false;
         }
 
         if token.chars().any(|ch| ch.is_whitespace()) {
@@ -2421,6 +2721,57 @@ impl HelpParser {
             return false;
         }
         Self::is_valid_command_name(token)
+    }
+
+    fn looks_like_keybinding_row(trimmed: &str) -> bool {
+        let Some((left, right)) = Self::split_two_columns(trimmed) else {
+            return false;
+        };
+        let lower = left.to_ascii_lowercase();
+        if lower.contains("esc-")
+            || lower.contains("ctrl")
+            || lower.contains("arrow")
+            || left.contains('^')
+        {
+            return true;
+        }
+
+        let compact_key_tokens = left
+            .split_whitespace()
+            .filter(|token| !token.is_empty())
+            .collect::<Vec<_>>();
+        let compact_keys = compact_key_tokens.len() >= 3
+            && compact_key_tokens.iter().all(|token| {
+                token.len() <= 3
+                    && token
+                        .chars()
+                        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '^' | '-' | ':'))
+            });
+        if compact_keys {
+            return true;
+        }
+
+        let right_lower = right.to_ascii_lowercase();
+        let keybinding_verb = [
+            "display",
+            "forward",
+            "backward",
+            "exit",
+            "repaint",
+            "repeat",
+            "edit",
+            "move cursor",
+            "go to",
+            "print version",
+        ]
+        .iter()
+        .any(|needle| right_lower.contains(needle));
+        let short_token_keys = left
+            .split_whitespace()
+            .filter(|token| !token.is_empty())
+            .all(|token| token.len() <= 2 && token.chars().all(|ch| ch.is_ascii_alphanumeric()));
+
+        keybinding_verb && short_token_keys
     }
 
     /// Infers value type from context clues.
@@ -2811,6 +3162,38 @@ Options:
   --verbose...               Increase output verbosity (can be used multiple times)
   --locked                   Assert lockfile is unchanged (conflicts with --offline)
   --frozen                   Requires --locked and --offline
+"#;
+
+    const APT_VERSION_BANNER_HELP: &str = r#"
+apt 2.8.3 (amd64)
+
+Usage: apt [options] command
+"#;
+
+    const LESS_DOTTED_HELP_ROW: &str = r#"
+Options:
+  -a, --alpha        ........  Toggle alpha mode.
+"#;
+
+    const CONTEXTUAL_VALUES_TABLE_HELP: &str = r#"
+Options:
+  --backup[=CONTROL]       make a backup of destination file
+
+The version control method may be selected via the --backup option or through
+the VERSION_CONTROL environment variable.  Here are the values:
+  none, off       never make backups
+  numbered, t     make numbered backups
+  existing, nil   numbered if backups exist, simple otherwise
+"#;
+
+    const PLACEHOLDER_VALUES_TABLE_HELP: &str = r#"
+Options:
+  --output-error[=MODE]   set behavior on write error. See MODE below
+
+MODE determines behavior with write errors on the outputs:
+  warn           diagnose errors writing to any output
+  warn-nopipe    diagnose errors writing to output not a pipe
+  exit           exit on error writing to any output
 "#;
 
     #[test]
@@ -3461,5 +3844,63 @@ Special settings:
             .expect("--frozen should exist");
         assert!(frozen.requires.contains(&"--locked".to_string()));
         assert!(frozen.requires.contains(&"--offline".to_string()));
+    }
+
+    #[test]
+    fn test_extract_version_from_command_banner_without_word_version() {
+        let mut parser = HelpParser::new("apt", APT_VERSION_BANNER_HELP);
+        let schema = parser.parse().unwrap();
+        assert_eq!(schema.version.as_deref(), Some("2.8.3"));
+    }
+
+    #[test]
+    fn test_dotted_flag_descriptions_do_not_mark_multiple() {
+        let mut parser = HelpParser::new("less", LESS_DOTTED_HELP_ROW);
+        let schema = parser.parse().unwrap();
+        let alpha = schema
+            .global_flags
+            .iter()
+            .find(|flag| flag.long.as_deref() == Some("--alpha"))
+            .expect("--alpha flag should exist");
+        assert!(!alpha.multiple);
+    }
+
+    #[test]
+    fn test_parse_contextual_values_table_for_flag_choices() {
+        let mut parser = HelpParser::new("cp", CONTEXTUAL_VALUES_TABLE_HELP);
+        let schema = parser.parse().unwrap();
+        let backup = schema
+            .global_flags
+            .iter()
+            .find(|flag| flag.long.as_deref() == Some("--backup"))
+            .expect("--backup should exist");
+        match &backup.value_type {
+            ValueType::Choice(values) => {
+                assert!(values.contains(&"none".to_string()));
+                assert!(values.contains(&"off".to_string()));
+                assert!(values.contains(&"numbered".to_string()));
+                assert!(values.contains(&"nil".to_string()));
+            }
+            other => panic!("expected Choice for --backup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_placeholder_values_table_for_flag_choices() {
+        let mut parser = HelpParser::new("tee", PLACEHOLDER_VALUES_TABLE_HELP);
+        let schema = parser.parse().unwrap();
+        let output_error = schema
+            .global_flags
+            .iter()
+            .find(|flag| flag.long.as_deref() == Some("--output-error"))
+            .expect("--output-error should exist");
+        match &output_error.value_type {
+            ValueType::Choice(values) => {
+                assert!(values.contains(&"warn".to_string()));
+                assert!(values.contains(&"warn-nopipe".to_string()));
+                assert!(values.contains(&"exit".to_string()));
+            }
+            other => panic!("expected Choice for --output-error, got {other:?}"),
+        }
     }
 }
