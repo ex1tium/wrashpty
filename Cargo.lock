@@ -305,6 +305,7 @@ dependencies = [
  "clap",
  "command-schema-core",
  "regex",
+ "serde",
  "serde_json",
  "tracing",
  "wait-timeout",

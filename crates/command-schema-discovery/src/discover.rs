@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 use command_schema_core::{CommandSchema, SchemaPackage, validate_package, validate_schema};
 
-use crate::extractor::{command_exists, extract_command_schema};
+use crate::extractor::{command_exists, extract_command_schema_with_report};
+use crate::report::{ExtractionReport, ExtractionReportBundle};
 
 /// Default allowlist for schema extraction.
 pub const DEFAULT_ALLOWLIST: &[&str] = &[
@@ -87,6 +88,8 @@ pub struct DiscoverOutcome {
     pub failures: Vec<String>,
     /// Non-fatal extraction warnings.
     pub warnings: Vec<String>,
+    /// Per-command extraction reports.
+    pub reports: Vec<ExtractionReport>,
 }
 
 /// Returns a deterministic, deduplicated command list based on config.
@@ -136,9 +139,11 @@ pub fn discover_and_extract(config: &DiscoverConfig, version: &str) -> DiscoverO
     let mut package = SchemaPackage::new(version, Utc::now().to_rfc3339());
     let mut failures = Vec::new();
     let mut warnings = Vec::new();
+    let mut reports = Vec::new();
 
     for command in commands {
-        let result = extract_command_schema(&command);
+        let run = extract_command_schema_with_report(&command);
+        let result = run.result;
         let command_label = command.clone();
 
         if result.success {
@@ -157,12 +162,28 @@ pub fn discover_and_extract(config: &DiscoverConfig, version: &str) -> DiscoverO
                 .into_iter()
                 .map(|warning| format!("{}: {}", command_label, warning)),
         );
+        reports.push(run.report);
     }
 
     DiscoverOutcome {
         package,
         failures,
         warnings,
+        reports,
+    }
+}
+
+/// Builds a serializable bundle report for a discovery run.
+pub fn build_report_bundle(
+    version: &str,
+    reports: Vec<ExtractionReport>,
+    failures: Vec<String>,
+) -> ExtractionReportBundle {
+    ExtractionReportBundle {
+        generated_at: Utc::now().to_rfc3339(),
+        version: version.to_string(),
+        reports,
+        failures,
     }
 }
 
@@ -363,6 +384,14 @@ mod tests {
 
         let result = bundle_schema_files(&[file_a, file_b], "1.0.0", None, None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_report_bundle_populates_metadata() {
+        let bundle = build_report_bundle("1.2.3", Vec::new(), vec!["npm".to_string()]);
+        assert_eq!(bundle.version, "1.2.3");
+        assert_eq!(bundle.failures, vec!["npm".to_string()]);
+        assert!(bundle.generated_at.contains('T'));
     }
 
     fn unique_tmp_dir() -> PathBuf {

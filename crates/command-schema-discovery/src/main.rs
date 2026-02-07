@@ -3,8 +3,8 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 use command_schema_discovery::discover::{
-    DiscoverConfig, bundle_schema_files, collect_schema_paths, discover_and_extract,
-    load_and_validate_schemas,
+    DiscoverConfig, build_report_bundle, bundle_schema_files, collect_schema_paths,
+    discover_and_extract, load_and_validate_schemas,
 };
 
 const PACKAGE_VERSION: &str = "1.0.0";
@@ -122,6 +122,17 @@ fn run_extract(args: ExtractArgs) -> Result<(), String> {
     }
 
     println!("Extracted and wrote {written} schema file(s).");
+
+    let report_bundle = build_report_bundle(
+        PACKAGE_VERSION,
+        outcome.reports.clone(),
+        outcome.failures.clone(),
+    );
+    let report_path = args.output.join("extraction-report.json");
+    let report_json = serde_json::to_string_pretty(&report_bundle)
+        .map_err(|err| format!("Failed to serialize extraction report: {err}"))?;
+    fs::write(&report_path, report_json)
+        .map_err(|err| format!("Failed to write '{}': {err}", report_path.display()))?;
 
     if !outcome.failures.is_empty() {
         eprintln!(

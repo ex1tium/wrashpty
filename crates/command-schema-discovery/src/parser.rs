@@ -8,12 +8,66 @@
 //! - And more
 
 use regex::Regex;
+use std::collections::HashSet;
 use std::sync::LazyLock;
 use tracing::debug;
 
 use command_schema_core::{
     CommandSchema, FlagSchema, HelpFormat, SchemaSource, SubcommandSchema, ValueType,
 };
+
+/// Weighted score for a detected help-output format.
+#[derive(Debug, Clone)]
+pub struct FormatScore {
+    pub format: HelpFormat,
+    pub score: f64,
+}
+
+/// Diagnostics for a single parse run.
+#[derive(Debug, Clone, Default)]
+pub struct ParseDiagnostics {
+    pub format_scores: Vec<FormatScore>,
+    pub parsers_used: Vec<String>,
+    pub relevant_lines: usize,
+    pub recognized_lines: usize,
+    pub unresolved_lines: Vec<String>,
+}
+
+impl ParseDiagnostics {
+    pub fn coverage(&self) -> f64 {
+        if self.relevant_lines == 0 {
+            return 0.0;
+        }
+        self.recognized_lines as f64 / self.relevant_lines as f64
+    }
+}
+
+#[derive(Debug, Clone)]
+struct IndexedLine {
+    index: usize,
+    text: String,
+}
+
+#[derive(Debug, Clone)]
+struct SectionEntry {
+    index: usize,
+    text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SectionKind {
+    Subcommands,
+    Flags,
+    Options,
+    Arguments,
+}
+
+#[derive(Default)]
+struct SectionBuckets {
+    subcommands: Vec<SectionEntry>,
+    flags: Vec<SectionEntry>,
+    options: Vec<SectionEntry>,
+}
 
 /// Regex patterns for parsing help output.
 static PATTERNS: LazyLock<HelpPatterns> = LazyLock::new(HelpPatterns::new);
@@ -57,7 +111,7 @@ impl HelpPatterns {
 
             // Section headers (case insensitive)
             subcommands_section: Regex::new(
-                r"(?i)^(commands|subcommands|available commands|sub-commands)\s*:?\s*$"
+                r"(?i)^(commands|all commands|subcommands|available commands|sub-commands)\s*:?\s*$"
             ).unwrap(),
             flags_section: Regex::new(
                 r"(?i)^(flags|global flags)\s*:?\s*$"
@@ -86,6 +140,7 @@ pub struct HelpParser {
     raw_output: String,
     detected_format: Option<HelpFormat>,
     warnings: Vec<String>,
+    diagnostics: ParseDiagnostics,
 }
 
 impl HelpParser {
@@ -96,6 +151,7 @@ impl HelpParser {
             raw_output: help_output.to_string(),
             detected_format: None,
             warnings: Vec::new(),
+            diagnostics: ParseDiagnostics::default(),
         }
     }
 
@@ -106,15 +162,19 @@ impl HelpParser {
             return None;
         }
 
-        // Detect format
-        self.detected_format = Some(self.detect_format());
-        debug!(format = ?self.detected_format, "Detected help format");
+        let normalized = Self::normalize_help_output(&self.raw_output);
+        let indexed_lines = Self::to_indexed_lines(&normalized);
+        let line_refs: Vec<&str> = indexed_lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect();
+
+        // Weighted format classification
+        let format_scores = self.classify_formats(&line_refs);
+        self.detected_format = format_scores.first().map(|score| score.format);
+        debug!(format = ?self.detected_format, scores = ?format_scores.iter().map(|s| (s.format, s.score)).collect::<Vec<_>>(), "Detected help format");
 
         let mut schema = CommandSchema::new(&self.command, SchemaSource::HelpCommand);
-
-        // Parse based on detected format - clone to owned strings to avoid borrow issues
-        let lines: Vec<String> = self.raw_output.lines().map(String::from).collect();
-        let line_refs: Vec<&str> = lines.iter().map(|s| s.as_str()).collect();
 
         // Extract version if present
         schema.version = self.extract_version(&line_refs);
@@ -122,61 +182,89 @@ impl HelpParser {
         // Extract description (usually first non-empty line)
         schema.description = self.extract_description(&line_refs);
 
-        // Parse sections - clone the section data to avoid borrow conflicts
-        let sections = self.identify_sections_owned(&lines);
+        // Parse sections
+        let sections = self.identify_sections(&indexed_lines);
+        let mut recognized_indices: HashSet<usize> = HashSet::new();
+        let mut parsers_used: Vec<String> = Vec::new();
 
         // Extract subcommands
-        if let Some(subcmd_lines) = sections.get("subcommands") {
-            let refs: Vec<&str> = subcmd_lines.iter().map(|s| s.as_str()).collect();
-            schema.subcommands = self.parse_subcommands(&refs);
+        if !sections.subcommands.is_empty() {
+            let refs: Vec<&str> = sections
+                .subcommands
+                .iter()
+                .map(|entry| entry.text.as_str())
+                .collect();
+            let subcommands = self.parse_subcommands(&refs);
+            if !subcommands.is_empty() {
+                recognized_indices.extend(sections.subcommands.iter().map(|entry| entry.index));
+                parsers_used.push("section-subcommands".to_string());
+                schema.subcommands = subcommands;
+            }
         }
 
-        // Extract flags/options
-        if let Some(flag_lines) = sections.get("flags") {
-            let refs: Vec<&str> = flag_lines.iter().map(|s| s.as_str()).collect();
-            schema.global_flags.extend(self.parse_flags(&refs));
+        // Extract flags/options from explicit sections.
+        if !sections.flags.is_empty() {
+            let refs: Vec<&str> = sections
+                .flags
+                .iter()
+                .map(|entry| entry.text.as_str())
+                .collect();
+            let flags = self.parse_flags(&refs);
+            if !flags.is_empty() {
+                recognized_indices.extend(sections.flags.iter().map(|entry| entry.index));
+                parsers_used.push("section-flags".to_string());
+                schema.global_flags.extend(flags);
+            }
         }
-        if let Some(option_lines) = sections.get("options") {
-            let refs: Vec<&str> = option_lines.iter().map(|s| s.as_str()).collect();
-            schema.global_flags.extend(self.parse_flags(&refs));
+        if !sections.options.is_empty() {
+            let refs: Vec<&str> = sections
+                .options
+                .iter()
+                .map(|entry| entry.text.as_str())
+                .collect();
+            let flags = self.parse_flags(&refs);
+            if !flags.is_empty() {
+                recognized_indices.extend(sections.options.iter().map(|entry| entry.index));
+                parsers_used.push("section-options".to_string());
+                schema.global_flags.extend(flags);
+            }
         }
+
+        // npm-style command lists (All commands:)
+        if schema.subcommands.is_empty() {
+            let (npm_subcommands, npm_recognized) = self.parse_npm_style_commands(&indexed_lines);
+            if !npm_subcommands.is_empty() {
+                recognized_indices.extend(npm_recognized);
+                parsers_used.push("npm-command-list".to_string());
+                schema.subcommands = npm_subcommands;
+            }
+        }
+
+        // GNU and many custom CLIs list flags without explicit "Flags/Options" sections.
+        if schema.global_flags.is_empty() {
+            let (fallback_flags, fallback_recognized) =
+                self.parse_sectionless_flags(&indexed_lines);
+            if !fallback_flags.is_empty() {
+                recognized_indices.extend(fallback_recognized);
+                parsers_used.push("gnu-sectionless-flags".to_string());
+                schema.global_flags.extend(fallback_flags);
+            }
+        }
+
+        schema.global_flags = Self::dedupe_flags(schema.global_flags);
+        schema.subcommands = Self::dedupe_subcommands(schema.subcommands);
 
         // Calculate confidence based on what we extracted
         schema.confidence = self.calculate_confidence(&schema);
+        self.diagnostics = self.build_diagnostics(
+            &indexed_lines,
+            recognized_indices,
+            format_scores,
+            parsers_used,
+            schema.confidence,
+        );
 
         Some(schema)
-    }
-
-    /// Detects the help output format.
-    fn detect_format(&self) -> HelpFormat {
-        let output = &self.raw_output;
-
-        // Clap (Rust) indicators
-        if output.contains("USAGE:") && output.contains("FLAGS:") {
-            return HelpFormat::Clap;
-        }
-
-        // Cobra (Go) indicators
-        if output.contains("Available Commands:") && output.contains("Use \"") {
-            return HelpFormat::Cobra;
-        }
-
-        // Argparse (Python) indicators
-        if output.contains("positional arguments:") || output.contains("optional arguments:") {
-            return HelpFormat::Argparse;
-        }
-
-        // Docopt indicators
-        if output.contains("Usage:") && output.starts_with("Usage:") {
-            return HelpFormat::Docopt;
-        }
-
-        // GNU style indicators
-        if output.contains("--help") && output.contains("--version") {
-            return HelpFormat::Gnu;
-        }
-
-        HelpFormat::Unknown
     }
 
     /// Extracts version string if present.
@@ -213,74 +301,68 @@ impl HelpParser {
         None
     }
 
-    /// Identifies sections in the help output (returns owned strings).
-    fn identify_sections_owned(
-        &self,
-        lines: &[String],
-    ) -> std::collections::HashMap<&'static str, Vec<String>> {
-        let mut sections = std::collections::HashMap::new();
-        let mut current_section: Option<&'static str> = None;
-        let mut section_lines: Vec<String> = Vec::new();
+    /// Identifies typed sections in the help output.
+    fn identify_sections(&self, lines: &[IndexedLine]) -> SectionBuckets {
+        let mut buckets = SectionBuckets::default();
+        let mut current_section: Option<SectionKind> = None;
 
         for line in lines {
-            let trimmed = line.trim();
-
-            // Check for section headers
-            if PATTERNS.subcommands_section.is_match(trimmed) {
-                if let Some(sec) = current_section {
-                    sections.insert(sec, std::mem::take(&mut section_lines));
-                }
-                current_section = Some("subcommands");
-                continue;
-            }
-            if PATTERNS.flags_section.is_match(trimmed) {
-                if let Some(sec) = current_section {
-                    sections.insert(sec, std::mem::take(&mut section_lines));
-                }
-                current_section = Some("flags");
-                continue;
-            }
-            if PATTERNS.options_section.is_match(trimmed) {
-                if let Some(sec) = current_section {
-                    sections.insert(sec, std::mem::take(&mut section_lines));
-                }
-                current_section = Some("options");
-                continue;
-            }
-            if PATTERNS.arguments_section.is_match(trimmed) {
-                if let Some(sec) = current_section {
-                    sections.insert(sec, std::mem::take(&mut section_lines));
-                }
-                current_section = Some("arguments");
+            let trimmed = line.text.trim();
+            if trimmed.is_empty() {
                 continue;
             }
 
-            // Check for new section (line ending with colon, not a flag)
-            if trimmed.ends_with(':') && !trimmed.starts_with('-') && trimmed.len() < 30 {
-                if let Some(sec) = current_section {
-                    sections.insert(sec, std::mem::take(&mut section_lines));
-                }
-                current_section = None; // Unknown section
+            if let Some(section) = self.detect_section_header(trimmed) {
+                current_section = Some(section);
                 continue;
             }
 
-            // Add line to current section
-            if current_section.is_some() && !trimmed.is_empty() {
-                section_lines.push(trimmed.to_string());
+            // Any unrecognized "X:" header terminates the current section.
+            if trimmed.ends_with(':') && !trimmed.starts_with('-') && trimmed.len() < 40 {
+                current_section = None;
+                continue;
+            }
+
+            match current_section {
+                Some(SectionKind::Subcommands) => buckets.subcommands.push(SectionEntry {
+                    index: line.index,
+                    text: trimmed.to_string(),
+                }),
+                Some(SectionKind::Flags) => buckets.flags.push(SectionEntry {
+                    index: line.index,
+                    text: trimmed.to_string(),
+                }),
+                Some(SectionKind::Options) => buckets.options.push(SectionEntry {
+                    index: line.index,
+                    text: trimmed.to_string(),
+                }),
+                Some(SectionKind::Arguments) | None => {}
             }
         }
 
-        // Don't forget the last section
-        if let Some(sec) = current_section {
-            sections.insert(sec, section_lines);
-        }
+        buckets
+    }
 
-        sections
+    fn detect_section_header(&self, trimmed: &str) -> Option<SectionKind> {
+        if PATTERNS.subcommands_section.is_match(trimmed) {
+            return Some(SectionKind::Subcommands);
+        }
+        if PATTERNS.flags_section.is_match(trimmed) {
+            return Some(SectionKind::Flags);
+        }
+        if PATTERNS.options_section.is_match(trimmed) {
+            return Some(SectionKind::Options);
+        }
+        if PATTERNS.arguments_section.is_match(trimmed) {
+            return Some(SectionKind::Arguments);
+        }
+        None
     }
 
     /// Parses subcommand lines.
-    fn parse_subcommands(&mut self, lines: &[&str]) -> Vec<SubcommandSchema> {
+    fn parse_subcommands(&self, lines: &[&str]) -> Vec<SubcommandSchema> {
         let mut subcommands = Vec::new();
+        let mut seen_names = HashSet::new();
 
         for line in lines {
             // Common formats:
@@ -293,54 +375,68 @@ impl HelpParser {
                 continue;
             }
 
+            // npm-style "All commands" list can be comma-separated with no descriptions.
+            if self.looks_like_command_list_line(trimmed) {
+                for token in trimmed.split(',') {
+                    let name = token.trim();
+                    if self.is_valid_command_name(name) && seen_names.insert(name.to_string()) {
+                        subcommands.push(SubcommandSchema::new(name));
+                    }
+                }
+                continue;
+            }
+
             // Split on multiple spaces or dash separator
-            let parts: Vec<&str> = if trimmed.contains(" - ") {
-                trimmed.splitn(2, " - ").collect()
+            let (name_part, description) = if let Some((head, desc)) = trimmed.split_once(" - ") {
+                (head.trim(), Some(desc.trim()))
+            } else if let Some((head, desc)) = trimmed.split_once("  ") {
+                (head.trim(), Some(desc.trim()))
             } else {
-                trimmed.splitn(2, "  ").collect()
+                (trimmed, None)
             };
 
-            if let Some(name) = parts.first() {
-                let name = name.trim();
-                // Validate it looks like a command name
-                if !name.is_empty()
-                    && name
-                        .chars()
-                        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-                    && name.len() < 30
-                {
-                    let mut sub = SubcommandSchema::new(name);
-                    if parts.len() > 1 {
-                        sub.description = Some(parts[1].trim().to_string());
-                    }
-                    subcommands.push(sub);
+            // Support alias forms such as "build, b".
+            let mut names: Vec<&str> = name_part
+                .split(',')
+                .map(str::trim)
+                .filter(|name| self.is_valid_command_name(name))
+                .collect();
+
+            if names.is_empty() {
+                // Fallback: some tools use single-space separation.
+                if self.is_valid_command_name(name_part) {
+                    names.push(name_part);
+                } else {
+                    continue;
                 }
             }
+
+            let primary = names.remove(0);
+            if !seen_names.insert(primary.to_string()) {
+                continue;
+            }
+
+            let mut sub = SubcommandSchema::new(primary);
+            if let Some(desc) = description.filter(|value| !value.is_empty()) {
+                sub.description = Some(desc.to_string());
+            }
+            sub.aliases = names.into_iter().map(str::to_string).collect();
+            subcommands.push(sub);
         }
 
         subcommands
     }
 
     /// Parses flag/option lines.
-    fn parse_flags(&mut self, lines: &[&str]) -> Vec<FlagSchema> {
-        let mut flags = Vec::new();
-        let mut i = 0;
-
-        while i < lines.len() {
-            let line = lines[i];
-
-            if let Some(flag) = self.parse_flag_line(line) {
-                flags.push(flag);
-            }
-
-            i += 1;
-        }
-
-        flags
+    fn parse_flags(&self, lines: &[&str]) -> Vec<FlagSchema> {
+        lines
+            .iter()
+            .filter_map(|line| self.parse_flag_line(line))
+            .collect()
     }
 
     /// Parses a single flag line.
-    fn parse_flag_line(&mut self, line: &str) -> Option<FlagSchema> {
+    fn parse_flag_line(&self, line: &str) -> Option<FlagSchema> {
         let trimmed = line.trim();
         if !trimmed.starts_with('-') {
             return None;
@@ -403,6 +499,363 @@ impl HelpParser {
             conflicts_with: Vec::new(),
             requires: Vec::new(),
         })
+    }
+
+    fn normalize_help_output(raw: &str) -> String {
+        static ANSI_RE: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"\x1b\[[0-9;?]*[ -/]*[@-~]").unwrap());
+
+        let stripped = ANSI_RE.replace_all(raw, "");
+        let replaced = stripped.replace("\r\n", "\n").replace('\r', "\n");
+
+        let mut normalized: Vec<String> = Vec::new();
+        for line in replaced.lines() {
+            let trimmed_end = line.trim_end();
+            let trimmed_start = trimmed_end.trim_start();
+
+            // Keep paragraph boundaries.
+            if trimmed_end.is_empty() {
+                normalized.push(String::new());
+                continue;
+            }
+
+            // Merge wrapped description lines into previous line.
+            let is_wrapped_continuation = line.starts_with(' ')
+                && !trimmed_start.starts_with('-')
+                && !trimmed_start.ends_with(':')
+                && normalized.last().is_some_and(|prev| {
+                    let prev_trimmed = prev.trim();
+                    let prev_is_flag = prev_trimmed.starts_with('-');
+                    prev_is_flag
+                        && !prev_trimmed.is_empty()
+                        && !prev_trimmed.ends_with(':')
+                        && !Self::looks_like_subcommand_entry(trimmed_start)
+                });
+
+            if is_wrapped_continuation {
+                if let Some(prev) = normalized.last_mut() {
+                    prev.push(' ');
+                    prev.push_str(trimmed_start);
+                }
+                continue;
+            }
+
+            normalized.push(trimmed_end.to_string());
+        }
+
+        normalized.join("\n")
+    }
+
+    fn looks_like_subcommand_entry(trimmed: &str) -> bool {
+        let starts_like_name = trimmed
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_alphanumeric());
+
+        if !starts_like_name {
+            return false;
+        }
+
+        // "build, b    Build package" / "serve  Start server" patterns
+        if trimmed.contains("  ") {
+            return true;
+        }
+
+        // "access, adduser, audit" style command lists.
+        trimmed
+            .split(',')
+            .filter(|part| !part.trim().is_empty())
+            .all(|part| {
+                part.trim()
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+            })
+    }
+
+    fn to_indexed_lines(normalized: &str) -> Vec<IndexedLine> {
+        normalized
+            .lines()
+            .enumerate()
+            .map(|(index, text)| IndexedLine {
+                index,
+                text: text.to_string(),
+            })
+            .collect()
+    }
+
+    fn classify_formats(&self, lines: &[&str]) -> Vec<FormatScore> {
+        let mut scores = vec![
+            FormatScore {
+                format: HelpFormat::Clap,
+                score: 0.0,
+            },
+            FormatScore {
+                format: HelpFormat::Cobra,
+                score: 0.0,
+            },
+            FormatScore {
+                format: HelpFormat::Gnu,
+                score: 0.0,
+            },
+            FormatScore {
+                format: HelpFormat::Argparse,
+                score: 0.0,
+            },
+            FormatScore {
+                format: HelpFormat::Docopt,
+                score: 0.0,
+            },
+            FormatScore {
+                format: HelpFormat::Unknown,
+                score: 0.05,
+            },
+        ];
+
+        let output = lines.join("\n");
+        for score in &mut scores {
+            score.score += match score.format {
+                HelpFormat::Clap => {
+                    let mut s = 0.0;
+                    if output.contains("USAGE:") {
+                        s += 0.35;
+                    }
+                    if output.contains("FLAGS:") {
+                        s += 0.25;
+                    }
+                    if output.contains("OPTIONS:") {
+                        s += 0.2;
+                    }
+                    if output.contains("SUBCOMMANDS:") || output.contains("Commands:") {
+                        s += 0.2;
+                    }
+                    s
+                }
+                HelpFormat::Cobra => {
+                    let mut s = 0.0;
+                    if output.contains("Available Commands:") {
+                        s += 0.5;
+                    }
+                    if output.contains("Use \"") && output.contains("--help") {
+                        s += 0.35;
+                    }
+                    if output.contains("Flags:") {
+                        s += 0.15;
+                    }
+                    s
+                }
+                HelpFormat::Gnu => {
+                    let mut s = 0.0;
+                    if output.contains("Usage:") {
+                        s += 0.25;
+                    }
+                    if output.contains("--help") {
+                        s += 0.2;
+                    }
+                    if output.contains("--version") {
+                        s += 0.2;
+                    }
+                    if lines.iter().any(|line| line.trim_start().starts_with('-')) {
+                        s += 0.2;
+                    }
+                    s
+                }
+                HelpFormat::Argparse => {
+                    let mut s = 0.0;
+                    if output.contains("positional arguments:") {
+                        s += 0.45;
+                    }
+                    if output.contains("optional arguments:") {
+                        s += 0.45;
+                    }
+                    s
+                }
+                HelpFormat::Docopt => {
+                    if output.starts_with("Usage:") {
+                        0.75
+                    } else {
+                        0.0
+                    }
+                }
+                HelpFormat::Unknown | HelpFormat::Bsd => 0.0,
+            };
+        }
+
+        scores.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        scores
+    }
+
+    fn parse_npm_style_commands(
+        &self,
+        lines: &[IndexedLine],
+    ) -> (Vec<SubcommandSchema>, HashSet<usize>) {
+        let mut commands = Vec::new();
+        let mut recognized = HashSet::new();
+        let mut seen = HashSet::new();
+        let mut in_all_commands = false;
+
+        for line in lines {
+            let trimmed = line.text.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            if trimmed.eq_ignore_ascii_case("All commands:") {
+                in_all_commands = true;
+                recognized.insert(line.index);
+                continue;
+            }
+
+            if !in_all_commands {
+                continue;
+            }
+
+            if trimmed.ends_with(':') && !trimmed.contains(',') {
+                break;
+            }
+
+            if !self.looks_like_command_list_line(trimmed) {
+                continue;
+            }
+
+            recognized.insert(line.index);
+            for token in trimmed.split(',') {
+                let name = token.trim();
+                if self.is_valid_command_name(name) && seen.insert(name.to_string()) {
+                    commands.push(SubcommandSchema::new(name));
+                }
+            }
+        }
+
+        (commands, recognized)
+    }
+
+    fn parse_sectionless_flags(&self, lines: &[IndexedLine]) -> (Vec<FlagSchema>, HashSet<usize>) {
+        let mut flags = Vec::new();
+        let mut recognized = HashSet::new();
+
+        for line in lines {
+            let trimmed = line.text.trim();
+            if !trimmed.starts_with('-') {
+                continue;
+            }
+            if let Some(flag) = self.parse_flag_line(trimmed) {
+                flags.push(flag);
+                recognized.insert(line.index);
+            }
+        }
+
+        (flags, recognized)
+    }
+
+    fn looks_like_command_list_line(&self, line: &str) -> bool {
+        line.contains(',')
+            && line
+                .split(',')
+                .filter(|part| !part.trim().is_empty())
+                .all(|part| {
+                    let token = part.trim();
+                    self.is_valid_command_name(token)
+                })
+    }
+
+    fn is_valid_command_name(&self, value: &str) -> bool {
+        !value.is_empty()
+            && value.len() < 50
+            && value
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    }
+
+    fn dedupe_flags(flags: Vec<FlagSchema>) -> Vec<FlagSchema> {
+        let mut seen = HashSet::new();
+        let mut deduped = Vec::new();
+
+        for flag in flags {
+            let key = (
+                flag.short.clone().unwrap_or_default(),
+                flag.long.clone().unwrap_or_default(),
+            );
+            if seen.insert(key) {
+                deduped.push(flag);
+            }
+        }
+
+        deduped
+    }
+
+    fn dedupe_subcommands(subcommands: Vec<SubcommandSchema>) -> Vec<SubcommandSchema> {
+        let mut seen = HashSet::new();
+        let mut deduped = Vec::new();
+
+        for sub in subcommands {
+            if seen.insert(sub.name.clone()) {
+                deduped.push(sub);
+            }
+        }
+
+        deduped
+    }
+
+    fn build_diagnostics(
+        &self,
+        lines: &[IndexedLine],
+        recognized_indices: HashSet<usize>,
+        format_scores: Vec<FormatScore>,
+        parsers_used: Vec<String>,
+        confidence: f64,
+    ) -> ParseDiagnostics {
+        let relevant_lines = lines
+            .iter()
+            .filter(|line| Self::is_relevant_line(line.text.trim()))
+            .count();
+
+        let unresolved_lines = lines
+            .iter()
+            .filter(|line| {
+                let trimmed = line.text.trim();
+                Self::is_relevant_line(trimmed) && !recognized_indices.contains(&line.index)
+            })
+            .map(|line| line.text.clone())
+            .collect::<Vec<_>>();
+
+        let mut parsers_used = parsers_used;
+        if parsers_used.is_empty() {
+            parsers_used.push("none".to_string());
+        }
+        if confidence >= 0.85 {
+            parsers_used.push("confidence:auto-accept".to_string());
+        } else if confidence >= 0.65 {
+            parsers_used.push("confidence:draft".to_string());
+        } else {
+            parsers_used.push("confidence:reject".to_string());
+        }
+
+        ParseDiagnostics {
+            format_scores,
+            parsers_used,
+            relevant_lines,
+            recognized_lines: recognized_indices.len(),
+            unresolved_lines,
+        }
+    }
+
+    fn is_relevant_line(trimmed: &str) -> bool {
+        if trimmed.is_empty() {
+            return false;
+        }
+        if trimmed.eq_ignore_ascii_case("usage:")
+            || trimmed.eq_ignore_ascii_case("options:")
+            || trimmed.eq_ignore_ascii_case("flags:")
+            || trimmed.eq_ignore_ascii_case("commands:")
+            || trimmed.eq_ignore_ascii_case("all commands:")
+        {
+            return false;
+        }
+        true
     }
 
     /// Infers value type from context clues.
@@ -477,6 +930,11 @@ impl HelpParser {
     pub fn detected_format(&self) -> Option<HelpFormat> {
         self.detected_format
     }
+
+    /// Returns diagnostics for the most recent parse call.
+    pub fn diagnostics(&self) -> &ParseDiagnostics {
+        &self.diagnostics
+    }
 }
 
 #[cfg(test)]
@@ -523,6 +981,42 @@ Flags:
   -v, --verbose   verbose output
 
 Use "mytool [command] --help" for more information about a command.
+"#;
+
+    const CARGO_HELP: &str = r#"
+Rust's package manager
+
+Usage: cargo [+toolchain] [OPTIONS] [COMMAND]
+
+Options:
+  -V, --version                  Print version info and exit
+      --list                     List installed commands
+  -h, --help                     Print help
+
+Commands:
+    build, b    Compile the current package
+    run, r      Run a binary or example of the local package
+    test, t     Run the tests
+    ...         See all commands with --list
+"#;
+
+    const NPM_HELP: &str = r#"
+npm <command>
+
+All commands:
+
+    access, adduser, audit, cache, ci, config, install, run, test,
+    uninstall, update, version, view, whoami
+"#;
+
+    const GNU_HELP: &str = r#"
+Usage: cat [OPTION]... [FILE]...
+Concatenate FILE(s) to standard output.
+
+  -A, --show-all           equivalent to -vET
+  -b, --number-nonblank    number nonempty output lines, overrides -n
+      --help        display this help and exit
+      --version     output version information and exit
 "#;
 
     #[test]
@@ -613,5 +1107,60 @@ Flags:
             .unwrap();
         assert!(!color.takes_value);
         assert_eq!(color.value_type, ValueType::Bool);
+    }
+
+    #[test]
+    fn test_parse_subcommand_aliases_from_cargo_help() {
+        let mut parser = HelpParser::new("cargo", CARGO_HELP);
+        let schema = parser.parse().unwrap();
+
+        let build = schema.find_subcommand("build").expect("build must exist");
+        assert!(build.aliases.contains(&"b".to_string()));
+
+        let run = schema.find_subcommand("run").expect("run must exist");
+        assert!(run.aliases.contains(&"r".to_string()));
+
+        let test = schema.find_subcommand("test").expect("test must exist");
+        assert!(test.aliases.contains(&"t".to_string()));
+    }
+
+    #[test]
+    fn test_parse_npm_all_commands_comma_list() {
+        let mut parser = HelpParser::new("npm", NPM_HELP);
+        let schema = parser.parse().unwrap();
+
+        assert!(schema.find_subcommand("install").is_some());
+        assert!(schema.find_subcommand("run").is_some());
+        assert!(schema.find_subcommand("update").is_some());
+    }
+
+    #[test]
+    fn test_parse_gnu_flags_without_explicit_sections() {
+        let mut parser = HelpParser::new("cat", GNU_HELP);
+        let schema = parser.parse().unwrap();
+
+        let show_all = schema
+            .global_flags
+            .iter()
+            .find(|flag| flag.long.as_deref() == Some("--show-all"));
+        assert!(show_all.is_some());
+
+        let help = schema
+            .global_flags
+            .iter()
+            .find(|flag| flag.long.as_deref() == Some("--help"));
+        assert!(help.is_some());
+    }
+
+    #[test]
+    fn test_parse_exposes_diagnostics_with_coverage() {
+        let mut parser = HelpParser::new("cat", GNU_HELP);
+        let schema = parser.parse().unwrap();
+        assert!(!schema.global_flags.is_empty());
+
+        let diagnostics = parser.diagnostics();
+        assert!(diagnostics.relevant_lines > 0);
+        assert!(diagnostics.coverage() > 0.0);
+        assert!(!diagnostics.format_scores.is_empty());
     }
 }
