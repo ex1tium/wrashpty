@@ -87,6 +87,9 @@ pub struct CommandIntelligence {
     /// Current session context.
     current_session: Option<SessionContext>,
 
+    /// In-memory curated schema index loaded from embedded bundle.
+    schema_index: schema_index::SchemaIndex,
+
     /// Whether the intelligence system is enabled.
     enabled: bool,
 }
@@ -99,8 +102,11 @@ impl CommandIntelligence {
         // Create schema if needed
         db_schema::create_schema(&conn)?;
 
+        // Load embedded schema index
+        let schema_index = schema_index::SchemaIndex::from_embedded()?;
+
         // Bootstrap command hierarchy if empty (first run)
-        bootstrap::bootstrap_if_empty(&conn)?;
+        bootstrap::bootstrap_if_empty(&conn, &schema_index)?;
 
         // Load last sync ID
         let last_sync_id = sync::get_last_sync_id(&conn)?;
@@ -112,6 +118,7 @@ impl CommandIntelligence {
             token_cache: HashMap::new(),
             last_sync_id,
             current_session: None,
+            schema_index,
             enabled: true,
         })
     }
@@ -142,7 +149,8 @@ impl CommandIntelligence {
             return Err(CIError::Disabled);
         }
 
-        let (stats, new_last_id) = sync::sync_from_reedline(&self.conn, self.last_sync_id)?;
+        let (stats, new_last_id) =
+            sync::sync_from_reedline(&self.conn, self.last_sync_id, &self.schema_index)?;
         self.last_sync_id = new_last_id;
 
         Ok(stats)
@@ -195,6 +203,7 @@ impl CommandIntelligence {
             command,
             exit_status,
             session_db_id,
+            &self.schema_index,
         )?;
 
         // Track session command if active
@@ -224,7 +233,7 @@ impl CommandIntelligence {
             return Vec::new();
         }
 
-        suggest::suggest(&self.conn, context, limit)
+        suggest::suggest(&self.conn, &self.schema_index, context, limit)
     }
 
     /// Starts a new session.
@@ -382,7 +391,7 @@ impl CommandIntelligence {
         db_schema::reset_database(&self.conn)?;
 
         // Re-bootstrap with default commands
-        bootstrap::bootstrap_if_empty(&self.conn)?;
+        bootstrap::bootstrap_if_empty(&self.conn, &self.schema_index)?;
 
         // Clear in-memory state
         self.token_cache.clear();

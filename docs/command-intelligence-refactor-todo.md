@@ -20,9 +20,11 @@
   - [x] Added root `build.rs` deterministic bundle generation to `$OUT_DIR/embedded_schemas.json`
   - [x] Added `$OUT_DIR/schema_meta.rs` generation with bundle metadata
   - [x] Added `src/intelligence/schema_index.rs` loader + lookup APIs + tests
-- [ ] Phase 6: Suggestion pipeline migration to `SchemaIndex`
-- [ ] Phase 7: Bootstrap simplification to schema-driven hierarchy seeding
-- [ ] Phase 8: Runtime probing removal + legacy migration cutoff
+- [x] Phase 6: Suggestion pipeline migration to `SchemaIndex`
+- [x] Phase 7: Bootstrap simplification to schema-driven hierarchy seeding
+- [x] Phase 8: Runtime probing removal + legacy migration cutoff
+  - [x] 8a: Gate `upsert_schema_from_tokens` with `SchemaIndex` (curated commands skip learned schema writes)
+  - [x] 8b: Add schema-version migration to purge legacy `bootstrap/help` rows from `ci_command_schemas`
 - [ ] Phase 9: Explicit overlay strategy for uncurated commands
 - [ ] Phase 10: Lean schema pack export/import
 - [ ] Phase 11: Cleanup, docs, and quality gates

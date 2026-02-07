@@ -51,6 +51,9 @@ pub enum SuggestionSource {
     /// From learned command hierarchy (primary source).
     LearnedHierarchy,
 
+    /// From curated command schemas.
+    Schema,
+
     /// From learned token sequences.
     LearnedSequence,
 
@@ -85,6 +88,7 @@ impl SuggestionSource {
         match self {
             Self::UserPattern | Self::UserAlias => 2.0,
             Self::SessionTransition => 1.5,
+            Self::Schema => 1.1,
             Self::LearnedHierarchy
             | Self::LearnedSequence
             | Self::LearnedPipe
@@ -97,6 +101,7 @@ impl SuggestionSource {
     pub fn label(&self) -> &'static str {
         match self {
             Self::LearnedHierarchy => "learned",
+            Self::Schema => "schema",
             Self::LearnedSequence => "seq",
             Self::LearnedPipe => "pipe",
             Self::LearnedFlagValue => "flag",
