@@ -508,6 +508,11 @@ fn probe_subcommands_recursive(
         return;
     }
 
+    let sibling_names = subcommands
+        .iter()
+        .map(|subcmd| subcmd.name.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+
     for subcmd in subcommands.iter_mut() {
         let full_command = format!("{} {}", base_command, subcmd.name);
 
@@ -521,6 +526,9 @@ fn probe_subcommands_recursive(
         if should_skip_subcommand(&subcmd.name) {
             continue;
         }
+        if should_skip_known_cycle_prone_probe(base_command, subcmd) {
+            continue;
+        }
 
         debug!(
             command = %full_command,
@@ -532,6 +540,14 @@ fn probe_subcommands_recursive(
         if let Some(help_output) = probe_command_help(&full_command) {
             let mut parser = HelpParser::new(&full_command, &help_output);
             if let Some(sub_schema) = parser.parse() {
+                // Some CLIs (notably apt-family) print parent-level help for
+                // "<command> <subcommand> --help". When that happens, merging
+                // parsed output would incorrectly inject sibling command list
+                // data (and generic positionals) into every subcommand.
+                if is_parent_help_echo_for_subcommand(&subcmd.name, &sub_schema, &sibling_names) {
+                    continue;
+                }
+
                 // Merge extracted info into subcommand
                 subcmd.flags = sub_schema.global_flags;
                 subcmd.positional = sub_schema.positional;
@@ -569,11 +585,65 @@ fn probe_subcommands_recursive(
     }
 }
 
+fn is_parent_help_echo_for_subcommand(
+    subcommand_name: &str,
+    parsed_sub_schema: &command_schema_core::CommandSchema,
+    sibling_names: &HashSet<String>,
+) -> bool {
+    if parsed_sub_schema.subcommands.len() < 2 {
+        return false;
+    }
+
+    let parsed_names = parsed_sub_schema
+        .subcommands
+        .iter()
+        .map(|sub| sub.name.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+
+    // The echoed parent help usually includes the currently probed subcommand
+    // plus many of its siblings.
+    if !parsed_names.contains(&subcommand_name.to_ascii_lowercase()) {
+        return false;
+    }
+
+    let sibling_overlap = parsed_names.intersection(sibling_names).count();
+    sibling_overlap >= 3
+}
+
 /// Determines if a subcommand should be skipped during probing.
 fn should_skip_subcommand(name: &str) -> bool {
     // Skip help-related subcommands (they don't have meaningful help of their own)
     let skip_list = ["help", "version", "completion", "completions"];
     skip_list.contains(&name)
+}
+
+fn should_skip_known_cycle_prone_probe(base_command: &str, subcmd: &SubcommandSchema) -> bool {
+    let base = base_command
+        .split_whitespace()
+        .next()
+        .unwrap_or(base_command)
+        .to_ascii_lowercase();
+    let desc = subcmd
+        .description
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    if base == "stty" {
+        return desc.starts_with("same as ")
+            || desc.starts_with("print ")
+            || desc.starts_with("set ");
+    }
+
+    if base == "tar" {
+        let is_format_label = matches!(
+            subcmd.name.as_str(),
+            "gnu" | "oldgnu" | "pax" | "posix" | "ustar" | "v7"
+        );
+        return is_format_label || desc.starts_with("same as ");
+    }
+
+    false
 }
 
 /// Extracts schemas for multiple commands.
@@ -637,6 +707,7 @@ pub fn command_exists(command: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use command_schema_core::{CommandSchema, SchemaSource, SubcommandSchema};
 
     #[test]
     fn test_is_help_output() {
@@ -660,6 +731,27 @@ mod tests {
     }
 
     #[test]
+    fn test_should_skip_known_cycle_prone_probe_for_stty_settings() {
+        let mut setting = SubcommandSchema::new("speed");
+        setting.description = Some("print the terminal speed".to_string());
+        assert!(should_skip_known_cycle_prone_probe("stty", &setting));
+    }
+
+    #[test]
+    fn test_should_skip_known_cycle_prone_probe_for_tar_format_labels() {
+        let mut format = SubcommandSchema::new("posix");
+        format.description = Some("same as pax".to_string());
+        assert!(should_skip_known_cycle_prone_probe("tar", &format));
+    }
+
+    #[test]
+    fn test_should_not_skip_regular_subcommand_probe() {
+        let mut sub = SubcommandSchema::new("install");
+        sub.description = Some("Install packages".to_string());
+        assert!(!should_skip_known_cycle_prone_probe("apt-get", &sub));
+    }
+
+    #[test]
     fn test_extract_report_contains_probe_attempt_metadata_on_probe_failure() {
         let run = extract_command_schema_with_report("__wrashpty_missing_command__");
         assert!(!run.result.success);
@@ -669,6 +761,45 @@ mod tests {
             assert_eq!(attempt.help_flag, HELP_FLAGS[index]);
             assert!(attempt.error.is_some() || attempt.timed_out || attempt.exit_code.is_some());
         }
+    }
+
+    #[test]
+    fn test_detect_parent_help_echo_for_subcommand() {
+        let mut parsed = CommandSchema::new("apt install", SchemaSource::HelpCommand);
+        parsed.subcommands = vec![
+            SubcommandSchema::new("install"),
+            SubcommandSchema::new("remove"),
+            SubcommandSchema::new("update"),
+            SubcommandSchema::new("upgrade"),
+        ];
+
+        let sibling_names = ["install", "remove", "update", "upgrade"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<std::collections::HashSet<_>>();
+
+        assert!(is_parent_help_echo_for_subcommand(
+            "install",
+            &parsed,
+            &sibling_names
+        ));
+    }
+
+    #[test]
+    fn test_non_echo_subcommand_schema_is_not_treated_as_parent_echo() {
+        let mut parsed = CommandSchema::new("git remote", SchemaSource::HelpCommand);
+        parsed.subcommands = vec![SubcommandSchema::new("add"), SubcommandSchema::new("remove")];
+
+        let sibling_names = ["remote", "commit", "push"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<std::collections::HashSet<_>>();
+
+        assert!(!is_parent_help_echo_for_subcommand(
+            "remote",
+            &parsed,
+            &sibling_names
+        ));
     }
 
     // Integration tests - only run if commands are available
