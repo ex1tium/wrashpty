@@ -208,7 +208,12 @@ pub fn collect_schema_paths(inputs: &[PathBuf]) -> Result<Vec<PathBuf>, String> 
                     )
                 })?;
                 let path = entry.path();
-                if path.extension() == Some(OsStr::new("json")) {
+                let is_json = path.extension() == Some(OsStr::new("json"));
+                let is_report = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name == "extraction-report.json");
+                if is_json && !is_report {
                     paths.insert(path);
                 }
             }
@@ -351,8 +356,10 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
 
         let json_path = root.join("git.json");
+        let report_path = root.join("extraction-report.json");
         let txt_path = root.join("notes.txt");
         fs::write(&json_path, "{}").unwrap();
+        fs::write(&report_path, "{}").unwrap();
         fs::write(&txt_path, "ignore").unwrap();
 
         let paths = collect_schema_paths(&[root]).unwrap();
