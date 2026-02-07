@@ -568,9 +568,17 @@ impl HelpParser {
             || value.contains('<')
             || value.contains('>')
             || value.contains('[');
-        let has_uppercase = value.chars().any(|ch| ch.is_ascii_uppercase());
+        if !has_placeholder_markers {
+            // Without explicit placeholder markers, only accept tails that are
+            // placeholder-like (e.g. "UNIT", "PATH FILE") and reject prose
+            // such as "APT has Super Cow Powers."
+            let has_lowercase = value.chars().any(|ch| ch.is_ascii_lowercase());
+            if has_lowercase {
+                return false;
+            }
+        }
 
-        if !(has_placeholder_markers || has_uppercase) {
+        if !has_placeholder_markers && !value.chars().any(|ch| ch.is_ascii_uppercase()) {
             return false;
         }
 
@@ -599,10 +607,64 @@ impl HelpParser {
             return Vec::new();
         }
 
+        if let Some(flags) = self.parse_compact_short_cluster_flags(trimmed) {
+            return Self::dedupe_flags(flags);
+        }
+
         Self::split_packed_option_entries(trimmed)
             .into_iter()
             .filter_map(|entry| self.parse_flag_line(entry))
             .collect()
+    }
+
+    fn parse_compact_short_cluster_flags(&self, line: &str) -> Option<Vec<FlagSchema>> {
+        let definition_part = Self::split_two_columns(line).map_or(line, |(left, _)| left);
+        if !definition_part.contains(" or -") {
+            return None;
+        }
+
+        let mut segments = definition_part.split(" or ").map(str::trim);
+        let first = segments.next()?;
+        if !Self::is_compact_short_cluster(first) {
+            return None;
+        }
+
+        let mut flags = Vec::new();
+        for ch in first.chars().skip(1) {
+            flags.push(FlagSchema {
+                short: Some(format!("-{ch}")),
+                long: None,
+                value_type: ValueType::Bool,
+                takes_value: false,
+                description: None,
+                multiple: false,
+                conflicts_with: Vec::new(),
+                requires: Vec::new(),
+            });
+        }
+
+        for segment in segments {
+            if !segment.starts_with('-') {
+                continue;
+            }
+
+            if let Some(mut flag) = self.parse_flag_line(segment) {
+                // "or -c command" and similar forms indicate a value-taking flag
+                // even when the value placeholder is lowercase prose.
+                let mut parts = segment.split_whitespace();
+                let _flag_token = parts.next();
+                if let Some(value_hint) = parts.next()
+                    && !value_hint.starts_with('-')
+                    && !flag.takes_value
+                {
+                    flag.takes_value = true;
+                    flag.value_type = self.infer_value_type(segment);
+                }
+                flags.push(flag);
+            }
+        }
+
+        Some(flags)
     }
 
     /// Parses a single flag line.
@@ -1591,6 +1653,13 @@ impl HelpParser {
         true
     }
 
+    fn is_compact_short_cluster(token: &str) -> bool {
+        token.starts_with('-')
+            && token.len() > 2
+            && !token.starts_with("--")
+            && token.chars().skip(1).all(|ch| ch.is_ascii_alphanumeric())
+    }
+
     fn is_usage_line(trimmed: &str) -> bool {
         let lower = trimmed.to_ascii_lowercase();
         lower.starts_with("usage:") || lower.starts_with("or:")
@@ -1863,6 +1932,19 @@ Unit Commands:
   stop UNIT...       Stop (deactivate) one or more units
 "#;
 
+    const APT_STYLE_HELP_WITH_PROSE: &str = r#"
+apt 2.8.3 (amd64)
+
+Usage: apt [options] command
+
+Commands:
+  list      list packages based on package names
+  search    search in package descriptions
+  show      show package details
+
+This APT has Super Cow Powers.
+"#;
+
     const TERRAFORM_STYLE_HELP: &str = r#"
 Usage: terraform [global options] <subcommand> [args]
 
@@ -1970,6 +2052,12 @@ nice - run a program with modified scheduling priority
 
 -20 (most favorable to the process) to 19 (least favorable to the process).
   -    the exit status of COMMAND otherwise
+"#;
+
+    const BASH_SHELL_OPTIONS_HELP: &str = r#"
+Shell options:
+  -ilrsD or -c command or -O shopt_option        (invocation only)
+  -abefhkmnptuvxBCEHPT or -o option
 "#;
 
     #[test]
@@ -2176,6 +2264,17 @@ Flags:
 
         assert!(schema.find_subcommand("start").is_some());
         assert!(schema.find_subcommand("stop").is_some());
+    }
+
+    #[test]
+    fn test_does_not_parse_prose_line_as_subcommand() {
+        let mut parser = HelpParser::new("apt", APT_STYLE_HELP_WITH_PROSE);
+        let schema = parser.parse().unwrap();
+
+        assert!(schema.find_subcommand("list").is_some());
+        assert!(schema.find_subcommand("search").is_some());
+        assert!(schema.find_subcommand("show").is_some());
+        assert!(schema.find_subcommand("This").is_none());
     }
 
     #[test]
@@ -2455,5 +2554,31 @@ Flags:
             "unresolved lines: {:?}",
             diagnostics.unresolved_lines
         );
+    }
+
+    #[test]
+    fn test_parse_compact_short_clusters_into_individual_flags() {
+        let mut parser = HelpParser::new("bash", BASH_SHELL_OPTIONS_HELP);
+        let schema = parser.parse().unwrap();
+
+        let has_short = |name: &str| {
+            schema
+                .global_flags
+                .iter()
+                .any(|flag| flag.short.as_deref() == Some(name))
+        };
+
+        assert!(has_short("-i"));
+        assert!(has_short("-l"));
+        assert!(has_short("-r"));
+        assert!(has_short("-s"));
+        assert!(has_short("-D"));
+        assert!(has_short("-a"));
+        assert!(has_short("-b"));
+        assert!(has_short("-e"));
+        assert!(has_short("-T"));
+
+        assert!(!has_short("-ilrsD"));
+        assert!(!has_short("-abefhkmnptuvxBCEHPT"));
     }
 }
