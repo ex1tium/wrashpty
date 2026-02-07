@@ -84,6 +84,7 @@ struct HelpPatterns {
     flags_section: Regex,
     options_section: Regex,
     arguments_section: Regex,
+    column_break: Regex,
 
     // Value indicators
     choice_values: Regex,
@@ -98,7 +99,7 @@ impl HelpPatterns {
             // -v, -x
             short_flag: Regex::new(r"^\s*(-[a-zA-Z])(?:\s|,|$)").unwrap(),
             // --verbose, --help
-            long_flag: Regex::new(r"^\s*(--[a-zA-Z][-a-zA-Z0-9]*)(?:\s|=|$)").unwrap(),
+            long_flag: Regex::new(r"^\s*(--[a-zA-Z][-a-zA-Z0-9]*)(?:\s|=|\[|$)").unwrap(),
             // -v, --verbose  OR  -v/--verbose
             combined_flag: Regex::new(
                 r"^\s*(-[a-zA-Z])(?:\s*,\s*|\s*/\s*|\s+)(--[a-zA-Z][-a-zA-Z0-9]*)"
@@ -122,6 +123,7 @@ impl HelpPatterns {
             arguments_section: Regex::new(
                 r"(?i)^(arguments|positional arguments|args)\s*:?\s*$"
             ).unwrap(),
+            column_break: Regex::new(r"\t+| {2,}").unwrap(),
 
             // Value indicators
             choice_values: Regex::new(
@@ -240,6 +242,17 @@ impl HelpParser {
             }
         }
 
+        // Generic two-column fallback: "<command>  <description>" blocks.
+        if schema.subcommands.is_empty() {
+            let (generic_subcommands, generic_recognized) =
+                self.parse_two_column_subcommands(&indexed_lines);
+            if !generic_subcommands.is_empty() {
+                recognized_indices.extend(generic_recognized);
+                parsers_used.push("generic-two-column-subcommands".to_string());
+                schema.subcommands = generic_subcommands;
+            }
+        }
+
         // GNU and many custom CLIs list flags without explicit "Flags/Options" sections.
         if schema.global_flags.is_empty() {
             let (fallback_flags, fallback_recognized) =
@@ -248,6 +261,17 @@ impl HelpParser {
                 recognized_indices.extend(fallback_recognized);
                 parsers_used.push("gnu-sectionless-flags".to_string());
                 schema.global_flags.extend(fallback_flags);
+            }
+        }
+
+        // Compact usage fallback, e.g. tmux:
+        // usage: tmux [-2CDlNuVv] [-c shell-command] ...
+        if schema.global_flags.is_empty() {
+            let (usage_flags, usage_recognized) = self.parse_usage_compact_flags(&indexed_lines);
+            if !usage_flags.is_empty() {
+                recognized_indices.extend(usage_recognized);
+                parsers_used.push("usage-compact-flags".to_string());
+                schema.global_flags.extend(usage_flags);
             }
         }
 
@@ -285,16 +309,27 @@ impl HelpParser {
     fn extract_description(&self, lines: &[&str]) -> Option<String> {
         for line in lines.iter().take(10) {
             let trimmed = line.trim();
+            let lower = trimmed.to_lowercase();
             // Skip empty lines, usage lines, and section headers
             if trimmed.is_empty()
-                || trimmed.to_lowercase().starts_with("usage")
+                || lower.starts_with("usage")
+                || lower.starts_with("or:")
+                || lower.starts_with("examples:")
+                || lower.starts_with("example:")
                 || trimmed.ends_with(':')
                 || trimmed.starts_with('-')
+                || trimmed.starts_with('[')
+                || trimmed.starts_with('<')
             {
                 continue;
             }
             // Found a description line
-            if trimmed.len() > 10 && !trimmed.contains("--") {
+            if trimmed.len() > 10
+                && !trimmed.contains("--")
+                && !trimmed.contains('[')
+                && !trimmed.contains(']')
+                && !trimmed.contains("...")
+            {
                 return Some(trimmed.to_string());
             }
         }
@@ -386,14 +421,15 @@ impl HelpParser {
                 continue;
             }
 
-            // Split on multiple spaces or dash separator
-            let (name_part, description) = if let Some((head, desc)) = trimmed.split_once(" - ") {
-                (head.trim(), Some(desc.trim()))
-            } else if let Some((head, desc)) = trimmed.split_once("  ") {
-                (head.trim(), Some(desc.trim()))
-            } else {
-                (trimmed, None)
-            };
+            // Split on two-column boundaries or dash separator.
+            let (name_part, description) =
+                if let Some((head, desc)) = Self::split_dash_separator(trimmed) {
+                    (head, Some(desc))
+                } else if let Some((head, desc)) = Self::split_two_columns(trimmed) {
+                    (head, Some(desc))
+                } else {
+                    (trimmed, None)
+                };
 
             // Support alias forms such as "build, b".
             let mut names: Vec<&str> = name_part
@@ -466,9 +502,12 @@ impl HelpParser {
             value_type = self.infer_value_type(trimmed);
         }
 
-        let definition_part = trimmed
-            .split_once("  ")
-            .map_or(trimmed, |(def, _)| def.trim());
+        let (definition_part, parsed_description) =
+            if let Some((def, desc)) = Self::split_two_columns(trimmed) {
+                (def, Some(desc))
+            } else {
+                (trimmed, None)
+            };
 
         // Also check for = or < > indicators in the flag definition itself.
         if (definition_part.contains('=')
@@ -480,10 +519,8 @@ impl HelpParser {
             value_type = ValueType::String;
         }
 
-        // Extract description (everything after the flag definition)
-        // Usually separated by multiple spaces
-        if let Some(desc_start) = trimmed.find("  ") {
-            let desc = trimmed[desc_start..].trim();
+        // Extract description from the second column if present.
+        if let Some(desc) = parsed_description {
             if !desc.is_empty() && !desc.starts_with('-') {
                 description = Some(desc.to_string());
             }
@@ -546,6 +583,26 @@ impl HelpParser {
         normalized.join("\n")
     }
 
+    fn split_two_columns(line: &str) -> Option<(&str, &str)> {
+        let capture = PATTERNS.column_break.find(line)?;
+        let left = line[..capture.start()].trim();
+        let right = line[capture.end()..].trim();
+        if left.is_empty() || right.is_empty() {
+            return None;
+        }
+        Some((left, right))
+    }
+
+    fn split_dash_separator(line: &str) -> Option<(&str, &str)> {
+        let (head, tail) = line.split_once(" - ")?;
+        let left = head.trim();
+        let right = tail.trim();
+        if left.is_empty() || right.is_empty() {
+            return None;
+        }
+        Some((left, right))
+    }
+
     fn looks_like_subcommand_entry(trimmed: &str) -> bool {
         let starts_like_name = trimmed
             .chars()
@@ -581,6 +638,101 @@ impl HelpParser {
                 text: text.to_string(),
             })
             .collect()
+    }
+
+    fn parse_two_column_subcommands(
+        &self,
+        lines: &[IndexedLine],
+    ) -> (Vec<SubcommandSchema>, HashSet<usize>) {
+        let mut recognized = HashSet::new();
+        let mut subcommands = Vec::new();
+        let mut current_block: Vec<SectionEntry> = Vec::new();
+
+        let flush_block = |parser: &HelpParser,
+                           block: &mut Vec<SectionEntry>,
+                           recognized_set: &mut HashSet<usize>,
+                           out_subcommands: &mut Vec<SubcommandSchema>| {
+            if block.len() >= 2 {
+                let refs = block
+                    .iter()
+                    .map(|entry| entry.text.as_str())
+                    .collect::<Vec<_>>();
+                let parsed = parser.parse_subcommands(&refs);
+                if !parsed.is_empty() {
+                    recognized_set.extend(block.iter().map(|entry| entry.index));
+                    out_subcommands.extend(parsed);
+                }
+            }
+            block.clear();
+        };
+
+        for line in lines {
+            let trimmed = line.text.trim();
+            if trimmed.is_empty() {
+                flush_block(self, &mut current_block, &mut recognized, &mut subcommands);
+                continue;
+            }
+
+            if self.detect_section_header(trimmed).is_some()
+                || Self::is_block_header(trimmed)
+                || trimmed.starts_with('-')
+            {
+                flush_block(self, &mut current_block, &mut recognized, &mut subcommands);
+                continue;
+            }
+
+            let is_command_row = Self::split_two_columns(trimmed)
+                .is_some_and(|(left, _)| self.is_subcommand_name_column(left));
+
+            if is_command_row {
+                current_block.push(SectionEntry {
+                    index: line.index,
+                    text: trimmed.to_string(),
+                });
+            } else {
+                flush_block(self, &mut current_block, &mut recognized, &mut subcommands);
+            }
+        }
+
+        flush_block(self, &mut current_block, &mut recognized, &mut subcommands);
+        (Self::dedupe_subcommands(subcommands), recognized)
+    }
+
+    fn is_block_header(trimmed: &str) -> bool {
+        trimmed.ends_with(':') && trimmed.len() < 64
+    }
+
+    fn is_subcommand_name_column(&self, left: &str) -> bool {
+        let lower = left.to_lowercase();
+        let excluded = [
+            "usage",
+            "options",
+            "flags",
+            "commands",
+            "all commands",
+            "arguments",
+            "examples",
+            "example",
+        ];
+        if excluded.contains(&lower.as_str()) {
+            return false;
+        }
+        if left.starts_with('-') {
+            return false;
+        }
+
+        let names = left
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .collect::<Vec<_>>();
+        if names.is_empty() {
+            return false;
+        }
+
+        names
+            .iter()
+            .all(|name| self.is_valid_command_name(name) || name.chars().all(|ch| ch == '.'))
     }
 
     fn classify_formats(&self, lines: &[&str]) -> Vec<FormatScore> {
@@ -751,6 +903,137 @@ impl HelpParser {
         (flags, recognized)
     }
 
+    fn parse_usage_compact_flags(
+        &self,
+        lines: &[IndexedLine],
+    ) -> (Vec<FlagSchema>, HashSet<usize>) {
+        static BRACKET_GROUP_RE: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"\[([^\]]+)\]").unwrap());
+
+        let mut usage_text = String::new();
+        let mut recognized = HashSet::new();
+        let mut in_usage = false;
+
+        for line in lines {
+            let raw = line.text.as_str();
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                if in_usage {
+                    break;
+                }
+                continue;
+            }
+
+            if trimmed.to_lowercase().starts_with("usage:") {
+                in_usage = true;
+                recognized.insert(line.index);
+                usage_text.push_str(trimmed);
+                usage_text.push(' ');
+                continue;
+            }
+
+            if !in_usage {
+                continue;
+            }
+
+            // Continuation lines in usage blocks are typically indented.
+            if raw.starts_with(' ') || raw.starts_with('\t') {
+                recognized.insert(line.index);
+                usage_text.push_str(trimmed);
+                usage_text.push(' ');
+                continue;
+            }
+
+            break;
+        }
+
+        if usage_text.is_empty() {
+            return (Vec::new(), HashSet::new());
+        }
+
+        let mut flags = Vec::new();
+        for capture in BRACKET_GROUP_RE.captures_iter(&usage_text) {
+            let Some(group) = capture.get(1).map(|value| value.as_str().trim()) else {
+                continue;
+            };
+
+            if group.is_empty() || !group.starts_with('-') {
+                continue;
+            }
+
+            let tokens = group.split_whitespace().collect::<Vec<_>>();
+            if tokens.is_empty() {
+                continue;
+            }
+
+            let first = tokens[0];
+            if first.starts_with("--") {
+                let takes_value = tokens.get(1).is_some_and(|next| !next.starts_with('-'));
+                flags.push(FlagSchema {
+                    short: None,
+                    long: Some(Self::trim_value_suffix(first).to_string()),
+                    value_type: if takes_value {
+                        self.infer_value_type(group)
+                    } else {
+                        ValueType::Bool
+                    },
+                    takes_value,
+                    description: None,
+                    multiple: false,
+                    conflicts_with: Vec::new(),
+                    requires: Vec::new(),
+                });
+                continue;
+            }
+
+            if first.starts_with('-') && first.len() == 2 {
+                let takes_value = tokens.get(1).is_some_and(|next| !next.starts_with('-'));
+                flags.push(FlagSchema {
+                    short: Some(first.to_string()),
+                    long: None,
+                    value_type: if takes_value {
+                        self.infer_value_type(group)
+                    } else {
+                        ValueType::Bool
+                    },
+                    takes_value,
+                    description: None,
+                    multiple: false,
+                    conflicts_with: Vec::new(),
+                    requires: Vec::new(),
+                });
+                continue;
+            }
+
+            // Compact short cluster, e.g. -2CDlNuVv
+            if first.starts_with('-')
+                && first.len() > 2
+                && first.chars().skip(1).all(|ch| ch.is_ascii_alphanumeric())
+                && !first.contains('=')
+            {
+                for ch in first.chars().skip(1) {
+                    flags.push(FlagSchema {
+                        short: Some(format!("-{ch}")),
+                        long: None,
+                        value_type: ValueType::Bool,
+                        takes_value: false,
+                        description: None,
+                        multiple: false,
+                        conflicts_with: Vec::new(),
+                        requires: Vec::new(),
+                    });
+                }
+            }
+        }
+
+        (Self::dedupe_flags(flags), recognized)
+    }
+
+    fn trim_value_suffix(flag: &str) -> &str {
+        flag.find(&['[', '<', '='][..])
+            .map_or(flag, |index| &flag[..index])
+    }
+
     fn looks_like_command_list_line(&self, line: &str) -> bool {
         line.contains(',')
             && line
@@ -771,20 +1054,68 @@ impl HelpParser {
     }
 
     fn dedupe_flags(flags: Vec<FlagSchema>) -> Vec<FlagSchema> {
-        let mut seen = HashSet::new();
-        let mut deduped = Vec::new();
+        let mut deduped: Vec<FlagSchema> = Vec::new();
 
         for flag in flags {
-            let key = (
-                flag.short.clone().unwrap_or_default(),
-                flag.long.clone().unwrap_or_default(),
-            );
-            if seen.insert(key) {
+            if let Some(existing) = deduped
+                .iter_mut()
+                .find(|existing| Self::flags_overlap(existing, &flag))
+            {
+                Self::merge_flags(existing, flag);
+            } else {
                 deduped.push(flag);
             }
         }
 
         deduped
+    }
+
+    fn flags_overlap(left: &FlagSchema, right: &FlagSchema) -> bool {
+        match (&left.long, &right.long) {
+            (Some(left_long), Some(right_long)) if left_long == right_long => true,
+            _ => match (&left.short, &right.short) {
+                (Some(left_short), Some(right_short)) => left_short == right_short,
+                _ => false,
+            },
+        }
+    }
+
+    fn merge_flags(target: &mut FlagSchema, incoming: FlagSchema) {
+        if target.short.is_none() {
+            target.short = incoming.short.clone();
+        }
+        if target.long.is_none() {
+            target.long = incoming.long.clone();
+        }
+
+        if incoming.takes_value {
+            target.takes_value = true;
+            if target.value_type == ValueType::Bool || target.value_type == ValueType::String {
+                target.value_type = incoming.value_type;
+            }
+        }
+
+        if let Some(incoming_desc) = incoming.description {
+            let replace = target
+                .description
+                .as_ref()
+                .is_none_or(|existing| incoming_desc.len() > existing.len());
+            if replace {
+                target.description = Some(incoming_desc);
+            }
+        }
+
+        target.multiple = target.multiple || incoming.multiple;
+        Self::merge_string_list(&mut target.conflicts_with, incoming.conflicts_with);
+        Self::merge_string_list(&mut target.requires, incoming.requires);
+    }
+
+    fn merge_string_list(target: &mut Vec<String>, incoming: Vec<String>) {
+        for item in incoming {
+            if !target.contains(&item) {
+                target.push(item);
+            }
+        }
     }
 
     fn dedupe_subcommands(subcommands: Vec<SubcommandSchema>) -> Vec<SubcommandSchema> {
@@ -1019,6 +1350,22 @@ Concatenate FILE(s) to standard output.
       --version     output version information and exit
 "#;
 
+    const TMUX_HELP: &str = r#"
+usage: tmux [-2CDlNuVv] [-c shell-command] [-f file] [-L socket-name]
+            [-S socket-path] [-T features] [command [flags]]
+"#;
+
+    const GENERIC_TWO_COLUMN_HELP: &str = r#"
+Tool for service management
+
+Actions
+  start            Start the service
+  stop             Stop the service
+  restart          Restart the service
+
+Misc text
+"#;
+
     #[test]
     fn test_detect_clap_format() {
         let mut parser = HelpParser::new("myapp", CLAP_HELP);
@@ -1162,5 +1509,46 @@ Flags:
         assert!(diagnostics.relevant_lines > 0);
         assert!(diagnostics.coverage() > 0.0);
         assert!(!diagnostics.format_scores.is_empty());
+    }
+
+    #[test]
+    fn test_parse_tmux_usage_compact_flags() {
+        let mut parser = HelpParser::new("tmux", TMUX_HELP);
+        let schema = parser.parse().unwrap();
+
+        let has_short = |name: &str| {
+            schema
+                .global_flags
+                .iter()
+                .any(|flag| flag.short.as_deref() == Some(name))
+        };
+        let parsed_shorts = schema
+            .global_flags
+            .iter()
+            .filter_map(|flag| flag.short.clone())
+            .collect::<Vec<_>>();
+
+        assert!(has_short("-2"), "{parsed_shorts:?}");
+        assert!(has_short("-C"), "{parsed_shorts:?}");
+        assert!(has_short("-v"), "{parsed_shorts:?}");
+        assert!(has_short("-c"), "{parsed_shorts:?}");
+        assert!(has_short("-f"), "{parsed_shorts:?}");
+
+        let c_flag = schema
+            .global_flags
+            .iter()
+            .find(|flag| flag.short.as_deref() == Some("-c"))
+            .expect("-c flag should exist");
+        assert!(c_flag.takes_value);
+    }
+
+    #[test]
+    fn test_parse_generic_two_column_subcommands_without_section_header() {
+        let mut parser = HelpParser::new("svcctl", GENERIC_TWO_COLUMN_HELP);
+        let schema = parser.parse().unwrap();
+
+        assert!(schema.find_subcommand("start").is_some());
+        assert!(schema.find_subcommand("stop").is_some());
+        assert!(schema.find_subcommand("restart").is_some());
     }
 }

@@ -5,10 +5,9 @@
 
 use std::collections::HashSet;
 use std::io::Read;
-use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 use tracing::{debug, info};
-use wait_timeout::ChildExt;
 
 use super::parser::{FormatScore, HelpParser};
 use super::report::{ExtractionReport, FormatScoreReport, ProbeAttemptReport};
@@ -102,12 +101,12 @@ fn probe_command_help_with_metadata(command: &str) -> ProbeRun {
 
         match spawn_result {
             Ok(mut child) => {
-                // Take ownership of pipes before wait_timeout() reaps the child
+                // Take ownership of pipes before waiting so we can read both streams.
                 let mut stdout_pipe = child.stdout.take();
                 let mut stderr_pipe = child.stderr.take();
 
                 let timeout = Duration::from_millis(HELP_TIMEOUT_MS);
-                match child.wait_timeout(timeout) {
+                match wait_for_child_with_timeout(&mut child, timeout) {
                     Ok(Some(status)) => {
                         attempt.exit_code = status.code();
                         // Process completed within timeout, read from pipes directly
@@ -172,7 +171,7 @@ fn probe_command_help_with_metadata(command: &str) -> ProbeRun {
                         attempts.push(attempt);
                     }
                     Err(e) => {
-                        attempt.error = Some(format!("wait_timeout failed: {e}"));
+                        attempt.error = Some(format!("wait failed: {e}"));
                         debug!(command = ?cmd_parts, error = %e, "Failed to wait on help command");
                         let _ = child.kill();
                         let _ = child.wait();
@@ -191,6 +190,22 @@ fn probe_command_help_with_metadata(command: &str) -> ProbeRun {
     ProbeRun {
         help_output: None,
         attempts,
+    }
+}
+
+fn wait_for_child_with_timeout(
+    child: &mut Child,
+    timeout: Duration,
+) -> std::io::Result<Option<ExitStatus>> {
+    let start = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        if start.elapsed() >= timeout {
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
