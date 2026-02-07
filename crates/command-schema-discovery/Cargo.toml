@@ -1,0 +1,12 @@
+[package]
+name = "command-schema-discovery"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.86"
+
+[dependencies]
+command-schema-core = { path = "../command-schema-core" }
+regex = { workspace = true }
+wait-timeout = { workspace = true }
+tracing = { workspace = true }
+clap = { workspace = true, features = ["derive"] }

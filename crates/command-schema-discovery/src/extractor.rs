@@ -11,7 +11,7 @@ use tracing::{debug, info};
 use wait_timeout::ChildExt;
 
 use super::parser::HelpParser;
-use super::types::{ExtractionResult, SubcommandSchema};
+use command_schema_core::{ExtractionResult, SubcommandSchema};
 
 /// Maximum depth for recursive subcommand probing.
 const MAX_PROBE_DEPTH: usize = 3;
