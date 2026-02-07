@@ -9,7 +9,9 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 use command_schema_core::{CommandSchema, SchemaPackage, validate_package, validate_schema};
 
-use crate::extractor::{command_exists, extract_command_schema_with_report};
+use crate::extractor::{
+    ExtractionQualityPolicy, command_exists, extract_command_schema_with_report_and_policy,
+};
 use crate::report::{ExtractionReport, ExtractionReportBundle};
 
 /// Default allowlist for schema extraction.
@@ -77,6 +79,8 @@ pub struct DiscoverConfig {
     pub scan_path: bool,
     /// Commands to suppress from all discovery sources.
     pub excluded_commands: Vec<String>,
+    /// Quality policy used to decide whether extracted schemas are accepted.
+    pub quality_policy: ExtractionQualityPolicy,
 }
 
 /// Aggregated output from a discovery + extraction run.
@@ -142,11 +146,11 @@ pub fn discover_and_extract(config: &DiscoverConfig, version: &str) -> DiscoverO
     let mut reports = Vec::new();
 
     for command in commands {
-        let run = extract_command_schema_with_report(&command);
+        let run = extract_command_schema_with_report_and_policy(&command, config.quality_policy);
         let result = run.result;
         let command_label = command.clone();
 
-        if result.success {
+        if run.report.accepted_for_suggestions {
             if let Some(schema) = result.schema {
                 package.schemas.push(schema);
             } else {
@@ -345,6 +349,7 @@ mod tests {
             use_allowlist: false,
             scan_path: false,
             excluded_commands: vec!["cargo".to_string()],
+            quality_policy: ExtractionQualityPolicy::default(),
         };
 
         assert_eq!(discover_tools(&config), vec!["git".to_string()]);
