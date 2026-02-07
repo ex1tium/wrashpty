@@ -1,0 +1,13 @@
+Usage: tar [OPTION...] [FILE]...
+GNU 'tar' saves many files together into a single tape or disk archive.
+
+Main operations:
+  -c, --create               create a new archive
+  -x, --extract              extract files from an archive
+  -t, --list                 list the contents of an archive
+
+Operation modifiers:
+  -f, --file=ARCHIVE         use archive file or device ARCHIVE
+  -v, --verbose              verbosely list files processed
+      --warning=KEYWORD      warning control
+      --help                 display this help and exit

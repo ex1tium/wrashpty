@@ -7,11 +7,21 @@
 //! - GNU standard
 //! - And more
 
+mod ast;
+mod classify;
+mod confidence;
+mod constraints;
+mod diagnostics;
+mod merge;
+mod normalize;
+mod strategies;
+
 use regex::Regex;
 use std::collections::HashSet;
 use std::sync::LazyLock;
 use tracing::debug;
 
+use crate::parser::strategies::ParserStrategy;
 use command_schema_core::{
     ArgSchema, CommandSchema, FlagSchema, HelpFormat, SchemaSource, SubcommandSchema, ValueType,
 };
@@ -43,15 +53,15 @@ impl ParseDiagnostics {
 }
 
 #[derive(Debug, Clone)]
-struct IndexedLine {
-    index: usize,
-    text: String,
+pub(super) struct IndexedLine {
+    pub(super) index: usize,
+    pub(super) text: String,
 }
 
 #[derive(Debug, Clone)]
-struct SectionEntry {
-    index: usize,
-    text: String,
+pub(super) struct SectionEntry {
+    pub(super) index: usize,
+    pub(super) text: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,12 +73,12 @@ enum SectionKind {
 }
 
 #[derive(Default)]
-struct SectionBuckets {
-    header_indices: Vec<usize>,
-    subcommands: Vec<SectionEntry>,
-    flags: Vec<SectionEntry>,
-    options: Vec<SectionEntry>,
-    arguments: Vec<SectionEntry>,
+pub(super) struct SectionBuckets {
+    pub(super) header_indices: Vec<usize>,
+    pub(super) subcommands: Vec<SectionEntry>,
+    pub(super) flags: Vec<SectionEntry>,
+    pub(super) options: Vec<SectionEntry>,
+    pub(super) arguments: Vec<SectionEntry>,
 }
 
 /// Regex patterns for parsing help output.
@@ -181,19 +191,22 @@ impl HelpParser {
             return None;
         }
 
-        let normalized = Self::normalize_help_output(&self.raw_output);
-        let indexed_lines = Self::to_indexed_lines(&normalized);
+        let normalized = normalize::normalize_help_output(&self.raw_output);
+        let indexed_lines = normalize::to_indexed_lines(&normalized);
         let line_refs: Vec<&str> = indexed_lines
             .iter()
             .map(|line| line.text.as_str())
             .collect();
 
         // Weighted format classification
-        let format_scores = self.classify_formats(&line_refs);
+        let format_scores = classify::classify_formats(&line_refs);
         self.detected_format = format_scores.first().map(|score| score.format);
         debug!(format = ?self.detected_format, scores = ?format_scores.iter().map(|s| (s.format, s.score)).collect::<Vec<_>>(), "Detected help format");
 
         let mut schema = CommandSchema::new(&self.command, SchemaSource::HelpCommand);
+        let mut flag_candidates = Vec::new();
+        let mut subcommand_candidates = Vec::new();
+        let mut arg_candidates = Vec::new();
 
         // Extract version if present
         schema.version = self.extract_version(&line_refs);
@@ -207,6 +220,23 @@ impl HelpParser {
         let mut parsers_used: Vec<String> = Vec::new();
         recognized_indices.extend(sections.header_indices.iter().copied());
         let keybinding_document = Self::looks_like_keybinding_document(&indexed_lines);
+        let section_strategy = strategies::section::SectionStrategy;
+        let npm_strategy = strategies::npm::NpmStrategy;
+        let gnu_strategy = strategies::gnu::GnuStrategy;
+        let usage_strategy = strategies::usage::UsageStrategy;
+        let strategy_objects: [&dyn strategies::ParserStrategy; 4] = [
+            &section_strategy,
+            &npm_strategy,
+            &gnu_strategy,
+            &usage_strategy,
+        ];
+        let strategy_plan = strategies::ranked_strategy_names(&format_scores);
+        parsers_used.push(format!("strategy-plan:{}", strategy_plan.join("+")));
+        parsers_used.extend(
+            strategy_objects
+                .iter()
+                .map(|strategy| format!("strategy-registered:{}", strategy.name())),
+        );
 
         // Capture usage rows as recognized structural context, even when we do
         // not derive additional schema entities from them.
@@ -227,7 +257,19 @@ impl HelpParser {
             if !subcommands.is_empty() {
                 recognized_indices.extend(sections.subcommands.iter().map(|entry| entry.index));
                 parsers_used.push("section-subcommands".to_string());
-                schema.subcommands = subcommands;
+                for (idx, subcommand) in subcommands.into_iter().enumerate() {
+                    let source_span = sections
+                        .subcommands
+                        .get(idx)
+                        .map(|entry| ast::SourceSpan::single(entry.index))
+                        .unwrap_or_else(ast::SourceSpan::unknown);
+                    subcommand_candidates.push(ast::SubcommandCandidate::from_schema(
+                        subcommand,
+                        source_span,
+                        "section-subcommands",
+                        0.9,
+                    ));
+                }
             }
         }
 
@@ -242,7 +284,19 @@ impl HelpParser {
             if !flags.is_empty() {
                 recognized_indices.extend(sections.flags.iter().map(|entry| entry.index));
                 parsers_used.push("section-flags".to_string());
-                schema.global_flags.extend(flags);
+                for (idx, flag) in flags.into_iter().enumerate() {
+                    let source_span = sections
+                        .flags
+                        .get(idx)
+                        .map(|entry| ast::SourceSpan::single(entry.index))
+                        .unwrap_or_else(ast::SourceSpan::unknown);
+                    flag_candidates.push(ast::FlagCandidate::from_schema(
+                        flag,
+                        source_span,
+                        "section-flags",
+                        0.9,
+                    ));
+                }
             }
         }
         if !sections.options.is_empty() {
@@ -255,7 +309,19 @@ impl HelpParser {
             if !flags.is_empty() {
                 recognized_indices.extend(sections.options.iter().map(|entry| entry.index));
                 parsers_used.push("section-options".to_string());
-                schema.global_flags.extend(flags);
+                for (idx, flag) in flags.into_iter().enumerate() {
+                    let source_span = sections
+                        .options
+                        .get(idx)
+                        .map(|entry| ast::SourceSpan::single(entry.index))
+                        .unwrap_or_else(ast::SourceSpan::unknown);
+                    flag_candidates.push(ast::FlagCandidate::from_schema(
+                        flag,
+                        source_span,
+                        "section-options",
+                        0.88,
+                    ));
+                }
             }
         }
         if !sections.arguments.is_empty() {
@@ -268,34 +334,54 @@ impl HelpParser {
             if !args.is_empty() {
                 recognized_indices.extend(sections.arguments.iter().map(|entry| entry.index));
                 parsers_used.push("section-arguments".to_string());
-                schema.positional.extend(args);
+                for (idx, arg) in args.into_iter().enumerate() {
+                    let source_span = sections
+                        .arguments
+                        .get(idx)
+                        .map(|entry| ast::SourceSpan::single(entry.index))
+                        .unwrap_or_else(ast::SourceSpan::unknown);
+                    arg_candidates.push(ast::ArgCandidate::from_schema(
+                        arg,
+                        source_span,
+                        "section-arguments",
+                        0.82,
+                    ));
+                }
             }
         }
 
         // Stage 2: format-aware and well-known structural fallbacks.
 
         // npm-style command lists (All commands:)
-        if schema.subcommands.is_empty() {
-            let (npm_subcommands, npm_recognized) = self.parse_npm_style_commands(&indexed_lines);
+        if subcommand_candidates.is_empty() {
+            let npm_subcommands = npm_strategy.parse_subcommands(self, &indexed_lines);
             if !npm_subcommands.is_empty() {
+                let (_, npm_recognized) = self.parse_npm_style_commands(&indexed_lines);
                 recognized_indices.extend(npm_recognized);
                 parsers_used.push("npm-command-list".to_string());
-                schema.subcommands = npm_subcommands;
+                subcommand_candidates.extend(npm_subcommands);
             }
         }
 
         // Generic two-column command rows when explicit command sections were not
         // identified (or were empty). This is still structural and should happen
         // before more permissive fallbacks.
-        if schema.subcommands.is_empty() && !keybinding_document {
+        if subcommand_candidates.is_empty() && !keybinding_document {
             let (generic_subcommands, generic_recognized) =
                 self.parse_two_column_subcommands(&indexed_lines);
             if !generic_subcommands.is_empty() {
                 recognized_indices.extend(generic_recognized);
                 parsers_used.push("generic-two-column-subcommands".to_string());
-                schema.subcommands = generic_subcommands;
+                for subcommand in generic_subcommands {
+                    subcommand_candidates.push(ast::SubcommandCandidate::from_schema(
+                        subcommand,
+                        ast::SourceSpan::unknown(),
+                        "generic-two-column-subcommands",
+                        0.8,
+                    ));
+                }
             }
-        } else if schema.subcommands.is_empty() && keybinding_document {
+        } else if subcommand_candidates.is_empty() && keybinding_document {
             parsers_used.push("generic-two-column-skipped:keybinding-doc".to_string());
         }
 
@@ -307,44 +393,90 @@ impl HelpParser {
         if !named_settings.is_empty() {
             recognized_indices.extend(named_settings_recognized);
             parsers_used.push("named-setting-rows".to_string());
-            schema.subcommands.extend(named_settings);
+            for subcommand in named_settings {
+                subcommand_candidates.push(ast::SubcommandCandidate::from_schema(
+                    subcommand,
+                    ast::SourceSpan::unknown(),
+                    "named-setting-rows",
+                    0.72,
+                ));
+            }
         }
 
         // Stage 3: flag extraction fallbacks.
 
         // GNU and many custom CLIs list additional flags outside explicit
         // "Flags/Options" sections, so always run this as a top-up pass.
-        let (fallback_flags, fallback_recognized) = self.parse_sectionless_flags(&indexed_lines);
+        let fallback_flags = gnu_strategy.parse_flags(self, &indexed_lines);
+        let (_, fallback_recognized) = self.parse_sectionless_flags(&indexed_lines);
         if !fallback_flags.is_empty() {
             recognized_indices.extend(fallback_recognized);
             parsers_used.push("gnu-sectionless-flags".to_string());
-            schema.global_flags.extend(fallback_flags);
+            flag_candidates.extend(fallback_flags);
         }
 
         // Compact usage fallback, e.g. tmux:
         // usage: tmux [-2CDlNuVv] [-c shell-command] ...
-        if schema.global_flags.is_empty() {
-            let (usage_flags, usage_recognized) = self.parse_usage_compact_flags(&indexed_lines);
+        if flag_candidates.is_empty() {
+            let usage_flags = usage_strategy.parse_flags(self, &indexed_lines);
+            let (_, usage_recognized) = self.parse_usage_compact_flags(&indexed_lines);
             if !usage_flags.is_empty() {
                 recognized_indices.extend(usage_recognized);
                 parsers_used.push("usage-compact-flags".to_string());
-                schema.global_flags.extend(usage_flags);
+                flag_candidates.extend(usage_flags);
             }
         }
 
-        if schema.positional.is_empty() {
-            let (usage_args, usage_arg_recognized) =
-                self.parse_usage_positionals(&indexed_lines, !schema.subcommands.is_empty());
+        if arg_candidates.is_empty() {
+            let usage_args = usage_strategy.parse_args(self, &indexed_lines);
+            let (_, usage_arg_recognized) =
+                self.parse_usage_positionals(&indexed_lines, !subcommand_candidates.is_empty());
             if !usage_args.is_empty() {
                 recognized_indices.extend(usage_arg_recognized);
                 parsers_used.push("usage-positionals".to_string());
-                schema.positional.extend(usage_args);
+                arg_candidates.extend(usage_args);
             }
         }
 
-        schema.global_flags = Self::dedupe_flags(schema.global_flags);
-        schema.subcommands = Self::dedupe_subcommands(schema.subcommands);
-        schema.positional = Self::dedupe_args(schema.positional);
+        let mut false_positive_filter_hits = classify::count_filter_hits(&indexed_lines);
+        subcommand_candidates.retain(|candidate| {
+            let drop = classify::is_placeholder_token(candidate.name.as_str())
+                || classify::is_env_var_row(candidate.name.as_str())
+                || classify::is_keybinding_row(candidate.name.as_str())
+                || classify::is_prose_header(candidate.name.as_str());
+            if drop {
+                false_positive_filter_hits += 1;
+            }
+            !drop
+        });
+        arg_candidates.retain(|candidate| {
+            let drop = classify::is_placeholder_token(candidate.name.as_str());
+            if drop {
+                false_positive_filter_hits += 1;
+            }
+            !drop
+        });
+
+        let flag_result =
+            merge::merge_flag_candidates(flag_candidates, merge::HIGH_CONFIDENCE_THRESHOLD);
+        let subcommand_result = merge::merge_subcommand_candidates(
+            subcommand_candidates,
+            merge::HIGH_CONFIDENCE_THRESHOLD,
+        );
+        let arg_result =
+            merge::merge_arg_candidates(arg_candidates, merge::HIGH_CONFIDENCE_THRESHOLD);
+
+        schema.global_flags = flag_result.accepted;
+        schema.subcommands = subcommand_result.accepted;
+        schema.positional = arg_result.accepted;
+
+        constraints::apply_flag_relationships(&mut schema.global_flags);
+        for error in constraints::validate_subcommand_hierarchy(&self.command, &schema.subcommands)
+        {
+            self.warnings
+                .push(format!("Subcommand hierarchy validation: {error}"));
+        }
+
         self.apply_flag_choice_hints(
             &indexed_lines,
             &mut schema.global_flags,
@@ -355,9 +487,25 @@ impl HelpParser {
             &mut schema.global_flags,
             &mut recognized_indices,
         );
+        schema.global_flags = Self::dedupe_flags(schema.global_flags);
+        schema.subcommands = Self::dedupe_subcommands(schema.subcommands);
+        schema.positional = Self::dedupe_args(schema.positional);
+        schema = merge::finalize_schema(schema);
 
         // Calculate confidence based on what we extracted
         schema.confidence = self.calculate_confidence(&schema);
+        let candidate_diagnostics = diagnostics::CandidateDiagnostics {
+            medium_flags: flag_result.medium_confidence,
+            discarded_flags: flag_result.discarded,
+            medium_subcommands: subcommand_result.medium_confidence,
+            discarded_subcommands: subcommand_result.discarded,
+            medium_args: arg_result.medium_confidence,
+            discarded_args: arg_result.discarded,
+            false_positive_filter_hits,
+        };
+        self.warnings.extend(candidate_diagnostics.warnings());
+
+        let schema = confidence::gate_schema(schema)?;
         self.diagnostics = self.build_diagnostics(
             &indexed_lines,
             recognized_indices,
@@ -438,7 +586,7 @@ impl HelpParser {
     }
 
     /// Identifies typed sections in the help output.
-    fn identify_sections(&self, lines: &[IndexedLine]) -> SectionBuckets {
+    pub(super) fn identify_sections(&self, lines: &[IndexedLine]) -> SectionBuckets {
         let mut buckets = SectionBuckets::default();
         let mut current_section: Option<SectionKind> = None;
 
@@ -530,23 +678,14 @@ impl HelpParser {
         }
 
         let negatives = [
-            "variable",
-            "option",
-            "flag",
-            "argument",
-            "example",
-            "column",
-            "field",
-            "property",
-            "setting",
-            "key",
-            "keyboard",
+            "variable", "option", "flag", "argument", "example", "column", "field", "property",
+            "setting", "key", "keyboard",
         ];
         !negatives.iter().any(|needle| lower.contains(needle))
     }
 
     /// Parses subcommand lines.
-    fn parse_subcommands(&self, lines: &[&str]) -> Vec<SubcommandSchema> {
+    pub(super) fn parse_subcommands(&self, lines: &[&str]) -> Vec<SubcommandSchema> {
         let mut subcommands = Vec::new();
         let mut seen_names = HashSet::new();
 
@@ -688,7 +827,7 @@ impl HelpParser {
         })
     }
 
-    fn parse_arguments_section(&self, lines: &[&str]) -> Vec<ArgSchema> {
+    pub(super) fn parse_arguments_section(&self, lines: &[&str]) -> Vec<ArgSchema> {
         let mut positional = Vec::new();
         let mut seen = HashSet::new();
 
@@ -698,12 +837,12 @@ impl HelpParser {
                 continue;
             }
 
-            let (left, description) = if let Some((name_col, desc_col)) = Self::split_two_columns(trimmed)
-            {
-                (name_col, Some(desc_col))
-            } else {
-                (trimmed, None)
-            };
+            let (left, description) =
+                if let Some((name_col, desc_col)) = Self::split_two_columns(trimmed) {
+                    (name_col, Some(desc_col))
+                } else {
+                    (trimmed, None)
+                };
 
             for mut arg in Self::parse_argument_tokens(left) {
                 if arg.description.is_none() {
@@ -736,7 +875,8 @@ impl HelpParser {
             let mut multiple = token.contains("...");
             let required = !token.starts_with('[');
 
-            let mut cleaned = token.trim_matches(|ch| matches!(ch, '[' | ']' | '<' | '>' | '(' | ')' | '{' | '}'));
+            let mut cleaned = token
+                .trim_matches(|ch| matches!(ch, '[' | ']' | '<' | '>' | '(' | ')' | '{' | '}'));
             cleaned = cleaned.trim_start_matches('+');
             cleaned = cleaned.trim_end_matches("...");
             cleaned = cleaned.trim_matches(|ch| matches!(ch, ',' | ';' | ':'));
@@ -766,7 +906,7 @@ impl HelpParser {
         args
     }
 
-    fn parse_usage_positionals(
+    pub(super) fn parse_usage_positionals(
         &self,
         lines: &[IndexedLine],
         has_subcommands: bool,
@@ -829,14 +969,16 @@ impl HelpParser {
             let has_placeholder_markers =
                 token.contains('<') || token.contains('[') || token.contains("...");
             let looks_upper_placeholder = token.chars().any(|ch| ch.is_ascii_uppercase())
-                && token
-                    .chars()
-                    .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || matches!(ch, '_' | '[' | ']' | '.' | '+' | '<' | '>'));
+                && token.chars().all(|ch| {
+                    ch.is_ascii_uppercase()
+                        || ch.is_ascii_digit()
+                        || matches!(ch, '_' | '[' | ']' | '.' | '+' | '<' | '>')
+                });
             let looks_lower_with_index = token.chars().any(|ch| ch.is_ascii_lowercase())
                 && token.chars().any(|ch| ch.is_ascii_digit())
-                && token
-                    .chars()
-                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '[' | ']' | '.'));
+                && token.chars().all(|ch| {
+                    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '[' | ']' | '.')
+                });
             if !has_placeholder_markers && !looks_upper_placeholder && !looks_lower_with_index {
                 continue;
             }
@@ -853,7 +995,8 @@ impl HelpParser {
                     continue;
                 }
                 // Avoid parsing grammar rows from network/route tools.
-                if usage_lower.contains(":=") && arg.name.chars().all(|ch| ch.is_ascii_uppercase()) {
+                if usage_lower.contains(":=") && arg.name.chars().all(|ch| ch.is_ascii_uppercase())
+                {
                     continue;
                 }
                 let key = arg.name.to_ascii_lowercase();
@@ -916,7 +1059,7 @@ impl HelpParser {
     }
 
     /// Parses flag/option lines.
-    fn parse_flags(&self, lines: &[&str]) -> Vec<FlagSchema> {
+    pub(super) fn parse_flags(&self, lines: &[&str]) -> Vec<FlagSchema> {
         let mut flags = Vec::new();
         for line in lines {
             flags.extend(self.parse_flag_entries_from_line(line));
@@ -1185,6 +1328,7 @@ impl HelpParser {
         (conflicts, requires)
     }
 
+    #[allow(dead_code)]
     fn normalize_help_output(raw: &str) -> String {
         static ANSI_RE: LazyLock<Regex> =
             LazyLock::new(|| Regex::new(r"\x1b\[[0-9;?]*[ -/]*[@-~]").unwrap());
@@ -1246,7 +1390,7 @@ impl HelpParser {
         normalized.join("\n")
     }
 
-    fn split_two_columns(line: &str) -> Option<(&str, &str)> {
+    pub(super) fn split_two_columns(line: &str) -> Option<(&str, &str)> {
         let capture = PATTERNS.column_break.find(line)?;
         let left = line[..capture.start()].trim();
         let right = line[capture.end()..].trim();
@@ -1317,7 +1461,7 @@ impl HelpParser {
         }
     }
 
-    fn looks_like_subcommand_entry(trimmed: &str) -> bool {
+    pub(super) fn looks_like_subcommand_entry(trimmed: &str) -> bool {
         let starts_like_name = trimmed
             .chars()
             .next()
@@ -1343,6 +1487,7 @@ impl HelpParser {
             })
     }
 
+    #[allow(dead_code)]
     fn to_indexed_lines(normalized: &str) -> Vec<IndexedLine> {
         normalized
             .lines()
@@ -1354,7 +1499,7 @@ impl HelpParser {
             .collect()
     }
 
-    fn parse_two_column_subcommands(
+    pub(super) fn parse_two_column_subcommands(
         &self,
         lines: &[IndexedLine],
     ) -> (Vec<SubcommandSchema>, HashSet<usize>) {
@@ -1404,9 +1549,7 @@ impl HelpParser {
                 continue;
             }
 
-            if self.detect_section_header(trimmed).is_some()
-                || trimmed.starts_with('-')
-            {
+            if self.detect_section_header(trimmed).is_some() || trimmed.starts_with('-') {
                 flush_block(
                     self,
                     &mut current_block,
@@ -1430,10 +1573,9 @@ impl HelpParser {
                 continue;
             }
 
-            let is_command_row = Self::split_two_columns(trimmed)
-                .is_some_and(|(left, _)| {
-                    self.is_generic_subcommand_name_column(left, current_header.as_deref())
-                });
+            let is_command_row = Self::split_two_columns(trimmed).is_some_and(|(left, _)| {
+                self.is_generic_subcommand_name_column(left, current_header.as_deref())
+            });
 
             if is_command_row {
                 current_block.push(SectionEntry {
@@ -1502,9 +1644,7 @@ impl HelpParser {
             "keys",
             "key",
         ];
-        non_command_like
-            .iter()
-            .any(|needle| lower.contains(needle))
+        non_command_like.iter().any(|needle| lower.contains(needle))
     }
 
     fn block_looks_like_keybinding_table(block: &[SectionEntry]) -> bool {
@@ -1628,7 +1768,7 @@ impl HelpParser {
         true
     }
 
-    fn looks_like_keybinding_document(lines: &[IndexedLine]) -> bool {
+    pub(super) fn looks_like_keybinding_document(lines: &[IndexedLine]) -> bool {
         let keybinding_markers = lines
             .iter()
             .map(|line| line.text.to_ascii_lowercase())
@@ -1695,6 +1835,7 @@ impl HelpParser {
         )
     }
 
+    #[allow(dead_code)]
     fn classify_formats(&self, lines: &[&str]) -> Vec<FormatScore> {
         let mut scores = vec![
             FormatScore {
@@ -1800,7 +1941,7 @@ impl HelpParser {
         scores
     }
 
-    fn parse_npm_style_commands(
+    pub(super) fn parse_npm_style_commands(
         &self,
         lines: &[IndexedLine],
     ) -> (Vec<SubcommandSchema>, HashSet<usize>) {
@@ -1845,7 +1986,10 @@ impl HelpParser {
         (commands, recognized)
     }
 
-    fn parse_sectionless_flags(&self, lines: &[IndexedLine]) -> (Vec<FlagSchema>, HashSet<usize>) {
+    pub(super) fn parse_sectionless_flags(
+        &self,
+        lines: &[IndexedLine],
+    ) -> (Vec<FlagSchema>, HashSet<usize>) {
         let mut flags = Vec::new();
         let mut recognized = HashSet::new();
 
@@ -1864,7 +2008,7 @@ impl HelpParser {
         (flags, recognized)
     }
 
-    fn parse_usage_compact_flags(
+    pub(super) fn parse_usage_compact_flags(
         &self,
         lines: &[IndexedLine],
     ) -> (Vec<FlagSchema>, HashSet<usize>) {
@@ -1993,7 +2137,7 @@ impl HelpParser {
         (Self::dedupe_flags(flags), recognized)
     }
 
-    fn parse_named_setting_rows(
+    pub(super) fn parse_named_setting_rows(
         &self,
         lines: &[IndexedLine],
     ) -> (Vec<SubcommandSchema>, HashSet<usize>) {
@@ -2012,7 +2156,10 @@ impl HelpParser {
             if !Self::is_valid_command_name(left) {
                 continue;
             }
-            if left.chars().any(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit()) {
+            if left
+                .chars()
+                .any(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit())
+            {
                 continue;
             }
             if !left.chars().any(|ch| ch.is_ascii_lowercase()) {
@@ -2290,14 +2437,11 @@ impl HelpParser {
         static PLACEHOLDER_VALUES_RE: LazyLock<Regex> = LazyLock::new(|| {
             Regex::new(r"^([A-Z][A-Z0-9_-]{1,})\s+is one of the following\s*:\s*$").unwrap()
         });
-        static PLACEHOLDER_DETERMINES_RE: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(r"^([A-Z][A-Z0-9_-]{1,})\s+determines\b.*:\s*$").unwrap()
-        });
+        static PLACEHOLDER_DETERMINES_RE: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"^([A-Z][A-Z0-9_-]{1,})\s+determines\b.*:\s*$").unwrap());
         static GENERIC_VALUES_HEADER_RE: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(
-                r"(?i)^.*\b(here are the values|possible values|available values)\b.*:?\s*$",
-            )
-            .unwrap()
+            Regex::new(r"(?i)^.*\b(here are the values|possible values|available values)\b.*:?\s*$")
+                .unwrap()
         });
         static FLAG_REF_RE: LazyLock<Regex> = LazyLock::new(|| {
             Regex::new(r"(--[a-zA-Z][-a-zA-Z0-9.]*|-[a-zA-Z0-9?@]{1,3})").unwrap()
@@ -2406,15 +2550,13 @@ impl HelpParser {
                     flag.short.as_deref() == Some(flag_name.as_str())
                         || flag.long.as_deref() == Some(flag_name.as_str())
                 }),
-                ChoiceTarget::Placeholder(placeholder) => {
-                    self.resolve_flag_for_placeholder(
-                        lines,
-                        idx,
-                        placeholder.as_str(),
-                        flags,
-                        &FLAG_REF_RE,
-                    )
-                }
+                ChoiceTarget::Placeholder(placeholder) => self.resolve_flag_for_placeholder(
+                    lines,
+                    idx,
+                    placeholder.as_str(),
+                    flags,
+                    &FLAG_REF_RE,
+                ),
             };
 
             let Some(flag_index) = target_index else {
@@ -2454,14 +2596,12 @@ impl HelpParser {
             .enumerate()
             .filter(|(_, flag)| {
                 flag.takes_value
-                    && (flag
-                        .long
+                    && (flag.long.as_deref().is_some_and(|long| {
+                        long.trim_start_matches("--").contains(&placeholder_lower)
+                    }) || flag
+                        .description
                         .as_deref()
-                        .is_some_and(|long| long.trim_start_matches("--").contains(&placeholder_lower))
-                        || flag
-                            .description
-                            .as_deref()
-                            .is_some_and(|desc| desc.to_ascii_lowercase().contains(&placeholder_lower)))
+                        .is_some_and(|desc| desc.to_ascii_lowercase().contains(&placeholder_lower)))
             })
             .map(|(index, _)| index)
             .collect::<Vec<_>>();
@@ -2593,7 +2733,7 @@ impl HelpParser {
         false
     }
 
-    fn looks_like_flag_row_start(trimmed: &str) -> bool {
+    pub(super) fn looks_like_flag_row_start(trimmed: &str) -> bool {
         let Some(rest) = trimmed.strip_prefix('-') else {
             return false;
         };
@@ -2692,9 +2832,7 @@ impl HelpParser {
             return false;
         }
 
-        left_tokens
-            .into_iter()
-            .all(Self::looks_like_command_token)
+        left_tokens.into_iter().all(Self::looks_like_command_token)
     }
 
     fn looks_like_comma_command_list(trimmed: &str) -> bool {

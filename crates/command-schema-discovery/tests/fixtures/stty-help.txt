@@ -1,0 +1,10 @@
+Usage: stty [-F DEVICE | --file=DEVICE] [SETTING]...
+       stty [-F DEVICE | --file=DEVICE] [-a|--all]
+
+Special settings:
+   speed         print the terminal speed
+   cbreak        same as -icanon
+   sane          same as cread -ignbrk brkint -inlcr -igncr icrnl icanon
+
+  -a, --all      print all current settings in human-readable form
+      --help     display this help and exit

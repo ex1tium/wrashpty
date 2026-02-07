@@ -1,0 +1,13 @@
+apt 2.8.3 (amd64)
+Usage: apt [options] command
+
+Most used commands:
+  list - list packages based on package names
+  search - search in package descriptions
+  show - show package details
+  install - install packages
+  update - update list of available packages
+  upgrade - upgrade the system by installing/upgrading packages
+
+See apt(8) for more information about the available commands.
+                                        This APT has Super Cow Powers.
