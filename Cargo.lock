@@ -308,7 +308,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
- "wait-timeout",
 ]
 
 [[package]]

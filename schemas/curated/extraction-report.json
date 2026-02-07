@@ -1,0 +1,81 @@
+{
+  "generated_at": "2026-02-07T11:27:06.204812224+00:00",
+  "version": "1.0.0",
+  "reports": [
+    {
+      "command": "kubectl",
+      "success": false,
+      "selected_format": null,
+      "format_scores": [],
+      "parsers_used": [
+        "probe-failed"
+      ],
+      "confidence": 0.0,
+      "coverage": 0.0,
+      "relevant_lines": 0,
+      "recognized_lines": 0,
+      "unresolved_lines": [],
+      "probe_attempts": [
+        {
+          "help_flag": "--help",
+          "argv": [
+            "kubectl",
+            "--help"
+          ],
+          "exit_code": null,
+          "timed_out": false,
+          "error": "spawn failed: No such file or directory (os error 2)",
+          "output_source": null,
+          "output_len": 0,
+          "accepted": false
+        },
+        {
+          "help_flag": "-h",
+          "argv": [
+            "kubectl",
+            "-h"
+          ],
+          "exit_code": null,
+          "timed_out": false,
+          "error": "spawn failed: No such file or directory (os error 2)",
+          "output_source": null,
+          "output_len": 0,
+          "accepted": false
+        },
+        {
+          "help_flag": "help",
+          "argv": [
+            "kubectl",
+            "help"
+          ],
+          "exit_code": null,
+          "timed_out": false,
+          "error": "spawn failed: No such file or directory (os error 2)",
+          "output_source": null,
+          "output_len": 0,
+          "accepted": false
+        },
+        {
+          "help_flag": "-?",
+          "argv": [
+            "kubectl",
+            "-?"
+          ],
+          "exit_code": null,
+          "timed_out": false,
+          "error": "spawn failed: No such file or directory (os error 2)",
+          "output_source": null,
+          "output_len": 0,
+          "accepted": false
+        }
+      ],
+      "warnings": [
+        "Could not get help output for 'kubectl'"
+      ],
+      "validation_errors": []
+    }
+  ],
+  "failures": [
+    "kubectl"
+  ]
+}
