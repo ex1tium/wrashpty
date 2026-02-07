@@ -96,7 +96,13 @@ fn collect_schema_paths(dir: &Path) -> Result<Vec<PathBuf>, std::io::Error> {
         let entry = entry?;
         let path = entry.path();
 
-        if path.extension().is_some_and(|ext| ext == "json") {
+        let is_json = path.extension().is_some_and(|ext| ext == "json");
+        let is_report = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == "extraction-report.json");
+
+        if is_json && !is_report {
             paths.push(path);
         }
     }

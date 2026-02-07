@@ -4,6 +4,7 @@
 //! and recursively probing subcommands.
 
 use std::collections::HashSet;
+use std::io::ErrorKind;
 use std::io::Read;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
@@ -180,9 +181,26 @@ fn probe_command_help_with_metadata(command: &str) -> ProbeRun {
                 }
             }
             Err(e) => {
-                attempt.error = Some(format!("spawn failed: {e}"));
-                debug!(command = ?cmd_parts, error = %e, "Failed to spawn help command");
-                attempts.push(attempt);
+                // Shell builtin fallback (e.g. `cd`) for commands that don't exist
+                // as standalone executables.
+                if e.kind() == ErrorKind::NotFound {
+                    debug!(
+                        command = ?cmd_parts,
+                        "Direct spawn failed, trying shell fallback probe"
+                    );
+                    let shell_probe = probe_shell_help(&parts, help_flag);
+                    attempts.push(shell_probe.attempt);
+                    if let Some(help_text) = shell_probe.accepted_output {
+                        return ProbeRun {
+                            help_output: Some(help_text),
+                            attempts,
+                        };
+                    }
+                } else {
+                    attempt.error = Some(format!("spawn failed: {e}"));
+                    debug!(command = ?cmd_parts, error = %e, "Failed to spawn help command");
+                    attempts.push(attempt);
+                }
             }
         }
     }
@@ -190,6 +208,109 @@ fn probe_command_help_with_metadata(command: &str) -> ProbeRun {
     ProbeRun {
         help_output: None,
         attempts,
+    }
+}
+
+struct ShellProbeResult {
+    attempt: ProbeAttempt,
+    accepted_output: Option<String>,
+}
+
+fn probe_shell_help(parts: &[&str], help_flag: &str) -> ShellProbeResult {
+    let shell_cmd = if help_flag == "help" {
+        format!("help {}", parts.join(" "))
+    } else {
+        format!("{} {}", parts.join(" "), help_flag)
+    };
+
+    let argv = vec!["bash".to_string(), "-lc".to_string(), shell_cmd.clone()];
+    let mut attempt = ProbeAttempt::new(help_flag, argv);
+
+    let spawn = Command::new("bash")
+        .arg("-lc")
+        .arg(&shell_cmd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+
+    let Ok(mut child) = spawn else {
+        let err = spawn.err().map_or_else(
+            || "spawn failed".to_string(),
+            |e| format!("shell spawn failed: {e}"),
+        );
+        attempt.error = Some(err);
+        return ShellProbeResult {
+            attempt,
+            accepted_output: None,
+        };
+    };
+
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    let timeout = Duration::from_millis(HELP_TIMEOUT_MS);
+
+    match wait_for_child_with_timeout(&mut child, timeout) {
+        Ok(Some(status)) => {
+            attempt.exit_code = status.code();
+            let mut stdout_buf = Vec::new();
+            let mut stderr_buf = Vec::new();
+            let mut io_errors = Vec::new();
+
+            if let Some(ref mut pipe) = stdout_pipe
+                && let Err(e) = pipe.read_to_end(&mut stdout_buf)
+            {
+                io_errors.push(format!("stdout read failed: {e}"));
+            }
+            if let Some(ref mut pipe) = stderr_pipe
+                && let Err(e) = pipe.read_to_end(&mut stderr_buf)
+            {
+                io_errors.push(format!("stderr read failed: {e}"));
+            }
+            if !io_errors.is_empty() {
+                attempt.error = Some(io_errors.join("; "));
+            }
+
+            let stdout = String::from_utf8_lossy(&stdout_buf);
+            let stderr = String::from_utf8_lossy(&stderr_buf);
+            let (help_text, output_source) = if stdout.len() > stderr.len() {
+                (stdout.to_string(), "stdout")
+            } else {
+                (stderr.to_string(), "stderr")
+            };
+
+            attempt.output_source = Some(output_source.to_string());
+            attempt.output_len = help_text.len();
+            if is_help_output(&help_text) {
+                attempt.accepted = true;
+                return ShellProbeResult {
+                    attempt,
+                    accepted_output: Some(help_text),
+                };
+            }
+
+            ShellProbeResult {
+                attempt,
+                accepted_output: None,
+            }
+        }
+        Ok(None) => {
+            attempt.timed_out = true;
+            let _ = child.kill();
+            let _ = child.wait();
+            ShellProbeResult {
+                attempt,
+                accepted_output: None,
+            }
+        }
+        Err(e) => {
+            attempt.error = Some(format!("shell wait failed: {e}"));
+            let _ = child.kill();
+            let _ = child.wait();
+            ShellProbeResult {
+                attempt,
+                accepted_output: None,
+            }
+        }
     }
 }
 
@@ -408,7 +529,18 @@ fn probe_subcommands_recursive(
                 subcmd.description = sub_schema.description.or(subcmd.description.take());
 
                 // Add nested subcommands
-                subcmd.subcommands = sub_schema.subcommands;
+                let mut nested_subcommands = sub_schema.subcommands;
+                if nested_subcommands
+                    .iter()
+                    .any(|nested| nested.name == subcmd.name)
+                {
+                    warnings.push(format!(
+                        "Skipping nested subcommands for '{}' due to detected self-cycle",
+                        full_command
+                    ));
+                    nested_subcommands.clear();
+                }
+                subcmd.subcommands = nested_subcommands;
 
                 // Recurse into nested subcommands
                 if !subcmd.subcommands.is_empty() {

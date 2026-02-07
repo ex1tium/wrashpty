@@ -64,6 +64,7 @@ enum SectionKind {
 
 #[derive(Default)]
 struct SectionBuckets {
+    header_indices: Vec<usize>,
     subcommands: Vec<SectionEntry>,
     flags: Vec<SectionEntry>,
     options: Vec<SectionEntry>,
@@ -75,6 +76,7 @@ static PATTERNS: LazyLock<HelpPatterns> = LazyLock::new(HelpPatterns::new);
 struct HelpPatterns {
     // Flag patterns: -x, --long, -x/--long, -x, --long
     short_flag: Regex,
+    single_dash_word_flag: Regex,
     long_flag: Regex,
     combined_flag: Regex,
     flag_with_value: Regex,
@@ -96,18 +98,23 @@ struct HelpPatterns {
 impl HelpPatterns {
     fn new() -> Self {
         Self {
-            // -v, -x
-            short_flag: Regex::new(r"^\s*(-[a-zA-Z])(?:\s|,|$)").unwrap(),
+            // -v, -x, -4, -0
+            short_flag: Regex::new(r"^\s*(-[a-zA-Z0-9])(?:\s|,|\[|\||$)").unwrap(),
+            // -chdir, -log-level, etc (single-dash long options used by some CLIs)
+            single_dash_word_flag: Regex::new(
+                r"^\s*(-[a-zA-Z][a-zA-Z0-9-]{1,})(?:\s|=|<|\[|\||$)"
+            )
+            .unwrap(),
             // --verbose, --help
-            long_flag: Regex::new(r"^\s*(--[a-zA-Z][-a-zA-Z0-9]*)(?:\s|=|\[|$)").unwrap(),
+            long_flag: Regex::new(r"^\s*(--[a-zA-Z][-a-zA-Z0-9]*)(?:\s|=|\[|,|\||\)|$)").unwrap(),
             // -v, --verbose  OR  -v/--verbose
             combined_flag: Regex::new(
-                r"^\s*(-[a-zA-Z])(?:\s*,\s*|\s*/\s*|\s+)(--[a-zA-Z][-a-zA-Z0-9]*)"
+                r"^\s*(-[a-zA-Z0-9])(?:\s*,\s*|\s*/\s*|\s+)(--[a-zA-Z][-a-zA-Z0-9]*)"
             ).unwrap(),
             // --flag=VALUE, --flag <value>, --flag [value], -f VALUE
             // Only match: =VALUE, <VALUE>, [value], or ALLCAPS right after flag
             flag_with_value: Regex::new(
-                r"(?:=([A-Za-z_]+)|[<\[]([A-Za-z_]+)[>\]]|(?:--[a-zA-Z][-a-zA-Z0-9]*|-[a-zA-Z])\s+([A-Z][A-Z_]+)(?:\s|$))"
+                r"(?:=([A-Za-z_]+)|[<\[]([A-Za-z_]+)[>\]]|(?:--[a-zA-Z][-a-zA-Z0-9]*|-[a-zA-Z0-9])\s+([A-Z][A-Z_]+)(?:\s|$))"
             ).unwrap(),
 
             // Section headers (case insensitive)
@@ -184,12 +191,21 @@ impl HelpParser {
         // Extract description (usually first non-empty line)
         schema.description = self.extract_description(&line_refs);
 
-        // Parse sections
+        // Stage 1: parse explicit section blocks first (highest confidence).
         let sections = self.identify_sections(&indexed_lines);
         let mut recognized_indices: HashSet<usize> = HashSet::new();
         let mut parsers_used: Vec<String> = Vec::new();
+        recognized_indices.extend(sections.header_indices.iter().copied());
 
-        // Extract subcommands
+        // Capture usage rows as recognized structural context, even when we do
+        // not derive additional schema entities from them.
+        let usage_recognized = self.collect_usage_indices(&indexed_lines);
+        if !usage_recognized.is_empty() {
+            recognized_indices.extend(usage_recognized);
+            parsers_used.push("usage-lines".to_string());
+        }
+
+        // Extract subcommands from explicit command sections.
         if !sections.subcommands.is_empty() {
             let refs: Vec<&str> = sections
                 .subcommands
@@ -232,6 +248,8 @@ impl HelpParser {
             }
         }
 
+        // Stage 2: format-aware and well-known structural fallbacks.
+
         // npm-style command lists (All commands:)
         if schema.subcommands.is_empty() {
             let (npm_subcommands, npm_recognized) = self.parse_npm_style_commands(&indexed_lines);
@@ -242,7 +260,9 @@ impl HelpParser {
             }
         }
 
-        // Generic two-column fallback: "<command>  <description>" blocks.
+        // Generic two-column command rows when explicit command sections were not
+        // identified (or were empty). This is still structural and should happen
+        // before more permissive fallbacks.
         if schema.subcommands.is_empty() {
             let (generic_subcommands, generic_recognized) =
                 self.parse_two_column_subcommands(&indexed_lines);
@@ -253,15 +273,15 @@ impl HelpParser {
             }
         }
 
-        // GNU and many custom CLIs list flags without explicit "Flags/Options" sections.
-        if schema.global_flags.is_empty() {
-            let (fallback_flags, fallback_recognized) =
-                self.parse_sectionless_flags(&indexed_lines);
-            if !fallback_flags.is_empty() {
-                recognized_indices.extend(fallback_recognized);
-                parsers_used.push("gnu-sectionless-flags".to_string());
-                schema.global_flags.extend(fallback_flags);
-            }
+        // Stage 3: flag extraction fallbacks.
+
+        // GNU and many custom CLIs list additional flags outside explicit
+        // "Flags/Options" sections, so always run this as a top-up pass.
+        let (fallback_flags, fallback_recognized) = self.parse_sectionless_flags(&indexed_lines);
+        if !fallback_flags.is_empty() {
+            recognized_indices.extend(fallback_recognized);
+            parsers_used.push("gnu-sectionless-flags".to_string());
+            schema.global_flags.extend(fallback_flags);
         }
 
         // Compact usage fallback, e.g. tmux:
@@ -348,6 +368,7 @@ impl HelpParser {
             }
 
             if let Some(section) = self.detect_section_header(trimmed) {
+                buckets.header_indices.push(line.index);
                 current_section = Some(section);
                 continue;
             }
@@ -382,6 +403,19 @@ impl HelpParser {
         if PATTERNS.subcommands_section.is_match(trimmed) {
             return Some(SectionKind::Subcommands);
         }
+        let lower = trimmed.to_lowercase();
+        if trimmed.ends_with(':') && lower.contains("command") {
+            return Some(SectionKind::Subcommands);
+        }
+        if trimmed.ends_with(':') && lower.contains("action") {
+            return Some(SectionKind::Subcommands);
+        }
+        if trimmed.ends_with(':') && lower.contains("option") {
+            return Some(SectionKind::Options);
+        }
+        if trimmed.ends_with(':') && lower.contains("flag") {
+            return Some(SectionKind::Flags);
+        }
         if PATTERNS.flags_section.is_match(trimmed) {
             return Some(SectionKind::Flags);
         }
@@ -414,7 +448,7 @@ impl HelpParser {
             if self.looks_like_command_list_line(trimmed) {
                 for token in trimmed.split(',') {
                     let name = token.trim();
-                    if self.is_valid_command_name(name) && seen_names.insert(name.to_string()) {
+                    if Self::is_valid_command_name(name) && seen_names.insert(name.to_string()) {
                         subcommands.push(SubcommandSchema::new(name));
                     }
                 }
@@ -435,16 +469,20 @@ impl HelpParser {
             let mut names: Vec<&str> = name_part
                 .split(',')
                 .map(str::trim)
-                .filter(|name| self.is_valid_command_name(name))
+                .filter(|name| Self::is_valid_command_name(name))
                 .collect();
 
             if names.is_empty() {
-                // Fallback: some tools use single-space separation.
-                if self.is_valid_command_name(name_part) {
-                    names.push(name_part);
-                } else {
-                    continue;
+                if let Some(fallback_names) = self.parse_subcommand_name_candidates(name_part) {
+                    for name in fallback_names {
+                        if Self::is_valid_command_name(name) {
+                            names.push(name);
+                        }
+                    }
                 }
+            }
+            if names.is_empty() {
+                continue;
             }
 
             let primary = names.remove(0);
@@ -461,6 +499,68 @@ impl HelpParser {
         }
 
         subcommands
+    }
+
+    fn parse_subcommand_name_candidates<'a>(&self, name_part: &'a str) -> Option<Vec<&'a str>> {
+        // Handle rows like "start UNIT..." where first token is the real command
+        // and the rest is usage placeholder syntax.
+        let mut candidates = Vec::new();
+
+        for segment in name_part.split(',') {
+            let segment = segment.trim();
+            if segment.is_empty() {
+                continue;
+            }
+            if Self::is_valid_command_name(segment) {
+                candidates.push(segment);
+                continue;
+            }
+
+            let mut tokens = segment.split_whitespace();
+            let first = tokens.next()?;
+            if !Self::is_valid_command_name(first) {
+                return None;
+            }
+
+            let tail = segment[first.len()..].trim();
+            if tail.is_empty() || Self::looks_like_argument_placeholder(tail) {
+                candidates.push(first);
+                continue;
+            }
+
+            return None;
+        }
+
+        if candidates.is_empty() {
+            None
+        } else {
+            Some(candidates)
+        }
+    }
+
+    fn looks_like_argument_placeholder(value: &str) -> bool {
+        if value.is_empty() {
+            return false;
+        }
+
+        let has_placeholder_markers = value.contains("...")
+            || value.contains('<')
+            || value.contains('>')
+            || value.contains('[');
+        let has_uppercase = value.chars().any(|ch| ch.is_ascii_uppercase());
+
+        if !(has_placeholder_markers || has_uppercase) {
+            return false;
+        }
+
+        value.chars().all(|ch| {
+            ch.is_ascii_alphanumeric()
+                || matches!(
+                    ch,
+                    '_' | '-' | '.' | '[' | ']' | '<' | '>' | '/' | ':' | '|' | '+' | '?'
+                )
+                || ch.is_whitespace()
+        })
     }
 
     /// Parses flag/option lines.
@@ -490,6 +590,8 @@ impl HelpParser {
             long = Some(caps[2].to_string());
         } else if let Some(caps) = PATTERNS.long_flag.captures(trimmed) {
             long = Some(caps[1].to_string());
+        } else if let Some(caps) = PATTERNS.single_dash_word_flag.captures(trimmed) {
+            short = Some(caps[1].to_string());
         } else if let Some(caps) = PATTERNS.short_flag.captures(trimmed) {
             short = Some(caps[1].to_string());
         } else {
@@ -509,12 +611,8 @@ impl HelpParser {
                 (trimmed, None)
             };
 
-        // Also check for = or < > indicators in the flag definition itself.
-        if (definition_part.contains('=')
-            || definition_part.contains('<')
-            || definition_part.contains('['))
-            && !takes_value
-        {
+        // Also check for explicit value indicators in the flag definition itself.
+        if (definition_part.contains('=') || definition_part.contains('<')) && !takes_value {
             takes_value = true;
             value_type = ValueType::String;
         }
@@ -563,7 +661,15 @@ impl HelpParser {
                 && normalized.last().is_some_and(|prev| {
                     let prev_trimmed = prev.trim();
                     let prev_is_flag = prev_trimmed.starts_with('-');
-                    prev_is_flag
+                    let prev_is_two_column_subcommand = Self::split_two_columns(prev_trimmed)
+                        .is_some_and(|(left, _)| {
+                            !left.starts_with('-')
+                                && left
+                                    .chars()
+                                    .next()
+                                    .is_some_and(|ch| ch.is_ascii_alphanumeric())
+                        });
+                    (prev_is_flag || prev_is_two_column_subcommand)
                         && !prev_trimmed.is_empty()
                         && !prev_trimmed.ends_with(':')
                         && !Self::looks_like_subcommand_entry(trimmed_start)
@@ -732,7 +838,7 @@ impl HelpParser {
 
         names
             .iter()
-            .all(|name| self.is_valid_command_name(name) || name.chars().all(|ch| ch == '.'))
+            .all(|name| Self::is_valid_command_name(name) || name.chars().all(|ch| ch == '.'))
     }
 
     fn classify_formats(&self, lines: &[&str]) -> Vec<FormatScore> {
@@ -876,7 +982,7 @@ impl HelpParser {
             recognized.insert(line.index);
             for token in trimmed.split(',') {
                 let name = token.trim();
-                if self.is_valid_command_name(name) && seen.insert(name.to_string()) {
+                if Self::is_valid_command_name(name) && seen.insert(name.to_string()) {
                     commands.push(SubcommandSchema::new(name));
                 }
             }
@@ -968,10 +1074,13 @@ impl HelpParser {
 
             let first = tokens[0];
             if first.starts_with("--") {
+                let Some(long_name) = Self::normalize_long_flag_token(first) else {
+                    continue;
+                };
                 let takes_value = tokens.get(1).is_some_and(|next| !next.starts_with('-'));
                 flags.push(FlagSchema {
                     short: None,
-                    long: Some(Self::trim_value_suffix(first).to_string()),
+                    long: Some(long_name),
                     value_type: if takes_value {
                         self.infer_value_type(group)
                     } else {
@@ -1029,9 +1138,63 @@ impl HelpParser {
         (Self::dedupe_flags(flags), recognized)
     }
 
+    fn collect_usage_indices(&self, lines: &[IndexedLine]) -> HashSet<usize> {
+        let mut recognized = HashSet::new();
+        let mut in_usage = false;
+
+        for line in lines {
+            let raw = line.text.as_str();
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                if in_usage {
+                    break;
+                }
+                continue;
+            }
+
+            if trimmed.to_ascii_lowercase().starts_with("usage:") {
+                in_usage = true;
+                recognized.insert(line.index);
+                continue;
+            }
+
+            if in_usage && (raw.starts_with(' ') || raw.starts_with('\t')) {
+                recognized.insert(line.index);
+                continue;
+            }
+
+            if in_usage {
+                break;
+            }
+        }
+
+        recognized
+    }
+
     fn trim_value_suffix(flag: &str) -> &str {
         flag.find(&['[', '<', '='][..])
             .map_or(flag, |index| &flag[..index])
+    }
+
+    fn normalize_long_flag_token(token: &str) -> Option<String> {
+        if !token.starts_with("--") {
+            return None;
+        }
+
+        // Common optional-negation notation in usage strings: --[no-]verify
+        if let Some(suffix) = token.strip_prefix("--[no-]") {
+            let clean = Self::trim_value_suffix(suffix);
+            if clean.is_empty() {
+                return None;
+            }
+            return Some(format!("--{clean}"));
+        }
+
+        let clean = Self::trim_value_suffix(token);
+        if clean.len() <= 2 {
+            return None;
+        }
+        Some(clean.to_string())
     }
 
     fn looks_like_command_list_line(&self, line: &str) -> bool {
@@ -1041,11 +1204,11 @@ impl HelpParser {
                 .filter(|part| !part.trim().is_empty())
                 .all(|part| {
                     let token = part.trim();
-                    self.is_valid_command_name(token)
+                    Self::is_valid_command_name(token)
                 })
     }
 
-    fn is_valid_command_name(&self, value: &str) -> bool {
+    fn is_valid_command_name(value: &str) -> bool {
         !value.is_empty()
             && value.len() < 50
             && value
@@ -1139,10 +1302,14 @@ impl HelpParser {
         parsers_used: Vec<String>,
         confidence: f64,
     ) -> ParseDiagnostics {
-        let relevant_lines = lines
+        let relevant_indices = lines
             .iter()
             .filter(|line| Self::is_relevant_line(line.text.trim()))
-            .count();
+            .map(|line| line.index)
+            .collect::<HashSet<_>>();
+
+        let relevant_lines = relevant_indices.len();
+        let recognized_lines = relevant_indices.intersection(&recognized_indices).count();
 
         let unresolved_lines = lines
             .iter()
@@ -1169,7 +1336,7 @@ impl HelpParser {
             format_scores,
             parsers_used,
             relevant_lines,
-            recognized_lines: recognized_indices.len(),
+            recognized_lines,
             unresolved_lines,
         }
     }
@@ -1178,15 +1345,89 @@ impl HelpParser {
         if trimmed.is_empty() {
             return false;
         }
-        if trimmed.eq_ignore_ascii_case("usage:")
-            || trimmed.eq_ignore_ascii_case("options:")
-            || trimmed.eq_ignore_ascii_case("flags:")
-            || trimmed.eq_ignore_ascii_case("commands:")
-            || trimmed.eq_ignore_ascii_case("all commands:")
+        if Self::is_usage_line(trimmed)
+            || Self::is_section_header_line(trimmed)
+            || trimmed.starts_with('-')
+            || Self::looks_like_structured_two_column(trimmed)
+            || Self::looks_like_comma_command_list(trimmed)
         {
+            return true;
+        }
+        false
+    }
+
+    fn is_usage_line(trimmed: &str) -> bool {
+        let lower = trimmed.to_ascii_lowercase();
+        lower.starts_with("usage:") || lower.starts_with("or:")
+    }
+
+    fn is_section_header_line(trimmed: &str) -> bool {
+        if PATTERNS.subcommands_section.is_match(trimmed)
+            || PATTERNS.flags_section.is_match(trimmed)
+            || PATTERNS.options_section.is_match(trimmed)
+            || PATTERNS.arguments_section.is_match(trimmed)
+        {
+            return true;
+        }
+
+        let lower = trimmed.to_ascii_lowercase();
+        trimmed.ends_with(':')
+            && (lower.contains("command")
+                || lower.contains("action")
+                || lower.contains("option")
+                || lower.contains("flag")
+                || lower.contains("argument"))
+    }
+
+    fn looks_like_structured_two_column(trimmed: &str) -> bool {
+        let Some((left, right)) = Self::split_two_columns(trimmed) else {
+            return false;
+        };
+
+        // Grammar-like rows (e.g. "OBJECT := ...") are usage prose, not a
+        // subcommand/option table.
+        if right.contains(":=") {
             return false;
         }
-        true
+
+        if left.starts_with('-') {
+            return true;
+        }
+
+        left.split(',')
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .all(Self::looks_like_command_token)
+    }
+
+    fn looks_like_comma_command_list(trimmed: &str) -> bool {
+        trimmed.contains(',')
+            && trimmed
+                .split(',')
+                .map(str::trim)
+                .filter(|token| !token.is_empty())
+                .all(Self::looks_like_command_token)
+    }
+
+    fn looks_like_command_token(token: &str) -> bool {
+        let token = token.trim();
+        if token.is_empty() {
+            return false;
+        }
+        if token.starts_with('-') {
+            return false;
+        }
+        if token.chars().all(|ch| ch == '.') {
+            return true;
+        }
+
+        if token.chars().any(|ch| ch.is_whitespace()) {
+            return false;
+        }
+        if token.chars().any(|ch| ch.is_ascii_uppercase()) {
+            return false;
+        }
+        Self::is_valid_command_name(token)
     }
 
     /// Infers value type from context clues.
@@ -1366,6 +1607,84 @@ Actions
 Misc text
 "#;
 
+    const GIT_STYLE_COMMANDS_HELP: &str = r#"
+These are common Git commands used in various situations:
+start a working area (see also: git help tutorial)
+   clone     Clone a repository into a new directory
+   init      Create an empty Git repository or reinitialize an existing one
+work on the current change (see also: git help everyday)
+   add       Add file contents to the index
+"#;
+
+    const SYSTEMCTL_STYLE_HELP: &str = r#"
+systemctl [OPTIONS...] COMMAND ...
+
+Unit Commands:
+  start UNIT...      Start (activate) one or more units
+  stop UNIT...       Stop (deactivate) one or more units
+"#;
+
+    const TERRAFORM_STYLE_HELP: &str = r#"
+Usage: terraform [global options] <subcommand> [args]
+
+Main commands:
+  init          Prepare your working directory for other commands
+  plan          Show changes required by the current configuration
+
+Global options (use these before the subcommand, if any):
+  -chdir=DIR    Switch to a different working directory before executing the given subcommand.
+  -help         Show this help output or the help for a specified subcommand.
+  -version      An alias for the "version" subcommand.
+"#;
+
+    const WRAPPED_TWO_COLUMN_HELP: &str = r#"
+Unit Commands:
+  list-paths [PATTERN...]             List path units currently in memory,
+                                      ordered by path
+"#;
+
+    const MIXED_TWO_COLUMN_AND_FLAGS_HELP: &str = r#"
+Usage: svcctl [OPTIONS] <command>
+
+Common commands:
+  start             Start the service
+  stop              Stop the service
+
+  -v, --verbose     Enable verbose output
+"#;
+
+    const NUMERIC_FLAGS_HELP: &str = r#"
+Usage: sockctl [OPTIONS]
+
+  -4, --ipv4          display only IP version 4 sockets
+  -6, --ipv6          display only IP version 6 sockets
+  -0, --packet        display PACKET sockets
+"#;
+
+    const OPTIONS_PLUS_SECTIONLESS_HELP: &str = r#"
+Usage: datactl [OPTIONS]
+
+Options:
+  -v, --verbose       Enable verbose logging
+
+Advanced:
+  -0, --null          end each output line with NUL, not newline
+"#;
+
+    const EXAMPLE_INVOCATION_HELP: &str = r#"
+Examples:
+  tar -cf archive.tar foo bar  # Create archive.tar from files foo and bar.
+"#;
+
+    const LONG_ALIAS_FLAG_HELP: &str = r#"
+Options:
+  --old-archive, --portability same as --format=v7
+"#;
+
+    const USAGE_GRAMMAR_HELP: &str = r#"
+where  OBJECT := { address | route } OPTIONS := { -4 | -6 | -0 | -j[son] }
+"#;
+
     #[test]
     fn test_detect_clap_format() {
         let mut parser = HelpParser::new("myapp", CLAP_HELP);
@@ -1508,6 +1827,7 @@ Flags:
         let diagnostics = parser.diagnostics();
         assert!(diagnostics.relevant_lines > 0);
         assert!(diagnostics.coverage() > 0.0);
+        assert!(diagnostics.coverage() <= 1.0);
         assert!(!diagnostics.format_scores.is_empty());
     }
 
@@ -1550,5 +1870,172 @@ Flags:
         assert!(schema.find_subcommand("start").is_some());
         assert!(schema.find_subcommand("stop").is_some());
         assert!(schema.find_subcommand("restart").is_some());
+    }
+
+    #[test]
+    fn test_parse_git_style_commands_header_and_rows() {
+        let mut parser = HelpParser::new("git", GIT_STYLE_COMMANDS_HELP);
+        let schema = parser.parse().unwrap();
+
+        assert!(schema.find_subcommand("clone").is_some());
+        assert!(schema.find_subcommand("init").is_some());
+        assert!(schema.find_subcommand("add").is_some());
+    }
+
+    #[test]
+    fn test_parse_subcommands_with_placeholder_tail() {
+        let mut parser = HelpParser::new("systemctl", SYSTEMCTL_STYLE_HELP);
+        let schema = parser.parse().unwrap();
+
+        assert!(schema.find_subcommand("start").is_some());
+        assert!(schema.find_subcommand("stop").is_some());
+    }
+
+    #[test]
+    fn test_parse_section_header_with_global_options_and_single_dash_word_flags() {
+        let mut parser = HelpParser::new("terraform", TERRAFORM_STYLE_HELP);
+        let schema = parser.parse().unwrap();
+
+        assert!(schema.find_subcommand("init").is_some());
+        assert!(schema.find_subcommand("plan").is_some());
+
+        let chdir = schema
+            .global_flags
+            .iter()
+            .find(|flag| flag.short.as_deref() == Some("-chdir"));
+        assert!(chdir.is_some());
+        assert!(chdir.expect("chdir flag should exist").takes_value);
+
+        let help = schema
+            .global_flags
+            .iter()
+            .find(|flag| flag.short.as_deref() == Some("-help"));
+        assert!(help.is_some());
+        assert!(!help.expect("help flag should exist").takes_value);
+    }
+
+    #[test]
+    fn test_parse_wrapped_two_column_subcommand_description() {
+        let mut parser = HelpParser::new("systemctl", WRAPPED_TWO_COLUMN_HELP);
+        let schema = parser.parse().unwrap();
+
+        let list_paths = schema
+            .find_subcommand("list-paths")
+            .expect("list-paths subcommand should exist");
+        let description = list_paths.description.as_deref().unwrap_or_default();
+        assert!(description.contains("List path units currently in memory"));
+        assert!(description.contains("ordered by path"));
+    }
+
+    #[test]
+    fn test_parse_two_column_subcommands_when_flags_exist() {
+        let mut parser = HelpParser::new("svcctl", MIXED_TWO_COLUMN_AND_FLAGS_HELP);
+        let schema = parser.parse().unwrap();
+
+        assert!(schema.find_subcommand("start").is_some());
+        assert!(schema.find_subcommand("stop").is_some());
+        assert!(
+            schema
+                .global_flags
+                .iter()
+                .any(|flag| flag.long.as_deref() == Some("--verbose"))
+        );
+    }
+
+    #[test]
+    fn test_diagnostics_filters_prose_and_recognizes_headers() {
+        let mut parser = HelpParser::new("terraform", TERRAFORM_STYLE_HELP);
+        let _schema = parser.parse().unwrap();
+        let diagnostics = parser.diagnostics();
+
+        assert!(!diagnostics.unresolved_lines.iter().any(|line| {
+            line.contains("available commands for execution")
+                || line.contains("less common or more advanced commands")
+        }));
+        assert!(
+            !diagnostics
+                .unresolved_lines
+                .iter()
+                .any(|line| line.trim() == "Main commands:")
+        );
+    }
+
+    #[test]
+    fn test_parse_numeric_short_flags() {
+        let mut parser = HelpParser::new("sockctl", NUMERIC_FLAGS_HELP);
+        let schema = parser.parse().unwrap();
+
+        assert!(
+            schema
+                .global_flags
+                .iter()
+                .any(|flag| flag.short.as_deref() == Some("-4")
+                    && flag.long.as_deref() == Some("--ipv4"))
+        );
+        assert!(
+            schema
+                .global_flags
+                .iter()
+                .any(|flag| flag.short.as_deref() == Some("-6")
+                    && flag.long.as_deref() == Some("--ipv6"))
+        );
+        assert!(
+            schema
+                .global_flags
+                .iter()
+                .any(|flag| flag.short.as_deref() == Some("-0")
+                    && flag.long.as_deref() == Some("--packet"))
+        );
+    }
+
+    #[test]
+    fn test_parse_sectionless_flags_as_top_up_when_options_exist() {
+        let mut parser = HelpParser::new("datactl", OPTIONS_PLUS_SECTIONLESS_HELP);
+        let schema = parser.parse().unwrap();
+
+        assert!(
+            schema
+                .global_flags
+                .iter()
+                .any(|flag| flag.long.as_deref() == Some("--verbose"))
+        );
+        assert!(
+            schema
+                .global_flags
+                .iter()
+                .any(|flag| flag.short.as_deref() == Some("-0")
+                    && flag.long.as_deref() == Some("--null"))
+        );
+    }
+
+    #[test]
+    fn test_diagnostics_skips_example_invocation_lines() {
+        let mut parser = HelpParser::new("tar", EXAMPLE_INVOCATION_HELP);
+        let _schema = parser.parse().unwrap();
+        let diagnostics = parser.diagnostics();
+
+        assert!(diagnostics.unresolved_lines.is_empty());
+    }
+
+    #[test]
+    fn test_parse_long_flag_with_comma_aliases() {
+        let mut parser = HelpParser::new("tar", LONG_ALIAS_FLAG_HELP);
+        let schema = parser.parse().unwrap();
+
+        assert!(
+            schema
+                .global_flags
+                .iter()
+                .any(|flag| flag.long.as_deref() == Some("--old-archive"))
+        );
+    }
+
+    #[test]
+    fn test_diagnostics_skips_usage_grammar_lines() {
+        let mut parser = HelpParser::new("ip", USAGE_GRAMMAR_HELP);
+        let _schema = parser.parse().unwrap();
+        let diagnostics = parser.diagnostics();
+
+        assert!(diagnostics.unresolved_lines.is_empty());
     }
 }
