@@ -12,8 +12,14 @@
   - [x] Update `src/intelligence/schema/mod.rs` exports
 - [x] Phase 2: Core package format/validation/merge
 - [x] Phase 3: Discovery CLI + fixture tests
-- [ ] Phase 4: Curated schema repository + validation workflow
-- [ ] Phase 5: Build-time bundle + embedded `SchemaIndex`
+- [x] Phase 4: Curated schema repository + validation workflow
+  - [x] Added `schemas/curated/*.json` baseline (17 commands)
+  - [x] Validation command wired and passing: `cargo run -p command-schema-discovery -- validate schemas/curated`
+  - [ ] Expand curated coverage for missing devops tools (docker/kubectl/npm/pnpm/yarn) on a host where they are installed
+- [x] Phase 5: Build-time bundle + embedded `SchemaIndex`
+  - [x] Added root `build.rs` deterministic bundle generation to `$OUT_DIR/embedded_schemas.json`
+  - [x] Added `$OUT_DIR/schema_meta.rs` generation with bundle metadata
+  - [x] Added `src/intelligence/schema_index.rs` loader + lookup APIs + tests
 - [ ] Phase 6: Suggestion pipeline migration to `SchemaIndex`
 - [ ] Phase 7: Bootstrap simplification to schema-driven hierarchy seeding
 - [ ] Phase 8: Runtime probing removal + legacy migration cutoff

@@ -1,0 +1,10 @@
+{
+  "command": "find",
+  "description": "Default path is the current directory; default expression is -print.",
+  "global_flags": [],
+  "subcommands": [],
+  "positional": [],
+  "source": "HelpCommand",
+  "confidence": 0.65,
+  "version": null
+}

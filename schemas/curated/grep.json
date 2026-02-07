@@ -1,0 +1,10 @@
+{
+  "command": "grep",
+  "description": "Search for PATTERNS in each FILE.",
+  "global_flags": [],
+  "subcommands": [],
+  "positional": [],
+  "source": "HelpCommand",
+  "confidence": 0.65,
+  "version": null
+}

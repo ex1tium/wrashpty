@@ -1,0 +1,10 @@
+{
+  "command": "ssh",
+  "description": "[-c cipher_spec] [-D [bind_address:]port] [-E log_file]",
+  "global_flags": [],
+  "subcommands": [],
+  "positional": [],
+  "source": "HelpCommand",
+  "confidence": 0.55,
+  "version": null
+}
