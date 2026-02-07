@@ -333,10 +333,19 @@ fn wait_for_child_with_timeout(
 /// Checks if text looks like help output.
 fn is_help_output(text: &str) -> bool {
     let text_lower = text.to_lowercase();
+    let trimmed = text.trim();
 
     // Must have some minimum content
-    if text.len() < 40 {
+    if text.len() < 20 {
         return false;
+    }
+
+    // Explicit usage line is a strong help indicator for compact outputs.
+    if trimmed
+        .lines()
+        .any(|line| line.trim_start().to_lowercase().starts_with("usage:"))
+    {
+        return true;
     }
 
     // Should contain help-like keywords

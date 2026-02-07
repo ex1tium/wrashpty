@@ -91,6 +91,9 @@ struct HelpPatterns {
     // Value indicators
     choice_values: Regex,
 
+    // Formatting artifacts
+    line_of_dashes: Regex,
+
     // Version extraction
     version_number: Regex,
 }
@@ -102,19 +105,19 @@ impl HelpPatterns {
             short_flag: Regex::new(r"^\s*(-[a-zA-Z0-9])(?:\s|,|\[|\||$)").unwrap(),
             // -chdir, -log-level, etc (single-dash long options used by some CLIs)
             single_dash_word_flag: Regex::new(
-                r"^\s*(-[a-zA-Z][a-zA-Z0-9-]{1,})(?:\s|=|<|\[|\||$)"
+                r"^\s*(-[a-zA-Z][a-zA-Z0-9-]{1,})(?:\s|,|=|<|\[|\||$)"
             )
             .unwrap(),
             // --verbose, --help
-            long_flag: Regex::new(r"^\s*(--[a-zA-Z][-a-zA-Z0-9]*)(?:\s|=|\[|,|\||\)|$)").unwrap(),
+            long_flag: Regex::new(r"^\s*(--[a-zA-Z][-a-zA-Z0-9.]*)(?:\s|=|\[|,|\||\)|$)").unwrap(),
             // -v, --verbose  OR  -v/--verbose
             combined_flag: Regex::new(
-                r"^\s*(-[a-zA-Z0-9])(?:\s*,\s*|\s*/\s*|\s+)(--[a-zA-Z][-a-zA-Z0-9]*)"
+                r"^\s*(-[a-zA-Z0-9]{1,3})(?:\s*,\s*|\s*/\s*|\s+)(--[a-zA-Z][-a-zA-Z0-9.]*)"
             ).unwrap(),
             // --flag=VALUE, --flag <value>, --flag [value], -f VALUE
             // Only match: =VALUE, <VALUE>, [value], or ALLCAPS right after flag
             flag_with_value: Regex::new(
-                r"(?:=([A-Za-z_]+)|[<\[]([A-Za-z_]+)[>\]]|(?:--[a-zA-Z][-a-zA-Z0-9]*|-[a-zA-Z0-9])\s+([A-Z][A-Z_]+)(?:\s|$))"
+                r"(?:=([A-Za-z_]+)|[<\[]([A-Za-z_]+)[>\]]|(?:--[a-zA-Z][-a-zA-Z0-9.]*|-[a-zA-Z0-9]{1,3})\s+([A-Z][A-Z_]+)(?:\s|$))"
             ).unwrap(),
 
             // Section headers (case insensitive)
@@ -136,6 +139,8 @@ impl HelpPatterns {
             choice_values: Regex::new(
                 r"\{([^}]+)\}"
             ).unwrap(),
+
+            line_of_dashes: Regex::new(r"^-{8,}$").unwrap(),
 
             // Version number extraction
             version_number: Regex::new(r"(\d+\.\d+(?:\.\d+)?)").unwrap(),
@@ -273,6 +278,17 @@ impl HelpParser {
             }
         }
 
+        // Stty-style named settings and similar rows are structural command
+        // tokens, but often appear in mixed sections that the block parser does
+        // not fully capture.
+        let (named_settings, named_settings_recognized) =
+            self.parse_named_setting_rows(&indexed_lines);
+        if !named_settings.is_empty() {
+            recognized_indices.extend(named_settings_recognized);
+            parsers_used.push("named-setting-rows".to_string());
+            schema.subcommands.extend(named_settings);
+        }
+
         // Stage 3: flag extraction fallbacks.
 
         // GNU and many custom CLIs list additional flags outside explicit
@@ -297,6 +313,7 @@ impl HelpParser {
 
         schema.global_flags = Self::dedupe_flags(schema.global_flags);
         schema.subcommands = Self::dedupe_subcommands(schema.subcommands);
+        self.apply_flag_choice_hints(&indexed_lines, &mut schema.global_flags, &mut recognized_indices);
 
         // Calculate confidence based on what we extracted
         schema.confidence = self.calculate_confidence(&schema);
@@ -639,9 +656,15 @@ impl HelpParser {
     fn normalize_help_output(raw: &str) -> String {
         static ANSI_RE: LazyLock<Regex> =
             LazyLock::new(|| Regex::new(r"\x1b\[[0-9;?]*[ -/]*[@-~]").unwrap());
+        static OVERSTRIKE_RE: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r".\x08").unwrap());
 
         let stripped = ANSI_RE.replace_all(raw, "");
-        let replaced = stripped.replace("\r\n", "\n").replace('\r', "\n");
+        let mut cleaned = stripped.into_owned();
+        while OVERSTRIKE_RE.is_match(&cleaned) {
+            cleaned = OVERSTRIKE_RE.replace_all(&cleaned, "").into_owned();
+        }
+        let replaced = cleaned.replace("\r\n", "\n").replace('\r', "\n");
 
         let mut normalized: Vec<String> = Vec::new();
         for line in replaced.lines() {
@@ -1138,6 +1161,46 @@ impl HelpParser {
         (Self::dedupe_flags(flags), recognized)
     }
 
+    fn parse_named_setting_rows(
+        &self,
+        lines: &[IndexedLine],
+    ) -> (Vec<SubcommandSchema>, HashSet<usize>) {
+        let mut recognized = HashSet::new();
+        let mut subcommands = Vec::new();
+        let mut seen = HashSet::new();
+
+        for line in lines {
+            let trimmed = line.text.trim();
+            let Some((left, right)) = Self::split_two_columns(trimmed) else {
+                continue;
+            };
+            if left.starts_with('-') || left.contains(' ') {
+                continue;
+            }
+            if !Self::is_valid_command_name(left) {
+                continue;
+            }
+
+            let right_lower = right.to_ascii_lowercase();
+            let looks_like_setting = right_lower.starts_with("same as")
+                || right_lower.starts_with("print ")
+                || right_lower.starts_with("set ")
+                || right_lower.starts_with("tell ");
+            if !looks_like_setting {
+                continue;
+            }
+
+            if seen.insert(left.to_string()) {
+                let mut sub = SubcommandSchema::new(left);
+                sub.description = Some(right.to_string());
+                subcommands.push(sub);
+                recognized.insert(line.index);
+            }
+        }
+
+        (subcommands, recognized)
+    }
+
     fn collect_usage_indices(&self, lines: &[IndexedLine]) -> HashSet<usize> {
         let mut recognized = HashSet::new();
         let mut in_usage = false;
@@ -1294,6 +1357,66 @@ impl HelpParser {
         deduped
     }
 
+    fn apply_flag_choice_hints(
+        &self,
+        lines: &[IndexedLine],
+        flags: &mut Vec<FlagSchema>,
+        recognized: &mut HashSet<usize>,
+    ) {
+        for (idx, line) in lines.iter().enumerate() {
+            let trimmed = line.text.trim();
+            let Some(rest) = trimmed.strip_prefix("Valid arguments for ") else {
+                continue;
+            };
+            let flag_name = rest.trim_end_matches(':').trim();
+            if !flag_name.starts_with('-') {
+                continue;
+            }
+
+            let mut next_index = idx + 1;
+            while next_index < lines.len() && lines[next_index].text.trim().is_empty() {
+                next_index += 1;
+            }
+            if next_index >= lines.len() {
+                continue;
+            }
+
+            let choice_line = lines[next_index].text.trim();
+            if !choice_line.contains(',') {
+                continue;
+            }
+            let choices = choice_line
+                .split(',')
+                .map(str::trim)
+                .filter(|token| Self::is_valid_command_name(token))
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>();
+            if choices.is_empty() {
+                continue;
+            }
+
+            if let Some(flag) = flags.iter_mut().find(|flag| {
+                flag.short.as_deref() == Some(flag_name) || flag.long.as_deref() == Some(flag_name)
+            }) {
+                flag.takes_value = true;
+                flag.value_type = ValueType::Choice(choices);
+            } else {
+                flags.push(FlagSchema {
+                    short: Some(flag_name.to_string()),
+                    long: None,
+                    value_type: ValueType::Choice(choices),
+                    takes_value: true,
+                    description: Some(format!("Valid arguments for {flag_name}")),
+                    multiple: false,
+                    conflicts_with: Vec::new(),
+                    requires: Vec::new(),
+                });
+            }
+            recognized.insert(line.index);
+            recognized.insert(lines[next_index].index);
+        }
+    }
+
     fn build_diagnostics(
         &self,
         lines: &[IndexedLine],
@@ -1343,6 +1466,15 @@ impl HelpParser {
 
     fn is_relevant_line(trimmed: &str) -> bool {
         if trimmed.is_empty() {
+            return false;
+        }
+        if trimmed.starts_with("---") {
+            return false;
+        }
+        if trimmed.starts_with("-<") || trimmed.starts_with("--<") {
+            return false;
+        }
+        if PATTERNS.line_of_dashes.is_match(trimmed) {
             return false;
         }
         if Self::is_usage_line(trimmed)
@@ -1683,6 +1815,33 @@ Options:
 
     const USAGE_GRAMMAR_HELP: &str = r#"
 where  OBJECT := { address | route } OPTIONS := { -4 | -6 | -0 | -j[son] }
+"#;
+
+    const DOTTED_LONG_FLAGS_HELP: &str = r#"
+Options:
+  --tls-min-v1.2  set default TLS minimum to TLSv1.2
+  --tls-max-v1.3  set default TLS maximum to TLSv1.3
+"#;
+
+    const MULTI_CHAR_SHORT_ALIAS_HELP: &str = r#"
+Options:
+  -nH, --no-host-directories       don't create host directories
+  -nv, --no-verbose                turn off verboseness
+"#;
+
+    const NAMED_SETTINGS_HELP: &str = r#"
+Special settings:
+   speed         print the terminal speed
+   cbreak        same as -icanon
+   sane          same as cread -ignbrk brkint -inlcr -igncr icrnl icanon
+"#;
+
+    const FLAG_CHOICE_HINT_HELP: &str = r#"
+Options:
+  -D debugopts
+
+Valid arguments for -D:
+exec, opt, rates, search, stat, time, tree, all, help
 "#;
 
     #[test]
@@ -2037,5 +2196,75 @@ Flags:
         let diagnostics = parser.diagnostics();
 
         assert!(diagnostics.unresolved_lines.is_empty());
+    }
+
+    #[test]
+    fn test_parse_dotted_long_flags() {
+        let mut parser = HelpParser::new("node", DOTTED_LONG_FLAGS_HELP);
+        let schema = parser.parse().unwrap();
+
+        assert!(
+            schema
+                .global_flags
+                .iter()
+                .any(|flag| flag.long.as_deref() == Some("--tls-min-v1.2"))
+        );
+        assert!(
+            schema
+                .global_flags
+                .iter()
+                .any(|flag| flag.long.as_deref() == Some("--tls-max-v1.3"))
+        );
+    }
+
+    #[test]
+    fn test_parse_multi_char_short_alias_flags() {
+        let mut parser = HelpParser::new("wget", MULTI_CHAR_SHORT_ALIAS_HELP);
+        let schema = parser.parse().unwrap();
+
+        assert!(
+            schema
+                .global_flags
+                .iter()
+                .any(|flag| flag.short.as_deref() == Some("-nH")
+                    && flag.long.as_deref() == Some("--no-host-directories"))
+        );
+        assert!(
+            schema
+                .global_flags
+                .iter()
+                .any(|flag| flag.short.as_deref() == Some("-nv")
+                    && flag.long.as_deref() == Some("--no-verbose"))
+        );
+    }
+
+    #[test]
+    fn test_parse_named_setting_rows_as_subcommands() {
+        let mut parser = HelpParser::new("stty", NAMED_SETTINGS_HELP);
+        let schema = parser.parse().unwrap();
+
+        assert!(schema.find_subcommand("speed").is_some());
+        assert!(schema.find_subcommand("cbreak").is_some());
+        assert!(schema.find_subcommand("sane").is_some());
+    }
+
+    #[test]
+    fn test_apply_flag_choice_hints_for_valid_arguments_block() {
+        let mut parser = HelpParser::new("find", FLAG_CHOICE_HINT_HELP);
+        let schema = parser.parse().unwrap();
+
+        let debug = schema
+            .global_flags
+            .iter()
+            .find(|flag| flag.short.as_deref() == Some("-D"))
+            .expect("expected -D flag to be present");
+        assert!(debug.takes_value);
+        match &debug.value_type {
+            ValueType::Choice(values) => {
+                assert!(values.contains(&"exec".to_string()));
+                assert!(values.contains(&"help".to_string()));
+            }
+            other => panic!("expected Choice value type, got {other:?}"),
+        }
     }
 }
