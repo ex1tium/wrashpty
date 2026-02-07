@@ -201,6 +201,7 @@ impl HelpParser {
         let mut recognized_indices: HashSet<usize> = HashSet::new();
         let mut parsers_used: Vec<String> = Vec::new();
         recognized_indices.extend(sections.header_indices.iter().copied());
+        let keybinding_document = Self::looks_like_keybinding_document(&indexed_lines);
 
         // Capture usage rows as recognized structural context, even when we do
         // not derive additional schema entities from them.
@@ -268,7 +269,7 @@ impl HelpParser {
         // Generic two-column command rows when explicit command sections were not
         // identified (or were empty). This is still structural and should happen
         // before more permissive fallbacks.
-        if schema.subcommands.is_empty() {
+        if schema.subcommands.is_empty() && !keybinding_document {
             let (generic_subcommands, generic_recognized) =
                 self.parse_two_column_subcommands(&indexed_lines);
             if !generic_subcommands.is_empty() {
@@ -276,6 +277,8 @@ impl HelpParser {
                 parsers_used.push("generic-two-column-subcommands".to_string());
                 schema.subcommands = generic_subcommands;
             }
+        } else if schema.subcommands.is_empty() && keybinding_document {
+            parsers_used.push("generic-two-column-skipped:keybinding-doc".to_string());
         }
 
         // Stty-style named settings and similar rows are structural command
@@ -425,10 +428,10 @@ impl HelpParser {
             return Some(SectionKind::Subcommands);
         }
         let lower = trimmed.to_lowercase();
-        if trimmed.ends_with(':') && lower.contains("command") {
-            return Some(SectionKind::Subcommands);
-        }
-        if trimmed.ends_with(':') && lower.contains("action") {
+        if trimmed.ends_with(':')
+            && trimmed.len() <= 64
+            && Self::looks_like_subcommand_section_header(&lower)
+        {
             return Some(SectionKind::Subcommands);
         }
         if trimmed.ends_with(':') && lower.contains("option") {
@@ -447,6 +450,39 @@ impl HelpParser {
             return Some(SectionKind::Arguments);
         }
         None
+    }
+
+    fn looks_like_subcommand_section_header(lower: &str) -> bool {
+        let positives = [
+            "command",
+            "commands",
+            "subcommand",
+            "subcommands",
+            "action",
+            "actions",
+            "workflow",
+            "task",
+            "tasks",
+        ];
+        if !positives.iter().any(|needle| lower.contains(needle)) {
+            return false;
+        }
+
+        let negatives = [
+            "environment",
+            "variable",
+            "option",
+            "flag",
+            "argument",
+            "example",
+            "column",
+            "field",
+            "property",
+            "setting",
+            "key",
+            "keyboard",
+        ];
+        !negatives.iter().any(|needle| lower.contains(needle))
     }
 
     /// Parses subcommand lines.
@@ -908,12 +944,22 @@ impl HelpParser {
         let mut recognized = HashSet::new();
         let mut subcommands = Vec::new();
         let mut current_block: Vec<SectionEntry> = Vec::new();
+        let mut current_header: Option<String> = None;
 
         let flush_block = |parser: &HelpParser,
                            block: &mut Vec<SectionEntry>,
+                           header: Option<&str>,
                            recognized_set: &mut HashSet<usize>,
                            out_subcommands: &mut Vec<SubcommandSchema>| {
             if block.len() >= 2 {
+                if header.is_some_and(Self::is_non_command_block_header) {
+                    block.clear();
+                    return;
+                }
+                if Self::block_looks_like_keybinding_table(block) {
+                    block.clear();
+                    return;
+                }
                 let refs = block
                     .iter()
                     .map(|entry| entry.text.as_str())
@@ -930,20 +976,47 @@ impl HelpParser {
         for line in lines {
             let trimmed = line.text.trim();
             if trimmed.is_empty() {
-                flush_block(self, &mut current_block, &mut recognized, &mut subcommands);
+                flush_block(
+                    self,
+                    &mut current_block,
+                    current_header.as_deref(),
+                    &mut recognized,
+                    &mut subcommands,
+                );
+                current_header = None;
                 continue;
             }
 
             if self.detect_section_header(trimmed).is_some()
-                || Self::is_block_header(trimmed)
                 || trimmed.starts_with('-')
             {
-                flush_block(self, &mut current_block, &mut recognized, &mut subcommands);
+                flush_block(
+                    self,
+                    &mut current_block,
+                    current_header.as_deref(),
+                    &mut recognized,
+                    &mut subcommands,
+                );
+                current_header = None;
+                continue;
+            }
+
+            if Self::is_block_header(trimmed) {
+                flush_block(
+                    self,
+                    &mut current_block,
+                    current_header.as_deref(),
+                    &mut recognized,
+                    &mut subcommands,
+                );
+                current_header = Some(trimmed.to_ascii_lowercase());
                 continue;
             }
 
             let is_command_row = Self::split_two_columns(trimmed)
-                .is_some_and(|(left, _)| self.is_subcommand_name_column(left));
+                .is_some_and(|(left, _)| {
+                    self.is_generic_subcommand_name_column(left, current_header.as_deref())
+                });
 
             if is_command_row {
                 current_block.push(SectionEntry {
@@ -951,16 +1024,108 @@ impl HelpParser {
                     text: trimmed.to_string(),
                 });
             } else {
-                flush_block(self, &mut current_block, &mut recognized, &mut subcommands);
+                flush_block(
+                    self,
+                    &mut current_block,
+                    current_header.as_deref(),
+                    &mut recognized,
+                    &mut subcommands,
+                );
             }
         }
 
-        flush_block(self, &mut current_block, &mut recognized, &mut subcommands);
+        flush_block(
+            self,
+            &mut current_block,
+            current_header.as_deref(),
+            &mut recognized,
+            &mut subcommands,
+        );
         (Self::dedupe_subcommands(subcommands), recognized)
     }
 
     fn is_block_header(trimmed: &str) -> bool {
-        trimmed.ends_with(':') && trimmed.len() < 64
+        if trimmed.ends_with(':') && trimmed.len() < 64 {
+            return true;
+        }
+
+        let lower = trimmed.to_ascii_lowercase();
+        lower.contains("summary of") && lower.contains("commands")
+    }
+
+    fn is_non_command_block_header(header: &str) -> bool {
+        let lower = header.to_ascii_lowercase();
+        if lower.contains("summary of") && lower.contains("commands") {
+            return true;
+        }
+        let command_like = ["command", "subcommand", "action", "workflow", "task"];
+        if command_like.iter().any(|needle| lower.contains(needle)) {
+            return false;
+        }
+
+        let non_command_like = [
+            "value",
+            "values",
+            "column",
+            "columns",
+            "field",
+            "fields",
+            "variable",
+            "variables",
+            "environment",
+            "format",
+            "formats",
+            "style",
+            "styles",
+            "attribute",
+            "attributes",
+            "modifiers",
+            "setting",
+            "settings",
+            "keys",
+            "key",
+        ];
+        non_command_like
+            .iter()
+            .any(|needle| lower.contains(needle))
+    }
+
+    fn block_looks_like_keybinding_table(block: &[SectionEntry]) -> bool {
+        let mut marker_rows = 0usize;
+        let mut short_key_rows = 0usize;
+
+        for entry in block {
+            let Some((left, right)) = Self::split_two_columns(entry.text.as_str()) else {
+                continue;
+            };
+            let left_trimmed = left.trim();
+            let left_lower = left_trimmed.to_ascii_lowercase();
+            let right_trimmed = right.trim();
+
+            let explicit_marker = left_trimmed.contains("ESC")
+                || left_lower.contains("ctrl")
+                || left_lower.contains("arrow")
+                || left_lower.contains("backspace")
+                || left_lower.contains("delete")
+                || left_trimmed.contains('^')
+                || right_trimmed.contains('^');
+            if explicit_marker {
+                marker_rows += 1;
+            }
+
+            let single_token = !left_trimmed.contains(',')
+                && left_trimmed
+                    .split_whitespace()
+                    .all(|token| token.len() <= 3)
+                && left_trimmed
+                    .chars()
+                    .any(|ch| ch.is_ascii_alphabetic() || matches!(ch, '^' | '-'));
+            if single_token {
+                short_key_rows += 1;
+            }
+        }
+
+        marker_rows > 0 || (block.len() >= 4 && short_key_rows * 2 >= block.len())
     }
 
     fn is_subcommand_name_column(&self, left: &str) -> bool {
@@ -994,6 +1159,123 @@ impl HelpParser {
         names
             .iter()
             .all(|name| Self::is_valid_command_name(name) || name.chars().all(|ch| ch == '.'))
+    }
+
+    fn is_generic_subcommand_name_column(&self, left: &str, header: Option<&str>) -> bool {
+        if header.is_some_and(Self::is_non_command_block_header) {
+            return false;
+        }
+        if !self.is_subcommand_name_column(left) {
+            return false;
+        }
+
+        let names = left
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .collect::<Vec<_>>();
+        if names.is_empty() {
+            return false;
+        }
+
+        if names.iter().any(|name| {
+            !name
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_lowercase())
+        }) {
+            return false;
+        }
+
+        if names
+            .iter()
+            .all(|name| !name.chars().any(|ch| ch.is_ascii_lowercase()))
+        {
+            return false;
+        }
+
+        if names
+            .iter()
+            .any(|name| Self::looks_like_placeholder_subcommand_token(name))
+        {
+            return false;
+        }
+
+        if names
+            .iter()
+            .any(|name| Self::looks_like_non_command_value_token(name))
+        {
+            return false;
+        }
+
+        true
+    }
+
+    fn looks_like_keybinding_document(lines: &[IndexedLine]) -> bool {
+        let keybinding_markers = lines
+            .iter()
+            .map(|line| line.text.to_ascii_lowercase())
+            .filter(|line| {
+                line.contains("esc-")
+                    || line.contains("ctrl-")
+                    || line.contains("^")
+                    || line.contains("leftarrow")
+                    || line.contains("rightarrow")
+                    || line.contains("summary of less commands")
+            })
+            .count();
+        keybinding_markers >= 8
+    }
+
+    fn looks_like_placeholder_subcommand_token(token: &str) -> bool {
+        let token = token.trim();
+        if token.is_empty() {
+            return true;
+        }
+        if token == "_" {
+            return true;
+        }
+        if token.chars().all(|ch| ch.is_ascii_digit()) {
+            return true;
+        }
+        if token.ends_with("...") {
+            return true;
+        }
+
+        token.len() <= 4
+            && token
+                .chars()
+                .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '-')
+    }
+
+    fn looks_like_non_command_value_token(token: &str) -> bool {
+        let lower = token.trim().to_ascii_lowercase();
+        matches!(
+            lower.as_str(),
+            "none"
+                | "off"
+                | "numbered"
+                | "existing"
+                | "simple"
+                | "never"
+                | "nil"
+                | "all"
+                | "auto"
+                | "always"
+                | "default"
+                | "older"
+                | "warn"
+                | "warn-nopipe"
+                | "exit"
+                | "exit-nopipe"
+                | "once"
+                | "pages"
+                | "or"
+                | "while"
+                | "gnu"
+                | "report"
+                | "full"
+        )
     }
 
     fn classify_formats(&self, lines: &[&str]) -> Vec<FormatScore> {
@@ -1311,6 +1593,12 @@ impl HelpParser {
                 continue;
             }
             if !Self::is_valid_command_name(left) {
+                continue;
+            }
+            if left.chars().any(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit()) {
+                continue;
+            }
+            if !left.chars().any(|ch| ch.is_ascii_lowercase()) {
                 continue;
             }
 
@@ -1974,6 +2262,55 @@ Common commands:
   -v, --verbose     Enable verbose output
 "#;
 
+    const VALUE_TABLE_HELP: &str = r#"
+The version control method may be selected via the --backup option.
+Here are the values:
+  none, off       never make backups
+  numbered, t     make numbered backups
+  existing, nil   numbered if numbered backups exist, simple otherwise
+  simple, never   always make simple backups
+"#;
+
+    const COLUMN_TABLE_HELP: &str = r#"
+Available output columns:
+  NAME        device name
+  SIZE        device size
+  MOUNTPOINT  where mounted
+"#;
+
+    const KEYBINDING_TABLE_HELP: &str = r#"
+SUMMARY OF LESS COMMANDS
+  h                 Display this help.
+  q                 Exit.
+  e                 Forward one line.
+  ESC-SPACE         Forward one window, but don't stop at end-of-file.
+  ctrl-LeftArrow    Move cursor left one word.
+"#;
+
+    const NODE_ENVIRONMENT_HEADER_HELP: &str = r#"
+Environment variables:
+  NODE_PATH      ':'-separated list of directories prefixed to the module search path
+  NODE_OPTIONS   set CLI options for launched processes
+"#;
+
+    const LONG_SENTENCE_COMMAND_HEADER_HELP: &str = r#"
+To remove a file whose name starts with '-', for example '-foo', use one of these commands:
+  rm -- -foo
+  rm ./-foo
+"#;
+
+    const DENSE_KEYBINDING_DOC_HELP: &str = r#"
+SUMMARY OF LESS COMMANDS
+  e  ^E  j  ^N  CR  *  Forward one line.
+  y  ^Y  k  ^K  ^P  *  Backward one line.
+  ESC-SPACE         *  Forward one window.
+  ESC-(  LeftArrow  *  Left one half screen width.
+  ESC-}  ^RightArrow   Right to last column displayed.
+  p  %              *  Go to beginning of file.
+  t                 *  Go to next tag.
+  V                    Print version number of less.
+"#;
+
     const NUMERIC_FLAGS_HELP: &str = r#"
 Usage: sockctl [OPTIONS]
 
@@ -2329,6 +2666,54 @@ Flags:
     }
 
     #[test]
+    fn test_generic_two_column_skips_choice_value_blocks() {
+        let mut parser = HelpParser::new("cp", VALUE_TABLE_HELP);
+        let schema = parser.parse().unwrap();
+
+        assert!(schema.subcommands.is_empty());
+    }
+
+    #[test]
+    fn test_generic_two_column_skips_column_header_tables() {
+        let mut parser = HelpParser::new("lsblk", COLUMN_TABLE_HELP);
+        let schema = parser.parse().unwrap();
+
+        assert!(schema.subcommands.is_empty());
+    }
+
+    #[test]
+    fn test_generic_two_column_skips_keybinding_tables() {
+        let mut parser = HelpParser::new("less", KEYBINDING_TABLE_HELP);
+        let schema = parser.parse().unwrap();
+
+        assert!(schema.subcommands.is_empty());
+    }
+
+    #[test]
+    fn test_environment_variable_header_is_not_subcommand_section() {
+        let mut parser = HelpParser::new("node", NODE_ENVIRONMENT_HEADER_HELP);
+        let schema = parser.parse().unwrap();
+
+        assert!(schema.subcommands.is_empty());
+    }
+
+    #[test]
+    fn test_long_sentence_with_commands_colon_is_not_subcommand_section() {
+        let mut parser = HelpParser::new("rm", LONG_SENTENCE_COMMAND_HEADER_HELP);
+        let schema = parser.parse().unwrap();
+
+        assert!(schema.subcommands.is_empty());
+    }
+
+    #[test]
+    fn test_skip_generic_subcommands_for_dense_keybinding_docs() {
+        let mut parser = HelpParser::new("less", DENSE_KEYBINDING_DOC_HELP);
+        let schema = parser.parse().unwrap();
+
+        assert!(schema.subcommands.is_empty());
+    }
+
+    #[test]
     fn test_diagnostics_filters_prose_and_recognizes_headers() {
         let mut parser = HelpParser::new("terraform", TERRAFORM_STYLE_HELP);
         let _schema = parser.parse().unwrap();
@@ -2473,6 +2858,22 @@ Flags:
         assert!(schema.find_subcommand("speed").is_some());
         assert!(schema.find_subcommand("cbreak").is_some());
         assert!(schema.find_subcommand("sane").is_some());
+    }
+
+    #[test]
+    fn test_named_setting_rows_skip_placeholder_style_tokens() {
+        let help = r#"
+Special settings:
+   N             set the input and output speeds to N bauds
+   csN           set character size to N bits
+   speed         print the terminal speed
+"#;
+        let mut parser = HelpParser::new("stty", help);
+        let schema = parser.parse().unwrap();
+
+        assert!(schema.find_subcommand("N").is_none());
+        assert!(schema.find_subcommand("csN").is_none());
+        assert!(schema.find_subcommand("speed").is_some());
     }
 
     #[test]
