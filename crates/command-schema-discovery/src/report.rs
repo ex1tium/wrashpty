@@ -17,9 +17,21 @@ pub struct ProbeAttemptReport {
     pub exit_code: Option<i32>,
     pub timed_out: bool,
     pub error: Option<String>,
+    pub rejection_reason: Option<String>,
     pub output_source: Option<String>,
     pub output_len: usize,
+    pub output_preview: Option<String>,
     pub accepted: bool,
+}
+
+/// Quality tier assigned to one extraction report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QualityTier {
+    High,
+    Medium,
+    Low,
+    Failed,
 }
 
 /// Per-command extraction report.
@@ -27,6 +39,9 @@ pub struct ProbeAttemptReport {
 pub struct ExtractionReport {
     pub command: String,
     pub success: bool,
+    pub accepted_for_suggestions: bool,
+    pub quality_tier: QualityTier,
+    pub quality_reasons: Vec<String>,
     pub selected_format: Option<String>,
     pub format_scores: Vec<FormatScoreReport>,
     pub parsers_used: Vec<String>,

@@ -6,6 +6,9 @@ use command_schema_discovery::discover::{
     DiscoverConfig, build_report_bundle, bundle_schema_files, collect_schema_paths,
     discover_and_extract, load_and_validate_schemas,
 };
+use command_schema_discovery::extractor::{
+    DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_COVERAGE, ExtractionQualityPolicy,
+};
 
 const PACKAGE_VERSION: &str = "1.0.0";
 
@@ -44,6 +47,15 @@ struct ExtractArgs {
     /// Output directory for per-command JSON files.
     #[arg(long)]
     output: PathBuf,
+    /// Minimum schema confidence (0.0-1.0) required for acceptance.
+    #[arg(long, default_value_t = DEFAULT_MIN_CONFIDENCE)]
+    min_confidence: f64,
+    /// Minimum parser coverage (0.0-1.0) required for acceptance.
+    #[arg(long, default_value_t = DEFAULT_MIN_COVERAGE)]
+    min_coverage: f64,
+    /// Keep low-quality schemas instead of rejecting them.
+    #[arg(long)]
+    allow_low_quality: bool,
 }
 
 #[derive(Debug, Args)]
@@ -94,6 +106,12 @@ fn run_extract(args: ExtractArgs) -> Result<(), String> {
                 .to_string(),
         );
     }
+    if !(0.0..=1.0).contains(&args.min_confidence) {
+        return Err("--min-confidence must be between 0.0 and 1.0".to_string());
+    }
+    if !(0.0..=1.0).contains(&args.min_coverage) {
+        return Err("--min-coverage must be between 0.0 and 1.0".to_string());
+    }
 
     fs::create_dir_all(&args.output).map_err(|err| {
         format!(
@@ -107,6 +125,11 @@ fn run_extract(args: ExtractArgs) -> Result<(), String> {
         use_allowlist: args.allowlist,
         scan_path: args.scan_path,
         excluded_commands,
+        quality_policy: ExtractionQualityPolicy {
+            min_confidence: args.min_confidence,
+            min_coverage: args.min_coverage,
+            allow_low_quality: args.allow_low_quality,
+        },
     };
 
     let outcome = discover_and_extract(&config, PACKAGE_VERSION);

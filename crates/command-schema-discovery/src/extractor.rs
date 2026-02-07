@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info};
 
 use super::parser::{FormatScore, HelpParser};
-use super::report::{ExtractionReport, FormatScoreReport, ProbeAttemptReport};
+use super::report::{ExtractionReport, FormatScoreReport, ProbeAttemptReport, QualityTier};
 use command_schema_core::{ExtractionResult, HelpFormat, SubcommandSchema, validate_schema};
 
 /// Maximum depth for recursive subcommand probing.
@@ -22,6 +22,40 @@ const HELP_TIMEOUT_MS: u64 = 5000;
 
 /// Help flags to try in order.
 const HELP_FLAGS: &[&str] = &["--help", "-h", "help", "-?"];
+
+/// Suggested quality threshold for confidence in production runs.
+pub const DEFAULT_MIN_CONFIDENCE: f64 = 0.6;
+
+/// Suggested quality threshold for parser coverage in production runs.
+pub const DEFAULT_MIN_COVERAGE: f64 = 0.2;
+
+/// Policy controlling extraction quality acceptance.
+#[derive(Debug, Clone, Copy)]
+pub struct ExtractionQualityPolicy {
+    pub min_confidence: f64,
+    pub min_coverage: f64,
+    pub allow_low_quality: bool,
+}
+
+impl Default for ExtractionQualityPolicy {
+    fn default() -> Self {
+        Self {
+            min_confidence: DEFAULT_MIN_CONFIDENCE,
+            min_coverage: DEFAULT_MIN_COVERAGE,
+            allow_low_quality: false,
+        }
+    }
+}
+
+impl ExtractionQualityPolicy {
+    pub fn permissive() -> Self {
+        Self {
+            min_confidence: 0.0,
+            min_coverage: 0.0,
+            allow_low_quality: true,
+        }
+    }
+}
 
 /// Extraction output with both schema result and diagnostics report.
 pub struct ExtractionRun {
@@ -36,8 +70,10 @@ struct ProbeAttempt {
     exit_code: Option<i32>,
     timed_out: bool,
     error: Option<String>,
+    rejection_reason: Option<String>,
     output_source: Option<String>,
     output_len: usize,
+    output_preview: Option<String>,
     accepted: bool,
 }
 
@@ -49,8 +85,10 @@ impl ProbeAttempt {
             exit_code: None,
             timed_out: false,
             error: None,
+            rejection_reason: None,
             output_source: None,
             output_len: 0,
+            output_preview: None,
             accepted: false,
         }
     }
@@ -86,6 +124,7 @@ fn probe_command_help_with_metadata(command: &str) -> ProbeRun {
 
     let mut attempts = Vec::with_capacity(HELP_FLAGS.len());
     let base_command = parts[0].to_ascii_lowercase();
+    let env_overrides = command_specific_probe_env(base_command.as_str());
 
     for suffix in command_specific_probe_suffixes(base_command.as_str()) {
         let mut cmd_parts: Vec<String> = parts.iter().map(|part| (*part).to_string()).collect();
@@ -93,7 +132,7 @@ fn probe_command_help_with_metadata(command: &str) -> ProbeRun {
         let label = suffix.join(" ");
 
         debug!(command = ?cmd_parts, "Probing command-specific help");
-        let outcome = try_direct_probe(&cmd_parts, &label);
+        let outcome = try_direct_probe(&cmd_parts, &label, &env_overrides);
         if outcome.spawn_not_found {
             continue;
         }
@@ -119,7 +158,7 @@ fn probe_command_help_with_metadata(command: &str) -> ProbeRun {
         }
 
         debug!(command = ?cmd_parts, "Probing help");
-        let outcome = try_direct_probe(&cmd_parts, help_flag);
+        let outcome = try_direct_probe(&cmd_parts, help_flag, &env_overrides);
         if outcome.spawn_not_found {
             // Shell builtin fallback (e.g. `cd`) for commands that don't exist
             // as standalone executables.
@@ -127,7 +166,7 @@ fn probe_command_help_with_metadata(command: &str) -> ProbeRun {
                 command = ?cmd_parts,
                 "Direct spawn failed, trying shell fallback probe"
             );
-            let shell_probe = probe_shell_help(&parts, help_flag);
+            let shell_probe = probe_shell_help(&parts, help_flag, &env_overrides);
             attempts.push(shell_probe.attempt);
             if let Some(help_text) = shell_probe.accepted_output {
                 return ProbeRun {
@@ -171,6 +210,18 @@ fn command_specific_probe_suffixes(base_command: &str) -> Vec<Vec<&'static str>>
     }
 }
 
+fn command_specific_probe_env(base_command: &str) -> Vec<(&'static str, &'static str)> {
+    match base_command {
+        // Some ansible installations fail to resolve writable temp dirs in
+        // constrained environments unless this is explicitly overridden.
+        "ansible" => vec![
+            ("ANSIBLE_LOCAL_TEMP", "/tmp"),
+            ("ANSIBLE_REMOTE_TEMP", "/tmp"),
+        ],
+        _ => Vec::new(),
+    }
+}
+
 fn adapt_help_output_for_command(command: &str, help_text: String) -> String {
     let base_command = command
         .split_whitespace()
@@ -198,13 +249,21 @@ fn adapt_service_help_output(help_text: &str) -> String {
     adapted
 }
 
-fn try_direct_probe(cmd_parts: &[String], help_flag: &str) -> DirectProbeOutcome {
+fn try_direct_probe(
+    cmd_parts: &[String],
+    help_flag: &str,
+    env_overrides: &[(&str, &str)],
+) -> DirectProbeOutcome {
     let mut attempt = ProbeAttempt::new(help_flag, cmd_parts.to_vec());
-    let spawn_result = Command::new(&cmd_parts[0])
+    let mut command = Command::new(&cmd_parts[0]);
+    command
         .args(&cmd_parts[1..])
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
+        .stderr(Stdio::piped());
+    for (key, value) in env_overrides {
+        command.env(key, value);
+    }
+    let spawn_result = command.spawn();
 
     match spawn_result {
         Ok(mut child) => {
@@ -244,6 +303,7 @@ fn try_direct_probe(cmd_parts: &[String], help_flag: &str) -> DirectProbeOutcome
                     };
                     attempt.output_source = Some(output_source.to_string());
                     attempt.output_len = help_text.len();
+                    attempt.output_preview = output_preview(&help_text);
 
                     if is_help_output(&help_text) {
                         attempt.accepted = true;
@@ -254,6 +314,7 @@ fn try_direct_probe(cmd_parts: &[String], help_flag: &str) -> DirectProbeOutcome
                         };
                     }
 
+                    attempt.rejection_reason = Some(classify_rejection_reason(&help_text));
                     DirectProbeOutcome {
                         attempt,
                         accepted_output: None,
@@ -312,7 +373,11 @@ struct ShellProbeResult {
     accepted_output: Option<String>,
 }
 
-fn probe_shell_help(parts: &[&str], help_flag: &str) -> ShellProbeResult {
+fn probe_shell_help(
+    parts: &[&str],
+    help_flag: &str,
+    env_overrides: &[(&str, &str)],
+) -> ShellProbeResult {
     let shell_cmd = if help_flag == "help" {
         format!("help {}", parts.join(" "))
     } else {
@@ -322,12 +387,16 @@ fn probe_shell_help(parts: &[&str], help_flag: &str) -> ShellProbeResult {
     let argv = vec!["bash".to_string(), "-lc".to_string(), shell_cmd.clone()];
     let mut attempt = ProbeAttempt::new(help_flag, argv);
 
-    let spawn = Command::new("bash")
+    let mut command = Command::new("bash");
+    command
         .arg("-lc")
         .arg(&shell_cmd)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
+        .stderr(Stdio::piped());
+    for (key, value) in env_overrides {
+        command.env(key, value);
+    }
+    let spawn = command.spawn();
 
     let Ok(mut child) = spawn else {
         let err = spawn.err().map_or_else(
@@ -376,6 +445,7 @@ fn probe_shell_help(parts: &[&str], help_flag: &str) -> ShellProbeResult {
 
             attempt.output_source = Some(output_source.to_string());
             attempt.output_len = help_text.len();
+            attempt.output_preview = output_preview(&help_text);
             if is_help_output(&help_text) {
                 attempt.accepted = true;
                 return ShellProbeResult {
@@ -383,6 +453,7 @@ fn probe_shell_help(parts: &[&str], help_flag: &str) -> ShellProbeResult {
                     accepted_output: Some(help_text),
                 };
             }
+            attempt.rejection_reason = Some(classify_rejection_reason(&help_text));
 
             ShellProbeResult {
                 attempt,
@@ -451,6 +522,20 @@ fn is_help_output(text: &str) -> bool {
     let has_usage_line = trimmed
         .lines()
         .any(|line| line.trim_start().to_ascii_lowercase().starts_with("usage:"));
+    let has_structured_sections = trimmed.lines().any(|line| {
+        let normalized = line.trim_start().to_ascii_lowercase();
+        normalized.starts_with("options:")
+            || normalized.starts_with("flags:")
+            || normalized.starts_with("commands:")
+            || normalized.starts_with("arguments:")
+            || normalized.starts_with("positional arguments:")
+    });
+    let leading_window = trimmed
+        .lines()
+        .take(3)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_ascii_lowercase();
 
     let option_error_markers = [
         "illegal option",
@@ -460,8 +545,9 @@ fn is_help_output(text: &str) -> bool {
     ];
     if option_error_markers
         .iter()
-        .any(|marker| text_lower.contains(marker))
+        .any(|marker| leading_window.contains(marker))
         && !has_usage_line
+        && !has_structured_sections
     {
         return false;
     }
@@ -486,6 +572,60 @@ fn is_help_output(text: &str) -> bool {
     help_indicators.iter().any(|&ind| text_lower.contains(ind))
 }
 
+fn output_preview(text: &str) -> Option<String> {
+    const MAX_PREVIEW_LEN: usize = 160;
+
+    let first_non_empty = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    if first_non_empty.is_empty() {
+        return None;
+    }
+    if first_non_empty.chars().count() <= MAX_PREVIEW_LEN {
+        return Some(first_non_empty.to_string());
+    }
+    let truncated = first_non_empty
+        .chars()
+        .take(MAX_PREVIEW_LEN)
+        .collect::<String>();
+    Some(format!("{truncated}..."))
+}
+
+fn classify_rejection_reason(help_text: &str) -> String {
+    let lower = help_text.to_ascii_lowercase();
+
+    let environment_blocked_markers = [
+        "operation not permitted",
+        "permission denied",
+        "no new privileges",
+        "cannot open audit interface",
+        "unable to initialize netlink socket",
+    ];
+    if environment_blocked_markers
+        .iter()
+        .any(|marker| lower.contains(marker))
+    {
+        return "environment-blocked".to_string();
+    }
+
+    let option_error_markers = [
+        "illegal option",
+        "unknown option",
+        "invalid option",
+        "unrecognized option",
+    ];
+    if option_error_markers
+        .iter()
+        .any(|marker| lower.contains(marker))
+    {
+        return "option-error-output".to_string();
+    }
+
+    "not-help-output".to_string()
+}
+
 fn schema_has_entities(schema: &command_schema_core::CommandSchema) -> bool {
     !schema.global_flags.is_empty()
         || !schema.subcommands.is_empty()
@@ -506,6 +646,117 @@ fn extend_unique_warnings(target: &mut Vec<String>, warnings: impl IntoIterator<
     }
 }
 
+#[derive(Debug)]
+struct QualityAssessment {
+    accepted: bool,
+    tier: QualityTier,
+    reasons: Vec<String>,
+}
+
+fn assess_extraction_quality(
+    run: &ExtractionRun,
+    policy: ExtractionQualityPolicy,
+) -> QualityAssessment {
+    if !run.result.success {
+        let mut reasons = Vec::new();
+        if !run.report.validation_errors.is_empty() {
+            reasons.push("Schema validation failed".to_string());
+        } else if run
+            .report
+            .warnings
+            .iter()
+            .any(|warning| warning.starts_with("Could not get help output for"))
+        {
+            reasons.push("No parseable help output from probe attempts".to_string());
+        } else if let Some(reason) = summarize_probe_failure_reason(&run.report.probe_attempts) {
+            reasons.push(reason);
+        } else {
+            reasons.push("Parsing pipeline did not produce a valid schema".to_string());
+        }
+
+        return QualityAssessment {
+            accepted: false,
+            tier: QualityTier::Failed,
+            reasons,
+        };
+    }
+
+    let mut reasons = Vec::new();
+    if run.report.confidence < policy.min_confidence {
+        reasons.push(format!(
+            "confidence {:.2} below minimum {:.2}",
+            run.report.confidence, policy.min_confidence
+        ));
+    }
+    if run.report.coverage < policy.min_coverage {
+        reasons.push(format!(
+            "coverage {:.2} below minimum {:.2}",
+            run.report.coverage, policy.min_coverage
+        ));
+    }
+
+    let accepted = reasons.is_empty() || policy.allow_low_quality;
+    let tier = if reasons.is_empty() {
+        if run.report.confidence >= 0.85 && run.report.coverage >= 0.6 {
+            QualityTier::High
+        } else {
+            QualityTier::Medium
+        }
+    } else {
+        QualityTier::Low
+    };
+
+    if !reasons.is_empty() && policy.allow_low_quality {
+        reasons.push("accepted by --allow-low-quality override".to_string());
+    }
+
+    QualityAssessment {
+        accepted,
+        tier,
+        reasons,
+    }
+}
+
+fn summarize_probe_failure_reason(probe_attempts: &[ProbeAttemptReport]) -> Option<String> {
+    if probe_attempts
+        .iter()
+        .any(|attempt| attempt.rejection_reason.as_deref() == Some("environment-blocked"))
+    {
+        return Some("Help probing was blocked by environment restrictions".to_string());
+    }
+    if probe_attempts
+        .iter()
+        .any(|attempt| attempt.rejection_reason.as_deref() == Some("option-error-output"))
+    {
+        return Some("Probe output looked like option-error output rather than help".to_string());
+    }
+    None
+}
+
+fn apply_quality_policy(mut run: ExtractionRun, policy: ExtractionQualityPolicy) -> ExtractionRun {
+    let assessment = assess_extraction_quality(&run, policy);
+    run.report.accepted_for_suggestions = assessment.accepted;
+    run.report.quality_tier = assessment.tier;
+    run.report.quality_reasons = assessment.reasons.clone();
+
+    if !assessment.accepted {
+        if run.result.success && !assessment.reasons.is_empty() {
+            let reason = assessment.reasons.join("; ");
+            let gate_warning = format!("Quality gate rejected schema: {reason}");
+            extend_unique_warnings(
+                &mut run.result.warnings,
+                std::iter::once(gate_warning.clone()),
+            );
+            extend_unique_warnings(&mut run.report.warnings, std::iter::once(gate_warning));
+        }
+        run.result.success = false;
+        run.result.schema = None;
+        run.report.success = false;
+    }
+
+    run
+}
+
 /// Extracts a complete command schema including subcommands.
 pub fn extract_command_schema(command: &str) -> ExtractionResult {
     extract_command_schema_with_report(command).result
@@ -513,6 +764,19 @@ pub fn extract_command_schema(command: &str) -> ExtractionResult {
 
 /// Extracts a complete command schema including subcommands and a diagnostics report.
 pub fn extract_command_schema_with_report(command: &str) -> ExtractionRun {
+    extract_command_schema_with_report_and_policy(command, ExtractionQualityPolicy::permissive())
+}
+
+/// Extracts a complete command schema with report and quality policy gating.
+pub fn extract_command_schema_with_report_and_policy(
+    command: &str,
+    policy: ExtractionQualityPolicy,
+) -> ExtractionRun {
+    let run = extract_command_schema_with_report_base(command);
+    apply_quality_policy(run, policy)
+}
+
+fn extract_command_schema_with_report_base(command: &str) -> ExtractionRun {
     let mut warnings = Vec::new();
     let probe_run = probe_command_help_with_metadata(command);
     let probe_attempts = to_probe_attempt_reports(&probe_run.attempts);
@@ -533,6 +797,9 @@ pub fn extract_command_schema_with_report(command: &str) -> ExtractionRun {
                 report: ExtractionReport {
                     command: command.to_string(),
                     success: false,
+                    accepted_for_suggestions: false,
+                    quality_tier: QualityTier::Failed,
+                    quality_reasons: Vec::new(),
                     selected_format: None,
                     format_scores: Vec::new(),
                     parsers_used: vec!["probe-failed".to_string()],
@@ -568,6 +835,9 @@ pub fn extract_command_schema_with_report(command: &str) -> ExtractionRun {
                 report: ExtractionReport {
                     command: command.to_string(),
                     success: false,
+                    accepted_for_suggestions: false,
+                    quality_tier: QualityTier::Failed,
+                    quality_reasons: Vec::new(),
                     selected_format: parser.detected_format().map(help_format_label),
                     format_scores: to_format_score_reports(&diagnostics.format_scores),
                     parsers_used: diagnostics.parsers_used,
@@ -584,7 +854,12 @@ pub fn extract_command_schema_with_report(command: &str) -> ExtractionRun {
         }
     };
 
-    extend_unique_warnings(&mut warnings, parser.warnings().iter().cloned());
+    let parser_warnings = parser.warnings().to_vec();
+    let mut report_warnings = parser_warnings.clone();
+    let actionable_parser_warnings = parser_warnings
+        .into_iter()
+        .filter(|warning| !is_candidate_diagnostic_warning(warning));
+    extend_unique_warnings(&mut warnings, actionable_parser_warnings);
 
     // Recursively probe subcommands
     let mut probed_subcommands = HashSet::new();
@@ -617,10 +892,14 @@ pub fn extract_command_schema_with_report(command: &str) -> ExtractionRun {
         ));
     }
     let success = validation_errors.is_empty() && has_entities;
+    extend_unique_warnings(&mut report_warnings, warnings.iter().cloned());
 
     let report = ExtractionReport {
         command: command.to_string(),
         success,
+        accepted_for_suggestions: false,
+        quality_tier: QualityTier::Failed,
+        quality_reasons: Vec::new(),
         selected_format: parser.detected_format().map(help_format_label),
         format_scores: to_format_score_reports(&diagnostics.format_scores),
         parsers_used: diagnostics.parsers_used.clone(),
@@ -630,7 +909,7 @@ pub fn extract_command_schema_with_report(command: &str) -> ExtractionRun {
         recognized_lines: diagnostics.recognized_lines,
         unresolved_lines: diagnostics.unresolved_lines,
         probe_attempts,
-        warnings: warnings.clone(),
+        warnings: report_warnings,
         validation_errors: validation_errors.clone(),
     };
 
@@ -829,8 +1108,10 @@ fn to_probe_attempt_reports(attempts: &[ProbeAttempt]) -> Vec<ProbeAttemptReport
             exit_code: attempt.exit_code,
             timed_out: attempt.timed_out,
             error: attempt.error.clone(),
+            rejection_reason: attempt.rejection_reason.clone(),
             output_source: attempt.output_source.clone(),
             output_len: attempt.output_len,
+            output_preview: attempt.output_preview.clone(),
             accepted: attempt.accepted,
         })
         .collect()
@@ -863,7 +1144,9 @@ pub fn command_exists(command: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use command_schema_core::{CommandSchema, SchemaSource, SubcommandSchema};
+    use command_schema_core::{
+        CommandSchema, ExtractionResult, HelpFormat, SchemaSource, SubcommandSchema,
+    };
 
     #[test]
     fn test_is_help_output() {
@@ -872,6 +1155,9 @@ mod tests {
         ));
         assert!(is_help_output(
             "USAGE:\n    myapp [FLAGS]\n\nFLAGS:\n    -h, --help"
+        ));
+        assert!(is_help_output(
+            "umask: umask [-p] [-S] [mode]\n\nOptions:\n  -p output may be reused as input\n\nExit Status:\nReturns success unless MODE is invalid or an invalid option is given."
         ));
         assert!(!is_help_output("error: command not found"));
         assert!(!is_help_output("short"));
@@ -888,6 +1174,15 @@ mod tests {
             suffixes
                 .iter()
                 .any(|suffix| suffix == &vec!["--help", "all"])
+        );
+    }
+
+    #[test]
+    fn test_command_specific_probe_env_for_ansible() {
+        let env = command_specific_probe_env("ansible");
+        assert!(
+            env.iter()
+                .any(|(key, value)| *key == "ANSIBLE_LOCAL_TEMP" && *value == "/tmp")
         );
     }
 
@@ -913,6 +1208,58 @@ mod tests {
                 Some("--verbose"),
             ));
         assert!(schema_has_entities(&with_flag));
+    }
+
+    #[test]
+    fn test_quality_policy_rejects_low_quality_success() {
+        let run = ExtractionRun {
+            result: ExtractionResult {
+                schema: Some(CommandSchema::new("svc", SchemaSource::HelpCommand)),
+                raw_output: "Usage: svc".to_string(),
+                detected_format: Some(HelpFormat::Unknown),
+                warnings: Vec::new(),
+                success: true,
+            },
+            report: ExtractionReport {
+                command: "svc".to_string(),
+                success: true,
+                accepted_for_suggestions: false,
+                quality_tier: QualityTier::Failed,
+                quality_reasons: Vec::new(),
+                selected_format: Some("unknown".to_string()),
+                format_scores: Vec::new(),
+                parsers_used: vec!["test".to_string()],
+                confidence: 0.4,
+                coverage: 0.1,
+                relevant_lines: 10,
+                recognized_lines: 1,
+                unresolved_lines: Vec::new(),
+                probe_attempts: Vec::new(),
+                warnings: Vec::new(),
+                validation_errors: Vec::new(),
+            },
+        };
+
+        let gated = apply_quality_policy(
+            run,
+            ExtractionQualityPolicy {
+                min_confidence: 0.7,
+                min_coverage: 0.2,
+                allow_low_quality: false,
+            },
+        );
+
+        assert!(!gated.result.success);
+        assert!(gated.result.schema.is_none());
+        assert!(!gated.report.accepted_for_suggestions);
+        assert_eq!(gated.report.quality_tier, QualityTier::Low);
+        assert!(
+            gated
+                .report
+                .quality_reasons
+                .iter()
+                .any(|reason| reason.contains("confidence"))
+        );
     }
 
     #[test]
