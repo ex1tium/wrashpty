@@ -33,6 +33,7 @@ use rusqlite::Connection;
 use tracing::debug;
 
 use super::error::CIError;
+use super::schema_index::SchemaIndex;
 use super::templates;
 use super::tokenizer::{analyze_command, compute_command_hash, token_type_to_string};
 use super::variants;
@@ -55,6 +56,7 @@ pub fn learn_command(
     command: &str,
     exit_status: Option<i32>,
     session_db_id: Option<i64>,
+    schema_index: &SchemaIndex,
 ) -> Result<(), CIError> {
     let command = command.trim();
     if command.is_empty() {
@@ -107,7 +109,7 @@ pub fn learn_command(
     hierarchy::learn_hierarchy(conn, &tokens, &token_ids, is_success, now)?;
 
     // Keep schema store in sync with learned command structure.
-    if let Err(e) = super::sync::upsert_schema_from_tokens(conn, &tokens) {
+    if let Err(e) = super::sync::upsert_schema_from_tokens(conn, &tokens, schema_index) {
         debug!(
             command = %command,
             error = %e,
@@ -253,8 +255,17 @@ mod tests {
     fn test_learn_command() {
         let mut conn = setup_test_db();
         let mut cache = HashMap::new();
+        let schema_index = super::super::schema_index::SchemaIndex::from_schemas(Vec::new());
 
-        learn_command(&mut conn, &mut cache, "git commit -m 'test'", Some(0), None).unwrap();
+        learn_command(
+            &mut conn,
+            &mut cache,
+            "git commit -m 'test'",
+            Some(0),
+            None,
+            &schema_index,
+        )
+        .unwrap();
 
         // Verify tokens were created
         let count: i64 = conn
@@ -267,6 +278,7 @@ mod tests {
     fn test_learn_command_with_session() {
         let mut conn = setup_test_db();
         let mut cache = HashMap::new();
+        let schema_index = super::super::schema_index::SchemaIndex::from_schemas(Vec::new());
 
         // Create a session
         let now = chrono::Utc::now().timestamp();
@@ -289,6 +301,7 @@ mod tests {
             "git status",
             Some(0),
             Some(session_db_id),
+            &schema_index,
         )
         .unwrap();
 

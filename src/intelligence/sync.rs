@@ -25,6 +25,7 @@ use super::error::CIError;
 use super::patterns::{self, flags, hierarchy, pipes, sequences};
 use super::schema::storage::SchemaStore;
 use super::schema::{CommandSchema, FlagSchema, SchemaSource, SubcommandSchema, ValueType};
+use super::schema_index::SchemaIndex;
 use super::templates;
 use super::tokenizer::{analyze_command, compute_command_hash};
 use super::types::SyncStats;
@@ -43,6 +44,7 @@ use super::variants;
 pub fn sync_from_reedline(
     conn: &Connection,
     last_sync_id: i64,
+    schema_index: &SchemaIndex,
 ) -> Result<(SyncStats, i64), CIError> {
     let start = std::time::Instant::now();
     let mut stats = SyncStats::default();
@@ -103,7 +105,7 @@ pub fn sync_from_reedline(
 
     let transaction_result = (|| -> Result<(), CIError> {
         for entry in &entries {
-            match process_entry(conn, &mut token_cache, entry, &mut stats) {
+            match process_entry(conn, &mut token_cache, entry, &mut stats, schema_index) {
                 Ok(()) => {
                     stats.commands_processed += 1;
                     // Only advance to this ID if all previous entries succeeded
@@ -192,6 +194,7 @@ fn process_entry(
     token_cache: &mut HashMap<String, i64>,
     entry: &HistoryEntry,
     stats: &mut SyncStats,
+    schema_index: &SchemaIndex,
 ) -> Result<(), CIError> {
     let command = entry.command_line.trim();
     if command.is_empty() {
@@ -262,7 +265,7 @@ fn process_entry(
     stats.hierarchy_learned += tokens.len();
 
     // Keep schema store in sync with learned command structure.
-    if let Err(e) = upsert_schema_from_tokens(conn, &tokens) {
+    if let Err(e) = upsert_schema_from_tokens(conn, &tokens, schema_index) {
         debug!(
             command = %command,
             error = %e,
@@ -343,12 +346,18 @@ fn count_flag_value_pairs(tokens: &[super::types::AnalyzedToken]) -> usize {
 pub(crate) fn upsert_schema_from_tokens(
     conn: &Connection,
     tokens: &[super::types::AnalyzedToken],
+    schema_index: &SchemaIndex,
 ) -> Result<(), CIError> {
     use crate::chrome::command_edit::TokenType;
 
     let Some(base_command) = tokens.first().map(|t| t.text.as_str()) else {
         return Ok(());
     };
+
+    // Embedded curated schemas are authoritative for structure.
+    if schema_index.has_schema(base_command) {
+        return Ok(());
+    }
 
     let store = SchemaStore::new(conn);
     let mut schema = store
@@ -533,6 +542,8 @@ fn upsert_flag(flags: &mut Vec<FlagSchema>, incoming: FlagSchema) {
 
 #[cfg(test)]
 mod tests {
+    use command_schema_core::{CommandSchema, SchemaSource};
+
     use super::*;
 
     fn setup_test_db() -> Connection {
@@ -557,10 +568,15 @@ mod tests {
         conn
     }
 
+    fn empty_schema_index() -> crate::intelligence::schema_index::SchemaIndex {
+        crate::intelligence::schema_index::SchemaIndex::from_schemas(Vec::new())
+    }
+
     #[test]
     fn test_sync_empty_history() {
         let conn = setup_test_db();
-        let (stats, last_id) = sync_from_reedline(&conn, 0).unwrap();
+        let schema_index = empty_schema_index();
+        let (stats, last_id) = sync_from_reedline(&conn, 0, &schema_index).unwrap();
         assert_eq!(stats.commands_processed, 0);
         assert_eq!(last_id, 0);
     }
@@ -568,6 +584,7 @@ mod tests {
     #[test]
     fn test_sync_processes_entries() {
         let conn = setup_test_db();
+        let schema_index = empty_schema_index();
 
         // Insert test history
         conn.execute(
@@ -577,7 +594,7 @@ mod tests {
         )
         .unwrap();
 
-        let (stats, _) = sync_from_reedline(&conn, 0).unwrap();
+        let (stats, _) = sync_from_reedline(&conn, 0, &schema_index).unwrap();
         assert_eq!(stats.commands_processed, 1);
         assert!(stats.tokens_extracted > 0);
     }
@@ -621,6 +638,7 @@ mod tests {
     #[test]
     fn test_sync_incremental_id_tracking() {
         let conn = setup_test_db();
+        let schema_index = empty_schema_index();
 
         // Insert multiple history entries
         conn.execute(
@@ -643,7 +661,7 @@ mod tests {
         .unwrap();
 
         // First sync should process all entries
-        let (stats, last_id) = sync_from_reedline(&conn, 0).unwrap();
+        let (stats, last_id) = sync_from_reedline(&conn, 0, &schema_index).unwrap();
         assert_eq!(stats.commands_processed, 3);
         assert_eq!(last_id, 3);
 
@@ -660,7 +678,7 @@ mod tests {
         .unwrap();
 
         // Second sync should only process the new entry
-        let (stats, last_id) = sync_from_reedline(&conn, 3).unwrap();
+        let (stats, last_id) = sync_from_reedline(&conn, 3, &schema_index).unwrap();
         assert_eq!(stats.commands_processed, 1);
         assert_eq!(last_id, 4);
     }
@@ -668,6 +686,7 @@ mod tests {
     #[test]
     fn test_sync_skipped_entries_counted() {
         let conn = setup_test_db();
+        let schema_index = empty_schema_index();
 
         // Insert a valid entry
         conn.execute(
@@ -694,7 +713,7 @@ mod tests {
         .unwrap();
 
         // Sync should process 2 entries (empty command is silently skipped)
-        let (_stats, last_id) = sync_from_reedline(&conn, 0).unwrap();
+        let (_stats, last_id) = sync_from_reedline(&conn, 0, &schema_index).unwrap();
         // Empty commands are silently handled, so they count as processed
         // but produce no tokens
         assert_eq!(last_id, 3);
@@ -710,6 +729,7 @@ mod tests {
     #[test]
     fn test_sync_populates_schema_rows_for_seen_commands() {
         let conn = setup_test_db();
+        let schema_index = empty_schema_index();
         conn.execute(
             "INSERT INTO history (id, command_line, start_timestamp, exit_status, cwd)
              VALUES (1, 'cargo build --target wasm32-unknown-unknown', 1700000000000, 0, '/tmp')",
@@ -717,7 +737,7 @@ mod tests {
         )
         .unwrap();
 
-        let (_stats, _last_id) = sync_from_reedline(&conn, 0).unwrap();
+        let (_stats, _last_id) = sync_from_reedline(&conn, 0, &schema_index).unwrap();
 
         let has_command_schema: bool = conn
             .query_row(
@@ -745,8 +765,43 @@ mod tests {
     }
 
     #[test]
+    fn test_sync_skips_schema_rows_for_curated_commands() {
+        let conn = setup_test_db();
+        let schema_index =
+            crate::intelligence::schema_index::SchemaIndex::from_schemas(vec![CommandSchema::new(
+                "cargo",
+                SchemaSource::Bootstrap,
+            )]);
+
+        conn.execute(
+            "INSERT INTO history (id, command_line, start_timestamp, exit_status, cwd)
+             VALUES (1, 'cargo build --release', 1700000000000, 0, '/tmp')",
+            [],
+        )
+        .unwrap();
+
+        let (_stats, _last_id) = sync_from_reedline(&conn, 0, &schema_index).unwrap();
+
+        let has_command_schema: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM ci_command_schemas
+                    WHERE command = 'cargo' AND subcommand IS NULL
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            !has_command_schema,
+            "curated commands should not be backfilled into ci_command_schemas"
+        );
+    }
+
+    #[test]
     fn test_sync_learns_subcommand_path_for_unknown_base_command() {
         let conn = setup_test_db();
+        let schema_index = empty_schema_index();
         conn.execute(
             "INSERT INTO history (id, command_line, start_timestamp, exit_status, cwd)
              VALUES (1, 'tool build --format json', 1700000000000, 0, '/tmp')",
@@ -754,7 +809,7 @@ mod tests {
         )
         .unwrap();
 
-        let (_stats, _last_id) = sync_from_reedline(&conn, 0).unwrap();
+        let (_stats, _last_id) = sync_from_reedline(&conn, 0, &schema_index).unwrap();
 
         let has_subcommand_schema: bool = conn
             .query_row(
@@ -772,6 +827,7 @@ mod tests {
     #[test]
     fn test_sync_populates_hierarchy_table() {
         let conn = setup_test_db();
+        let schema_index = empty_schema_index();
 
         // Insert test history with a multi-token command
         conn.execute(
@@ -780,7 +836,7 @@ mod tests {
             [],
         ).unwrap();
 
-        let (stats, _) = sync_from_reedline(&conn, 0).unwrap();
+        let (stats, _) = sync_from_reedline(&conn, 0, &schema_index).unwrap();
         assert_eq!(stats.commands_processed, 1);
         assert!(stats.hierarchy_learned > 0, "Hierarchy should be populated");
 

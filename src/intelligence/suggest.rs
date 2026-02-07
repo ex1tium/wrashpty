@@ -16,7 +16,7 @@
 //! 3. **Supplementary Sources** (context-specific):
 //!    - Flag values (`ci_flag_values`) for `--flag <value>` positions
 //!    - Pipe commands (`ci_pipe_chains`) for post-pipe positions
-//!    - Command schemas (`ci_command_schemas`) for subcommands/flags/value choices
+//!    - Embedded curated command schemas (`SchemaIndex`) for subcommands/flags/value choices
 //!    - Session transitions (`ci_transitions`) for likely next commands
 //!    - Templates (`ci_templates`) for reusable command patterns
 //!
@@ -31,8 +31,8 @@ use tracing::debug;
 
 use super::fuzzy;
 use super::patterns;
-use super::schema::storage::SchemaStore;
 use super::schema::{CommandSchema, FlagSchema, SubcommandSchema, ValueType};
+use super::schema_index::SchemaIndex;
 use super::scoring::{self, ContextMatch};
 use super::sessions;
 use super::templates;
@@ -43,8 +43,13 @@ use super::user_patterns;
 use super::variants;
 
 /// Main entry point for getting suggestions.
-pub fn suggest(conn: &Connection, context: &SuggestionContext, limit: usize) -> Vec<Suggestion> {
-    let mut suggestions = gather_suggestions(conn, context);
+pub fn suggest(
+    conn: &Connection,
+    schema_index: &SchemaIndex,
+    context: &SuggestionContext,
+    limit: usize,
+) -> Vec<Suggestion> {
+    let mut suggestions = gather_suggestions(conn, schema_index, context);
 
     // Apply prefix filter if partial text provided
     if !context.partial.is_empty() {
@@ -138,7 +143,11 @@ fn boost_successful(suggestions: &mut [Suggestion], threshold: f64, boost: f64) 
 /// position-aware token suggestions. This unified approach eliminates
 /// the need for separate token_mode handling - all token suggestions
 /// come from the same learned source.
-fn gather_suggestions(conn: &Connection, context: &SuggestionContext) -> Vec<Suggestion> {
+fn gather_suggestions(
+    conn: &Connection,
+    schema_index: &SchemaIndex,
+    context: &SuggestionContext,
+) -> Vec<Suggestion> {
     let mut suggestions = Vec::new();
 
     // 1. User patterns (highest priority) - always include, they're user-defined
@@ -149,7 +158,7 @@ fn gather_suggestions(conn: &Connection, context: &SuggestionContext) -> Vec<Sug
     suggestions.extend(suggest_from_hierarchy(conn, context));
 
     // 3. Schema source: extracted/bootstrapped command definitions
-    suggestions.extend(suggest_from_schema(conn, context));
+    suggestions.extend(suggest_from_schema(schema_index, context));
 
     // 4. Session transitions and template completions
     suggestions.extend(suggest_from_session_transitions(conn, context));
@@ -264,9 +273,8 @@ fn template_token_for_context(preview: &str, context: &SuggestionContext) -> Opt
 ///
 /// This integrates extracted/bootstrapped command schemas into the same
 /// unified suggestion pipeline used by learned hierarchy patterns.
-fn suggest_from_schema(conn: &Connection, context: &SuggestionContext) -> Vec<Suggestion> {
+fn suggest_from_schema(schema_index: &SchemaIndex, context: &SuggestionContext) -> Vec<Suggestion> {
     let mut suggestions = Vec::new();
-    let store = SchemaStore::new(conn);
     let now = chrono::Utc::now().timestamp();
 
     if matches!(context.position, PositionType::AfterPipe) {
@@ -275,16 +283,14 @@ fn suggest_from_schema(conn: &Connection, context: &SuggestionContext) -> Vec<Su
 
     match &context.position {
         PositionType::Command => {
-            if let Ok(commands) = store.list_commands() {
-                for command in commands.into_iter().take(40) {
-                    suggestions.push(schema_suggestion(
-                        command,
-                        ContextMatch::Generic,
-                        now,
-                        "schema_command",
-                        None,
-                    ));
-                }
+            for command in schema_index.commands().take(40) {
+                suggestions.push(schema_suggestion(
+                    command.to_string(),
+                    ContextMatch::Generic,
+                    now,
+                    "schema_command",
+                    None,
+                ));
             }
         }
         PositionType::FlagValue { flag } => {
@@ -293,10 +299,10 @@ fn suggest_from_schema(conn: &Connection, context: &SuggestionContext) -> Vec<Su
                 return suggestions;
             };
 
-            if let Ok(Some(schema)) = store.get(base_command) {
-                let path = resolve_subcommand_path(&schema, context);
-                let active_subcommand = find_subcommand_by_path(&schema, &path);
-                let available_flags = schema_flags_for_context(&schema, active_subcommand);
+            if let Some(schema) = schema_index.get(base_command) {
+                let path = resolve_subcommand_path(schema, context);
+                let active_subcommand = find_subcommand_by_path(schema, &path);
+                let available_flags = schema_flags_for_context(schema, active_subcommand);
 
                 if let Some(flag_schema) = available_flags
                     .iter()
@@ -320,9 +326,9 @@ fn suggest_from_schema(conn: &Connection, context: &SuggestionContext) -> Vec<Su
                 return suggestions;
             };
 
-            if let Ok(Some(schema)) = store.get(base_command) {
-                let path = resolve_subcommand_path(&schema, context);
-                let active_subcommand = find_subcommand_by_path(&schema, &path);
+            if let Some(schema) = schema_index.get(base_command) {
+                let path = resolve_subcommand_path(schema, context);
+                let active_subcommand = find_subcommand_by_path(schema, &path);
                 let next_subcommands = active_subcommand
                     .map(|sub| sub.subcommands.as_slice())
                     .unwrap_or(schema.subcommands.as_slice());
@@ -344,7 +350,7 @@ fn suggest_from_schema(conn: &Connection, context: &SuggestionContext) -> Vec<Su
                 }
 
                 if wants_flag_suggestions(context) {
-                    for flag in schema_flags_for_context(&schema, active_subcommand) {
+                    for flag in schema_flags_for_context(schema, active_subcommand) {
                         if let Some(flag_text) = schema_flag_text(flag) {
                             suggestions.push(schema_suggestion(
                                 flag_text,
@@ -373,14 +379,9 @@ fn schema_suggestion(
 ) -> Suggestion {
     Suggestion {
         text,
-        source: SuggestionSource::LearnedHierarchy,
-        score: scoring::compute_score(
-            1,
-            last_seen,
-            None,
-            context_match,
-            SuggestionSource::LearnedHierarchy,
-        ) * 0.9,
+        source: SuggestionSource::Schema,
+        score: scoring::compute_score(1, last_seen, None, context_match, SuggestionSource::Schema)
+            * 0.9,
         metadata: SuggestionMetadata {
             frequency: 1,
             last_seen: Some(last_seen),
@@ -697,11 +698,12 @@ fn suggest_from_historical_frequency(conn: &Connection, limit: usize) -> Vec<Sug
 mod tests {
     use super::*;
     use crate::intelligence::db_schema;
-    use crate::intelligence::schema::SchemaSource;
-    use crate::intelligence::schema::storage::store_schema;
-    use crate::intelligence::schema::{SubcommandSchema, ValueType};
+    use crate::intelligence::schema_index::SchemaIndex;
     use crate::intelligence::tokenizer::compute_command_hash;
     use crate::intelligence::types::AnalyzedToken;
+    use command_schema_core::{
+        CommandSchema, FlagSchema, SchemaSource, SubcommandSchema, ValueType,
+    };
 
     fn setup_test_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -709,15 +711,38 @@ mod tests {
         conn
     }
 
+    fn empty_schema_index() -> SchemaIndex {
+        SchemaIndex::from_schemas(Vec::new())
+    }
+
+    fn bootstrap_schema_index() -> SchemaIndex {
+        let mut git = CommandSchema::new("git", SchemaSource::Bootstrap);
+        let mut remote = SubcommandSchema::new("remote");
+        remote.subcommands = vec![
+            SubcommandSchema::new("add"),
+            SubcommandSchema::new("remove"),
+        ];
+        git.subcommands = vec![
+            SubcommandSchema::new("commit"),
+            SubcommandSchema::new("push"),
+            SubcommandSchema::new("pull"),
+            remote,
+        ];
+
+        SchemaIndex::from_schemas(vec![git])
+    }
+
     #[test]
     fn test_suggest_empty_context() {
         let conn = setup_test_db();
+        let schema_index = empty_schema_index();
         let context = SuggestionContext::default();
 
         // Bootstrap the database with some commands
-        crate::intelligence::bootstrap::bootstrap_if_empty(&conn).unwrap();
+        let bootstrap_index = bootstrap_schema_index();
+        crate::intelligence::bootstrap::bootstrap_if_empty(&conn, &bootstrap_index).unwrap();
 
-        let suggestions = suggest(&conn, &context, 10);
+        let suggestions = suggest(&conn, &schema_index, &context, 10);
         // Should return suggestions from bootstrapped hierarchy
         assert!(!suggestions.is_empty());
     }
@@ -725,9 +750,11 @@ mod tests {
     #[test]
     fn test_suggest_with_preceding() {
         let conn = setup_test_db();
+        let schema_index = empty_schema_index();
 
         // Bootstrap the database
-        crate::intelligence::bootstrap::bootstrap_if_empty(&conn).unwrap();
+        let bootstrap_index = bootstrap_schema_index();
+        crate::intelligence::bootstrap::bootstrap_if_empty(&conn, &bootstrap_index).unwrap();
 
         let context = SuggestionContext {
             preceding_tokens: vec![AnalyzedToken::new(
@@ -740,7 +767,7 @@ mod tests {
         };
 
         // Request enough to include all git subcommands (22 bootstrapped)
-        let suggestions = suggest(&conn, &context, 30);
+        let suggestions = suggest(&conn, &schema_index, &context, 30);
         // Should return git subcommands from bootstrapped hierarchy
         assert!(!suggestions.is_empty());
         // Verify we get git subcommands
@@ -865,9 +892,11 @@ mod tests {
     #[test]
     fn test_hierarchy_returns_tokens_not_full_commands() {
         let conn = setup_test_db();
+        let schema_index = empty_schema_index();
 
         // Bootstrap to get initial data
-        crate::intelligence::bootstrap::bootstrap_if_empty(&conn).unwrap();
+        let bootstrap_index = bootstrap_schema_index();
+        crate::intelligence::bootstrap::bootstrap_if_empty(&conn, &bootstrap_index).unwrap();
 
         // Context: git remote add (position 3)
         let context = SuggestionContext {
@@ -885,7 +914,7 @@ mod tests {
             ..Default::default()
         };
 
-        let suggestions = gather_suggestions(&conn, &context);
+        let suggestions = gather_suggestions(&conn, &schema_index, &context);
 
         // All suggestions should be individual tokens, not full commands
         for suggestion in &suggestions {
@@ -901,6 +930,7 @@ mod tests {
     #[test]
     fn test_hierarchy_provides_position_aware_suggestions() {
         let conn = setup_test_db();
+        let schema_index = empty_schema_index();
         let now = chrono::Utc::now().timestamp();
 
         // Create tokens
@@ -959,7 +989,7 @@ mod tests {
             ..Default::default()
         };
 
-        let suggestions = suggest(&conn, &context, 10);
+        let suggestions = suggest(&conn, &schema_index, &context, 10);
 
         // Should get 'origin' as a suggestion
         let texts: Vec<&str> = suggestions.iter().map(|s| s.text.as_str()).collect();
@@ -978,7 +1008,7 @@ mod tests {
             crate::intelligence::schema::CommandSchema::new("tool", SchemaSource::Bootstrap);
         schema.subcommands.push(SubcommandSchema::new("build"));
         schema.subcommands.push(SubcommandSchema::new("deploy"));
-        store_schema(&conn, &schema).unwrap();
+        let schema_index = SchemaIndex::from_schemas(vec![schema]);
 
         let context = SuggestionContext {
             preceding_tokens: vec![AnalyzedToken::new(
@@ -990,7 +1020,7 @@ mod tests {
             ..Default::default()
         };
 
-        let suggestions = suggest(&conn, &context, 10);
+        let suggestions = suggest(&conn, &schema_index, &context, 10);
         let texts: Vec<&str> = suggestions.iter().map(|s| s.text.as_str()).collect();
         assert!(texts.contains(&"build"), "expected 'build' in {:?}", texts);
         assert!(
@@ -1010,7 +1040,7 @@ mod tests {
         remote.subcommands.push(SubcommandSchema::new("add"));
         remote.subcommands.push(SubcommandSchema::new("remove"));
         schema.subcommands.push(remote);
-        store_schema(&conn, &schema).unwrap();
+        let schema_index = SchemaIndex::from_schemas(vec![schema]);
 
         let context = SuggestionContext {
             preceding_tokens: vec![
@@ -1025,7 +1055,7 @@ mod tests {
             ..Default::default()
         };
 
-        let suggestions = suggest(&conn, &context, 10);
+        let suggestions = suggest(&conn, &schema_index, &context, 10);
         let texts: Vec<&str> = suggestions.iter().map(|s| s.text.as_str()).collect();
         assert!(texts.contains(&"add"), "expected 'add' in {:?}", texts);
         assert!(
@@ -1041,14 +1071,12 @@ mod tests {
 
         let mut schema =
             crate::intelligence::schema::CommandSchema::new("tool", SchemaSource::Bootstrap);
-        schema
-            .global_flags
-            .push(crate::intelligence::schema::FlagSchema::with_value(
-                None,
-                Some("--format"),
-                ValueType::Choice(vec!["json".to_string(), "yaml".to_string()]),
-            ));
-        store_schema(&conn, &schema).unwrap();
+        schema.global_flags.push(FlagSchema::with_value(
+            None,
+            Some("--format"),
+            ValueType::Choice(vec!["json".to_string(), "yaml".to_string()]),
+        ));
+        let schema_index = SchemaIndex::from_schemas(vec![schema]);
 
         let context = SuggestionContext {
             preceding_tokens: vec![
@@ -1061,7 +1089,7 @@ mod tests {
             ..Default::default()
         };
 
-        let suggestions = suggest(&conn, &context, 10);
+        let suggestions = suggest(&conn, &schema_index, &context, 10);
         let texts: Vec<&str> = suggestions.iter().map(|s| s.text.as_str()).collect();
         assert!(texts.contains(&"json"), "expected 'json' in {:?}", texts);
         assert!(texts.contains(&"yaml"), "expected 'yaml' in {:?}", texts);
@@ -1070,6 +1098,7 @@ mod tests {
     #[test]
     fn test_session_transition_source_is_used_in_main_suggest_pipeline() {
         let conn = setup_test_db();
+        let schema_index = empty_schema_index();
         let now = chrono::Utc::now().timestamp();
         let from_command = "git status";
         let to_command = "git commit -m test";
@@ -1098,7 +1127,7 @@ mod tests {
             ..Default::default()
         };
 
-        let suggestions = suggest(&conn, &context, 10);
+        let suggestions = suggest(&conn, &schema_index, &context, 10);
         let transition = suggestions
             .iter()
             .find(|s| s.text == to_command && s.source == SuggestionSource::SessionTransition);
@@ -1115,6 +1144,7 @@ mod tests {
     #[test]
     fn test_template_source_suggests_next_token_in_main_pipeline() {
         let conn = setup_test_db();
+        let schema_index = empty_schema_index();
         let now = chrono::Utc::now().timestamp();
         let template = "git checkout <BRANCH>";
         let template_hash = compute_command_hash(template);
@@ -1138,7 +1168,7 @@ mod tests {
             ..Default::default()
         };
 
-        let suggestions = suggest(&conn, &context, 10);
+        let suggestions = suggest(&conn, &schema_index, &context, 10);
         let template_suggestion = suggestions
             .iter()
             .find(|s| s.text == "checkout" && s.source == SuggestionSource::Template);
