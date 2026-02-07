@@ -332,19 +332,46 @@ fn wait_for_child_with_timeout(
 
 /// Checks if text looks like help output.
 fn is_help_output(text: &str) -> bool {
-    let text_lower = text.to_lowercase();
     let trimmed = text.trim();
+    let text_lower = trimmed.to_ascii_lowercase();
 
     // Must have some minimum content
-    if text.len() < 20 {
+    if trimmed.len() < 20 {
+        return false;
+    }
+
+    let hard_fail_markers = [
+        "command not found",
+        "no such file or directory",
+        "is not recognized as an internal or external command",
+    ];
+    if hard_fail_markers
+        .iter()
+        .any(|marker| text_lower.contains(marker))
+    {
+        return false;
+    }
+
+    let has_usage_line = trimmed
+        .lines()
+        .any(|line| line.trim_start().to_ascii_lowercase().starts_with("usage:"));
+
+    let option_error_markers = [
+        "illegal option",
+        "unknown option",
+        "invalid option",
+        "unrecognized option",
+    ];
+    if option_error_markers
+        .iter()
+        .any(|marker| text_lower.contains(marker))
+        && !has_usage_line
+    {
         return false;
     }
 
     // Explicit usage line is a strong help indicator for compact outputs.
-    if trimmed
-        .lines()
-        .any(|line| line.trim_start().to_lowercase().starts_with("usage:"))
-    {
+    if has_usage_line {
         return true;
     }
 
@@ -361,6 +388,26 @@ fn is_help_output(text: &str) -> bool {
     ];
 
     help_indicators.iter().any(|&ind| text_lower.contains(ind))
+}
+
+fn schema_has_entities(schema: &command_schema_core::CommandSchema) -> bool {
+    !schema.global_flags.is_empty()
+        || !schema.subcommands.is_empty()
+        || !schema.positional.is_empty()
+}
+
+fn is_candidate_diagnostic_warning(message: &str) -> bool {
+    message.starts_with("Medium-confidence findings kept in diagnostics:")
+        || message.starts_with("Discarded low-confidence findings:")
+        || message.starts_with("False-positive filters matched")
+}
+
+fn extend_unique_warnings(target: &mut Vec<String>, warnings: impl IntoIterator<Item = String>) {
+    for warning in warnings {
+        if !target.contains(&warning) {
+            target.push(warning);
+        }
+    }
 }
 
 /// Extracts a complete command schema including subcommands.
@@ -441,7 +488,7 @@ pub fn extract_command_schema_with_report(command: &str) -> ExtractionRun {
         }
     };
 
-    warnings.extend(parser.warnings().iter().cloned());
+    extend_unique_warnings(&mut warnings, parser.warnings().iter().cloned());
 
     // Recursively probe subcommands
     let mut probed_subcommands = HashSet::new();
@@ -466,7 +513,14 @@ pub fn extract_command_schema_with_report(command: &str) -> ExtractionRun {
         .into_iter()
         .map(|error| error.to_string())
         .collect::<Vec<_>>();
-    let success = validation_errors.is_empty();
+    let has_entities = schema_has_entities(&schema);
+    if !has_entities {
+        warnings.push(format!(
+            "Extracted schema for '{}' contains no flags, subcommands, or positional arguments",
+            command
+        ));
+    }
+    let success = validation_errors.is_empty() && has_entities;
 
     let report = ExtractionReport {
         command: command.to_string(),
@@ -580,7 +634,13 @@ fn probe_subcommands_recursive(
                     );
                 }
             }
-            warnings.extend(parser.warnings().iter().cloned());
+            let actionable = parser
+                .warnings()
+                .iter()
+                .filter(|message| !is_candidate_diagnostic_warning(message))
+                .cloned()
+                .collect::<Vec<_>>();
+            extend_unique_warnings(warnings, actionable);
         }
     }
 }
@@ -719,6 +779,25 @@ mod tests {
         ));
         assert!(!is_help_output("error: command not found"));
         assert!(!is_help_output("short"));
+        assert!(!is_help_output("sh: 0: Illegal option -h"));
+        assert!(is_help_output(
+            "Illegal option --\nUsage: /usr/bin/which [-as] args"
+        ));
+    }
+
+    #[test]
+    fn test_schema_has_entities() {
+        let empty = CommandSchema::new("svc", SchemaSource::HelpCommand);
+        assert!(!schema_has_entities(&empty));
+
+        let mut with_flag = CommandSchema::new("svc", SchemaSource::HelpCommand);
+        with_flag
+            .global_flags
+            .push(command_schema_core::FlagSchema::boolean(
+                Some("-v"),
+                Some("--verbose"),
+            ));
+        assert!(schema_has_entities(&with_flag));
     }
 
     #[test]

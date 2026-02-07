@@ -725,13 +725,17 @@ impl HelpParser {
             let mut names: Vec<&str> = name_part
                 .split(',')
                 .map(str::trim)
-                .filter(|name| Self::is_valid_command_name(name))
+                .filter(|name| {
+                    Self::is_valid_command_name(name) && Self::is_plausible_subcommand_name(name)
+                })
                 .collect();
 
             if names.is_empty() {
                 if let Some(fallback_names) = self.parse_subcommand_name_candidates(name_part) {
                     for name in fallback_names {
-                        if Self::is_valid_command_name(name) {
+                        if Self::is_valid_command_name(name)
+                            && Self::is_plausible_subcommand_name(name)
+                        {
                             names.push(name);
                         }
                     }
@@ -882,6 +886,9 @@ impl HelpParser {
             cleaned = cleaned.trim_matches(|ch| matches!(ch, ',' | ';' | ':'));
 
             if cleaned.is_empty() {
+                continue;
+            }
+            if cleaned.starts_with('-') {
                 continue;
             }
             if Self::is_placeholder_keyword(cleaned) {
@@ -2141,6 +2148,16 @@ impl HelpParser {
         &self,
         lines: &[IndexedLine],
     ) -> (Vec<SubcommandSchema>, HashSet<usize>) {
+        let base_command = self
+            .command
+            .split_whitespace()
+            .next()
+            .unwrap_or(self.command.as_str())
+            .to_ascii_lowercase();
+        if base_command != "stty" {
+            return (Vec::new(), HashSet::new());
+        }
+
         let mut recognized = HashSet::new();
         let mut subcommands = Vec::new();
         let mut seen = HashSet::new();
@@ -2262,6 +2279,40 @@ impl HelpParser {
             && value
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    }
+
+    fn is_plausible_subcommand_name(value: &str) -> bool {
+        let token = value.trim();
+        if token.is_empty() {
+            return false;
+        }
+        if Self::looks_like_non_command_value_token(token) {
+            return false;
+        }
+        if token.chars().all(|ch| ch.is_ascii_uppercase()) {
+            return false;
+        }
+        if token
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_uppercase())
+        {
+            return false;
+        }
+        !matches!(
+            token.to_ascii_lowercase().as_str(),
+            "usage"
+                | "options"
+                | "option"
+                | "flags"
+                | "flag"
+                | "arguments"
+                | "argument"
+                | "commands"
+                | "command"
+                | "examples"
+                | "example"
+        )
     }
 
     fn dedupe_flags(flags: Vec<FlagSchema>) -> Vec<FlagSchema> {
@@ -3660,6 +3711,53 @@ Flags:
         let schema = parser.parse().unwrap();
 
         assert!(schema.subcommands.is_empty());
+    }
+
+    #[test]
+    fn test_does_not_promote_rm_footer_prose_to_subcommands() {
+        let help = r#"
+Usage: rm [OPTION]... [FILE]...
+Remove (unlink) the FILE(s).
+
+  -f, --force           ignore nonexistent files and arguments, never prompt
+      --help            display this help and exit
+
+GNU coreutils online help: <https://www.gnu.org/software/coreutils/>
+Report any translation bugs to <https://translationproject.org/team/>
+Full documentation <https://www.gnu.org/software/coreutils/rm>
+or available locally via: info '(coreutils) rm invocation'
+"#;
+        let mut parser = HelpParser::new("rm", help);
+        let schema = parser.parse().unwrap();
+
+        assert!(schema.find_subcommand("GNU").is_none());
+        assert!(schema.find_subcommand("Report").is_none());
+        assert!(schema.find_subcommand("Full").is_none());
+    }
+
+    #[test]
+    fn test_named_setting_rows_are_scoped_to_stty_style_outputs() {
+        let help = r#"
+Format:
+  posix        same as pax
+  gnu          GNU tar 1.13.x format
+"#;
+        let mut parser = HelpParser::new("tar", help);
+        let schema = parser.parse().unwrap();
+        assert!(schema.find_subcommand("posix").is_none());
+        assert!(schema.find_subcommand("gnu").is_none());
+    }
+
+    #[test]
+    fn test_usage_option_cluster_is_not_parsed_as_positional_argument() {
+        let help = r#"
+Illegal option --
+Usage: /usr/bin/which [-as] args
+"#;
+        let mut parser = HelpParser::new("which", help);
+        let schema = parser.parse().unwrap();
+
+        assert!(schema.positional.iter().all(|arg| arg.name != "-as"));
     }
 
     #[test]
