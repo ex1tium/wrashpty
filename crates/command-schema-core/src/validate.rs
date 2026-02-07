@@ -203,7 +203,9 @@ mod tests {
         let errors = validate_schema(&schema);
         assert_eq!(
             errors,
-            vec![ValidationError::SubcommandCycle("git remote git".to_string())]
+            vec![ValidationError::SubcommandCycle(
+                "git remote git".to_string()
+            )]
         );
     }
 
@@ -219,4 +221,3 @@ mod tests {
         assert!(errors.is_empty());
     }
 }
-

@@ -10,8 +10,8 @@
   - [x] Remove `src/intelligence/schema/extractor.rs`
   - [x] Remove runtime probing hook from `src/intelligence/sync.rs`
   - [x] Update `src/intelligence/schema/mod.rs` exports
-- [ ] Phase 2: Core package format/validation/merge
-- [ ] Phase 3: Discovery CLI + fixture tests
+- [x] Phase 2: Core package format/validation/merge
+- [x] Phase 3: Discovery CLI + fixture tests
 - [ ] Phase 4: Curated schema repository + validation workflow
 - [ ] Phase 5: Build-time bundle + embedded `SchemaIndex`
 - [ ] Phase 6: Suggestion pipeline migration to `SchemaIndex`

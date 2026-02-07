@@ -301,9 +301,11 @@ dependencies = [
 name = "command-schema-discovery"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "clap",
  "command-schema-core",
  "regex",
+ "serde_json",
  "tracing",
  "wait-timeout",
 ]

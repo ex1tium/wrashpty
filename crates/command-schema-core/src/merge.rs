@@ -23,11 +23,18 @@ pub fn merge_schemas(
     merged.command = base.command.clone();
 
     merged.description = match strategy {
-        MergeStrategy::PreferBase => base.description.clone().or_else(|| overlay.description.clone()),
-        MergeStrategy::PreferOverlay => {
-            overlay.description.clone().or_else(|| base.description.clone())
-        }
-        MergeStrategy::Union => overlay.description.clone().or_else(|| base.description.clone()),
+        MergeStrategy::PreferBase => base
+            .description
+            .clone()
+            .or_else(|| overlay.description.clone()),
+        MergeStrategy::PreferOverlay => overlay
+            .description
+            .clone()
+            .or_else(|| base.description.clone()),
+        MergeStrategy::Union => overlay
+            .description
+            .clone()
+            .or_else(|| base.description.clone()),
     };
 
     merged.global_flags = merge_flags(&base.global_flags, &overlay.global_flags, strategy);
@@ -36,7 +43,11 @@ pub fn merge_schemas(
     merged
 }
 
-fn merge_flags(base: &[FlagSchema], overlay: &[FlagSchema], strategy: MergeStrategy) -> Vec<FlagSchema> {
+fn merge_flags(
+    base: &[FlagSchema],
+    overlay: &[FlagSchema],
+    strategy: MergeStrategy,
+) -> Vec<FlagSchema> {
     let mut by_name: HashMap<String, FlagSchema> = HashMap::new();
 
     let insert = |map: &mut HashMap<String, FlagSchema>, flag: &FlagSchema| {
@@ -107,11 +118,18 @@ fn merge_subcommand(
 ) -> SubcommandSchema {
     let mut merged = base.clone();
     merged.description = match strategy {
-        MergeStrategy::PreferBase => base.description.clone().or_else(|| overlay.description.clone()),
-        MergeStrategy::PreferOverlay => {
-            overlay.description.clone().or_else(|| base.description.clone())
-        }
-        MergeStrategy::Union => overlay.description.clone().or_else(|| base.description.clone()),
+        MergeStrategy::PreferBase => base
+            .description
+            .clone()
+            .or_else(|| overlay.description.clone()),
+        MergeStrategy::PreferOverlay => overlay
+            .description
+            .clone()
+            .or_else(|| base.description.clone()),
+        MergeStrategy::Union => overlay
+            .description
+            .clone()
+            .or_else(|| base.description.clone()),
     };
 
     merged.flags = merge_flags(&base.flags, &overlay.flags, strategy);
@@ -180,4 +198,3 @@ mod tests {
         assert_eq!(merged.global_flags.len(), 2);
     }
 }
-

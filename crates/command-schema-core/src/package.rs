@@ -37,4 +37,3 @@ impl SchemaPackage {
         self.schemas.len()
     }
 }
-
