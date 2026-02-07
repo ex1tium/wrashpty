@@ -535,7 +535,9 @@ fn probe_subcommands_recursive(
                 // Merge extracted info into subcommand
                 subcmd.flags = sub_schema.global_flags;
                 subcmd.positional = sub_schema.positional;
-                subcmd.description = sub_schema.description.or(subcmd.description.take());
+                // Preserve the parent help's subcommand description when present;
+                // recursive subcommand probes often start with generic banners.
+                subcmd.description = subcmd.description.take().or(sub_schema.description);
 
                 // Add nested subcommands
                 let mut nested_subcommands = sub_schema.subcommands;
