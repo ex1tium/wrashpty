@@ -101,8 +101,8 @@ struct HelpPatterns {
 impl HelpPatterns {
     fn new() -> Self {
         Self {
-            // -v, -x, -4, -0
-            short_flag: Regex::new(r"^\s*(-[a-zA-Z0-9])(?:\s|,|\[|\||$)").unwrap(),
+            // -v, -x, -4, -0, -?, -@
+            short_flag: Regex::new(r"^\s*(-[a-zA-Z0-9?@])(?:\s|,|\[|\||$)").unwrap(),
             // -chdir, -log-level, etc (single-dash long options used by some CLIs)
             single_dash_word_flag: Regex::new(
                 r"^\s*(-[a-zA-Z][a-zA-Z0-9-]{1,})(?:\s|,|=|<|\[|\||$)"
@@ -112,7 +112,7 @@ impl HelpPatterns {
             long_flag: Regex::new(r"^\s*(--[a-zA-Z][-a-zA-Z0-9.]*)(?:\s|=|\[|,|\||\)|$)").unwrap(),
             // -v, --verbose  OR  -v/--verbose
             combined_flag: Regex::new(
-                r"^\s*(-[a-zA-Z0-9]{1,3})(?:\s*,\s*|\s*/\s*|\s+)(--[a-zA-Z][-a-zA-Z0-9.]*)"
+                r"^\s*(-[a-zA-Z0-9?@]{1,3})(?:\s*,\s*|\s*/\s*|\s+)(--[a-zA-Z][-a-zA-Z0-9.]*)"
             ).unwrap(),
             // --flag=VALUE, --flag <value>, --flag [value], -f VALUE
             // Only match: =VALUE, <VALUE>, [value], or ALLCAPS right after flag
@@ -313,7 +313,11 @@ impl HelpParser {
 
         schema.global_flags = Self::dedupe_flags(schema.global_flags);
         schema.subcommands = Self::dedupe_subcommands(schema.subcommands);
-        self.apply_flag_choice_hints(&indexed_lines, &mut schema.global_flags, &mut recognized_indices);
+        self.apply_flag_choice_hints(
+            &indexed_lines,
+            &mut schema.global_flags,
+            &mut recognized_indices,
+        );
 
         // Calculate confidence based on what we extracted
         schema.confidence = self.calculate_confidence(&schema);
@@ -582,16 +586,29 @@ impl HelpParser {
 
     /// Parses flag/option lines.
     fn parse_flags(&self, lines: &[&str]) -> Vec<FlagSchema> {
-        lines
-            .iter()
-            .filter_map(|line| self.parse_flag_line(line))
+        let mut flags = Vec::new();
+        for line in lines {
+            flags.extend(self.parse_flag_entries_from_line(line));
+        }
+        flags
+    }
+
+    fn parse_flag_entries_from_line(&self, line: &str) -> Vec<FlagSchema> {
+        let trimmed = line.trim();
+        if !Self::looks_like_flag_row_start(trimmed) {
+            return Vec::new();
+        }
+
+        Self::split_packed_option_entries(trimmed)
+            .into_iter()
+            .filter_map(|entry| self.parse_flag_line(entry))
             .collect()
     }
 
     /// Parses a single flag line.
     fn parse_flag_line(&self, line: &str) -> Option<FlagSchema> {
         let trimmed = line.trim();
-        if !trimmed.starts_with('-') {
+        if !Self::looks_like_flag_row_start(trimmed) {
             return None;
         }
 
@@ -656,8 +673,7 @@ impl HelpParser {
     fn normalize_help_output(raw: &str) -> String {
         static ANSI_RE: LazyLock<Regex> =
             LazyLock::new(|| Regex::new(r"\x1b\[[0-9;?]*[ -/]*[@-~]").unwrap());
-        static OVERSTRIKE_RE: LazyLock<Regex> =
-            LazyLock::new(|| Regex::new(r".\x08").unwrap());
+        static OVERSTRIKE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r".\x08").unwrap());
 
         let stripped = ANSI_RE.replace_all(raw, "");
         let mut cleaned = stripped.into_owned();
@@ -679,11 +695,10 @@ impl HelpParser {
 
             // Merge wrapped description lines into previous line.
             let is_wrapped_continuation = line.starts_with(' ')
-                && !trimmed_start.starts_with('-')
                 && !trimmed_start.ends_with(':')
                 && normalized.last().is_some_and(|prev| {
                     let prev_trimmed = prev.trim();
-                    let prev_is_flag = prev_trimmed.starts_with('-');
+                    let prev_is_flag = Self::looks_like_flag_row_start(prev_trimmed);
                     let prev_is_two_column_subcommand = Self::split_two_columns(prev_trimmed)
                         .is_some_and(|(left, _)| {
                             !left.starts_with('-')
@@ -692,10 +707,14 @@ impl HelpParser {
                                     .next()
                                     .is_some_and(|ch| ch.is_ascii_alphanumeric())
                         });
+                    let starts_new_flag_row = Self::looks_like_flag_row_start(trimmed_start)
+                        && !trimmed_start.contains(';');
+                    let looks_like_subcommand = Self::looks_like_subcommand_entry(trimmed_start);
                     (prev_is_flag || prev_is_two_column_subcommand)
                         && !prev_trimmed.is_empty()
-                        && !prev_trimmed.ends_with(':')
-                        && !Self::looks_like_subcommand_entry(trimmed_start)
+                        && (!prev_trimmed.ends_with(':') || prev_is_flag)
+                        && (!looks_like_subcommand || prev_is_flag)
+                        && !starts_new_flag_row
                 });
 
             if is_wrapped_continuation {
@@ -730,6 +749,57 @@ impl HelpParser {
             return None;
         }
         Some((left, right))
+    }
+
+    fn split_packed_option_entries(line: &str) -> Vec<&str> {
+        // Some CLIs compact multiple flag rows into one line:
+        // "-f ...   -u ...". Split those rows before parsing.
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            return Vec::new();
+        }
+
+        let mut entries = Vec::new();
+        let mut start = 0usize;
+        let bytes = trimmed.as_bytes();
+        let mut idx = 0usize;
+        while idx < bytes.len() {
+            if bytes[idx] != b' ' {
+                idx += 1;
+                continue;
+            }
+
+            let run_start = idx;
+            while idx < bytes.len() && bytes[idx] == b' ' {
+                idx += 1;
+            }
+            let run_len = idx - run_start;
+            if run_len < 2 || idx + 1 >= bytes.len() || bytes[idx] != b'-' {
+                continue;
+            }
+
+            let next = bytes[idx + 1] as char;
+            if next.is_ascii_whitespace() || next == '-' {
+                continue;
+            }
+
+            let entry = trimmed[start..run_start].trim();
+            if !entry.is_empty() {
+                entries.push(entry);
+            }
+            start = idx;
+        }
+
+        let tail = trimmed[start..].trim();
+        if !tail.is_empty() {
+            entries.push(tail);
+        }
+
+        if entries.is_empty() {
+            vec![trimmed]
+        } else {
+            entries
+        }
     }
 
     fn looks_like_subcommand_entry(trimmed: &str) -> bool {
@@ -1020,11 +1090,12 @@ impl HelpParser {
 
         for line in lines {
             let trimmed = line.text.trim();
-            if !trimmed.starts_with('-') {
+            if !Self::looks_like_flag_row_start(trimmed) {
                 continue;
             }
-            if let Some(flag) = self.parse_flag_line(trimmed) {
-                flags.push(flag);
+            let parsed = self.parse_flag_entries_from_line(trimmed);
+            if !parsed.is_empty() {
+                flags.extend(parsed);
                 recognized.insert(line.index);
             }
         }
@@ -1479,13 +1550,45 @@ impl HelpParser {
         }
         if Self::is_usage_line(trimmed)
             || Self::is_section_header_line(trimmed)
-            || trimmed.starts_with('-')
+            || Self::looks_like_flag_row_start(trimmed)
             || Self::looks_like_structured_two_column(trimmed)
             || Self::looks_like_comma_command_list(trimmed)
         {
             return true;
         }
         false
+    }
+
+    fn looks_like_flag_row_start(trimmed: &str) -> bool {
+        let Some(rest) = trimmed.strip_prefix('-') else {
+            return false;
+        };
+        if rest.is_empty() {
+            return false;
+        }
+
+        // Long form: --flag
+        if let Some(long) = rest.strip_prefix('-') {
+            return long
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_alphanumeric());
+        }
+
+        let mut chars = rest.chars();
+        let Some(first) = chars.next() else {
+            return false;
+        };
+        if first.is_whitespace() {
+            return false;
+        }
+
+        // "-20 ..." is often prose/ranges, not a flag row.
+        if first.is_ascii_digit() && chars.next().is_some_and(|ch| ch.is_ascii_digit()) {
+            return false;
+        }
+
+        true
     }
 
     fn is_usage_line(trimmed: &str) -> bool {
@@ -1522,8 +1625,12 @@ impl HelpParser {
             return false;
         }
 
+        if left == "-" {
+            return false;
+        }
+
         if left.starts_with('-') {
-            return true;
+            return Self::looks_like_flag_row_start(left);
         }
 
         left.split(',')
@@ -1842,6 +1949,27 @@ Options:
 
 Valid arguments for -D:
 exec, opt, rates, search, stat, time, tree, all, help
+"#;
+
+    const PACKED_MULTI_FLAG_ROW_HELP: &str = r#"
+Usage: zip [options]
+
+  -@   read names from stdin        -o   make zipfile as old as latest entry
+  -?|-h list help
+"#;
+
+    const FLAG_DESCRIPTION_WRAP_AFTER_COLON_HELP: &str = r#"
+Options:
+  --quoting-style=WORD   use quoting style WORD for entry names:
+                         literal, locale, shell, shell-always,
+                         shell-escape, shell-escape-always, c, escape
+"#;
+
+    const DASH_BULLET_PROSE_HELP: &str = r#"
+nice - run a program with modified scheduling priority
+
+-20 (most favorable to the process) to 19 (least favorable to the process).
+  -    the exit status of COMMAND otherwise
 "#;
 
     #[test]
@@ -2266,5 +2394,66 @@ Flags:
             }
             other => panic!("expected Choice value type, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_parse_packed_multi_flag_rows_and_symbolic_short_flags() {
+        let mut parser = HelpParser::new("zip", PACKED_MULTI_FLAG_ROW_HELP);
+        let schema = parser.parse().unwrap();
+
+        assert!(
+            schema
+                .global_flags
+                .iter()
+                .any(|flag| flag.short.as_deref() == Some("-@"))
+        );
+        assert!(
+            schema
+                .global_flags
+                .iter()
+                .any(|flag| flag.short.as_deref() == Some("-o"))
+        );
+        assert!(
+            schema
+                .global_flags
+                .iter()
+                .any(|flag| flag.short.as_deref() == Some("-?"))
+        );
+    }
+
+    #[test]
+    fn test_merge_wrapped_flag_description_after_colon() {
+        let mut parser = HelpParser::new("ls", FLAG_DESCRIPTION_WRAP_AFTER_COLON_HELP);
+        let schema = parser.parse().unwrap();
+        let diagnostics = parser.diagnostics();
+
+        let quoting_style = schema
+            .global_flags
+            .iter()
+            .find(|flag| flag.long.as_deref() == Some("--quoting-style"))
+            .expect("--quoting-style flag should exist");
+        let description = quoting_style.description.as_deref().unwrap_or_default();
+        assert!(
+            description.contains("literal, locale"),
+            "description was: {description}"
+        );
+        assert!(
+            diagnostics.unresolved_lines.is_empty(),
+            "unresolved lines: {:?}",
+            diagnostics.unresolved_lines
+        );
+    }
+
+    #[test]
+    fn test_diagnostics_ignore_dash_bullet_prose_rows() {
+        let mut parser = HelpParser::new("nice", DASH_BULLET_PROSE_HELP);
+        let _schema = parser.parse().unwrap();
+        let diagnostics = parser.diagnostics();
+
+        assert!(
+            diagnostics.unresolved_lines.is_empty(),
+            "unresolved lines: {:?}",
+            diagnostics.unresolved_lines
+        );
     }
 }
