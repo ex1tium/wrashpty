@@ -44,6 +44,7 @@ pub mod bootstrap;
 pub mod db_schema;
 pub mod error;
 pub mod schema;
+pub mod schema_index;
 pub mod sync;
 pub mod tokenizer;
 pub mod types;

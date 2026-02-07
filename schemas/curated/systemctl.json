@@ -1,0 +1,172 @@
+{
+  "command": "systemctl",
+  "description": "Control the systemd system and service manager",
+  "global_flags": [
+    {
+      "short": null,
+      "long": "--user",
+      "value_type": "Bool",
+      "takes_value": false,
+      "description": "Talk to the service manager of the calling user",
+      "multiple": false,
+      "conflicts_with": [
+        "--system"
+      ],
+      "requires": []
+    },
+    {
+      "short": null,
+      "long": "--system",
+      "value_type": "Bool",
+      "takes_value": false,
+      "description": "Talk to the system service manager",
+      "multiple": false,
+      "conflicts_with": [
+        "--user"
+      ],
+      "requires": []
+    },
+    {
+      "short": null,
+      "long": "--all",
+      "value_type": "Bool",
+      "takes_value": false,
+      "description": "Show all units/properties including inactive ones",
+      "multiple": false,
+      "conflicts_with": [],
+      "requires": []
+    },
+    {
+      "short": null,
+      "long": "--type",
+      "value_type": "String",
+      "takes_value": true,
+      "description": "Filter by unit type",
+      "multiple": false,
+      "conflicts_with": [],
+      "requires": []
+    },
+    {
+      "short": null,
+      "long": "--state",
+      "value_type": "String",
+      "takes_value": true,
+      "description": "Filter by unit state",
+      "multiple": false,
+      "conflicts_with": [],
+      "requires": []
+    },
+    {
+      "short": "-H",
+      "long": "--host",
+      "value_type": "String",
+      "takes_value": true,
+      "description": "Operate on remote host",
+      "multiple": false,
+      "conflicts_with": [],
+      "requires": []
+    }
+  ],
+  "subcommands": [
+    {
+      "name": "start",
+      "description": "Start one or more units",
+      "flags": [],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "stop",
+      "description": "Stop one or more units",
+      "flags": [],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "restart",
+      "description": "Restart one or more units",
+      "flags": [],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "reload",
+      "description": "Reload one or more units",
+      "flags": [],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "status",
+      "description": "Show runtime status of one or more units",
+      "flags": [],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "enable",
+      "description": "Enable one or more unit files",
+      "flags": [],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "disable",
+      "description": "Disable one or more unit files",
+      "flags": [],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "daemon-reload",
+      "description": "Reload systemd manager configuration",
+      "flags": [],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "list-units",
+      "description": "List units currently in memory",
+      "flags": [],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "list-unit-files",
+      "description": "List installed unit files",
+      "flags": [],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "cat",
+      "description": "Show backing files of one or more units",
+      "flags": [],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "show",
+      "description": "Show properties of one or more units",
+      "flags": [],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    }
+  ],
+  "positional": [],
+  "source": "Bootstrap",
+  "confidence": 1.0,
+  "version": null
+}

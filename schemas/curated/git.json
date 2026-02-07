@@ -1,0 +1,244 @@
+{
+  "command": "git",
+  "description": "Distributed version control system",
+  "global_flags": [
+    {
+      "short": "-C",
+      "long": null,
+      "value_type": "Directory",
+      "takes_value": true,
+      "description": "Run as if git was started in this path",
+      "multiple": false,
+      "conflicts_with": [],
+      "requires": []
+    },
+    {
+      "short": "-c",
+      "long": null,
+      "value_type": "String",
+      "takes_value": true,
+      "description": "Pass a configuration parameter",
+      "multiple": true,
+      "conflicts_with": [],
+      "requires": []
+    },
+    {
+      "short": "-v",
+      "long": "--version",
+      "value_type": "Bool",
+      "takes_value": false,
+      "description": "Show git version",
+      "multiple": false,
+      "conflicts_with": [],
+      "requires": []
+    },
+    {
+      "short": "-h",
+      "long": "--help",
+      "value_type": "Bool",
+      "takes_value": false,
+      "description": "Show help",
+      "multiple": false,
+      "conflicts_with": [],
+      "requires": []
+    }
+  ],
+  "subcommands": [
+    {
+      "name": "add",
+      "description": "Add file contents to the index",
+      "flags": [],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "branch",
+      "description": "List, create, or delete branches",
+      "flags": [],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "checkout",
+      "description": "Switch branches or restore working tree files",
+      "flags": [],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "clone",
+      "description": "Clone a repository",
+      "flags": [],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "commit",
+      "description": "Record changes to the repository",
+      "flags": [
+        {
+          "short": "-m",
+          "long": "--message",
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Use the given message as the commit message",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--amend",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Amend the tip of the current branch",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-a",
+          "long": "--all",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Stage all modified and deleted paths",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        }
+      ],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "diff",
+      "description": "Show changes between commits or working tree",
+      "flags": [],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "fetch",
+      "description": "Download objects and refs from another repository",
+      "flags": [],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "log",
+      "description": "Show commit logs",
+      "flags": [],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "merge",
+      "description": "Join two or more development histories",
+      "flags": [],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "pull",
+      "description": "Fetch from and integrate with another repository",
+      "flags": [],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "push",
+      "description": "Update remote refs",
+      "flags": [],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "rebase",
+      "description": "Reapply commits on top of another base tip",
+      "flags": [],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "remote",
+      "description": "Manage set of tracked repositories",
+      "flags": [],
+      "positional": [],
+      "subcommands": [
+        {
+          "name": "add",
+          "description": "Add a remote",
+          "flags": [],
+          "positional": [],
+          "subcommands": [],
+          "aliases": []
+        },
+        {
+          "name": "remove",
+          "description": "Remove a remote",
+          "flags": [],
+          "positional": [],
+          "subcommands": [],
+          "aliases": []
+        },
+        {
+          "name": "set-url",
+          "description": "Change remote URL",
+          "flags": [],
+          "positional": [],
+          "subcommands": [],
+          "aliases": []
+        }
+      ],
+      "aliases": []
+    },
+    {
+      "name": "restore",
+      "description": "Restore working tree files",
+      "flags": [],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "status",
+      "description": "Show the working tree status",
+      "flags": [],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "switch",
+      "description": "Switch branches",
+      "flags": [],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "tag",
+      "description": "Create, list, delete or verify a tag",
+      "flags": [],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    }
+  ],
+  "positional": [],
+  "source": "Bootstrap",
+  "confidence": 1.0,
+  "version": null
+}

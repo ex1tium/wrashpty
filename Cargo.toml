@@ -96,6 +96,10 @@ assert_cmd = "2.0"
 proptest = "1.4"
 serial_test = "3.2"
 
+[build-dependencies]
+command-schema-core = { path = "crates/command-schema-core" }
+serde_json = { workspace = true }
+
 [profile.release]
 lto = "thin"
 opt-level = 3

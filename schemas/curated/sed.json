@@ -1,0 +1,10 @@
+{
+  "command": "sed",
+  "description": "suppress automatic printing of pattern space",
+  "global_flags": [],
+  "subcommands": [],
+  "positional": [],
+  "source": "HelpCommand",
+  "confidence": 0.65,
+  "version": null
+}

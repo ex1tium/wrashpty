@@ -1,0 +1,1381 @@
+{
+  "command": "cargo",
+  "description": "Rust's package manager",
+  "global_flags": [
+    {
+      "short": "-V",
+      "long": "--version",
+      "value_type": "Bool",
+      "takes_value": false,
+      "description": "Print version info and exit",
+      "multiple": false,
+      "conflicts_with": [],
+      "requires": []
+    },
+    {
+      "short": null,
+      "long": "--list",
+      "value_type": "Bool",
+      "takes_value": false,
+      "description": "List installed commands",
+      "multiple": false,
+      "conflicts_with": [],
+      "requires": []
+    },
+    {
+      "short": null,
+      "long": "--explain",
+      "value_type": "String",
+      "takes_value": true,
+      "description": "Provide a detailed explanation of a rustc error message",
+      "multiple": false,
+      "conflicts_with": [],
+      "requires": []
+    },
+    {
+      "short": "-v",
+      "long": "--verbose",
+      "value_type": "Bool",
+      "takes_value": false,
+      "description": "Use verbose output (-vv very verbose/build.rs output)",
+      "multiple": false,
+      "conflicts_with": [],
+      "requires": []
+    },
+    {
+      "short": "-q",
+      "long": "--quiet",
+      "value_type": "Bool",
+      "takes_value": false,
+      "description": "Do not print cargo log messages",
+      "multiple": false,
+      "conflicts_with": [],
+      "requires": []
+    },
+    {
+      "short": null,
+      "long": "--color",
+      "value_type": "String",
+      "takes_value": true,
+      "description": "Coloring [possible values: auto, always, never]",
+      "multiple": false,
+      "conflicts_with": [],
+      "requires": []
+    },
+    {
+      "short": "-C",
+      "long": null,
+      "value_type": "Directory",
+      "takes_value": true,
+      "description": "Change to DIRECTORY before doing anything (nightly-only)",
+      "multiple": false,
+      "conflicts_with": [],
+      "requires": []
+    },
+    {
+      "short": null,
+      "long": "--locked",
+      "value_type": "Bool",
+      "takes_value": false,
+      "description": "Assert that `Cargo.lock` will remain unchanged",
+      "multiple": false,
+      "conflicts_with": [],
+      "requires": []
+    },
+    {
+      "short": null,
+      "long": "--offline",
+      "value_type": "Bool",
+      "takes_value": false,
+      "description": "Run without accessing the network",
+      "multiple": false,
+      "conflicts_with": [],
+      "requires": []
+    },
+    {
+      "short": null,
+      "long": "--frozen",
+      "value_type": "Bool",
+      "takes_value": false,
+      "description": "Equivalent to specifying both --locked and --offline",
+      "multiple": false,
+      "conflicts_with": [],
+      "requires": []
+    },
+    {
+      "short": null,
+      "long": "--config",
+      "value_type": "File",
+      "takes_value": true,
+      "description": "Override a configuration value",
+      "multiple": false,
+      "conflicts_with": [],
+      "requires": []
+    },
+    {
+      "short": "-Z",
+      "long": null,
+      "value_type": "String",
+      "takes_value": true,
+      "description": "Unstable (nightly-only) flags to Cargo, see 'cargo -Z help' for",
+      "multiple": false,
+      "conflicts_with": [],
+      "requires": []
+    },
+    {
+      "short": "-h",
+      "long": "--help",
+      "value_type": "Bool",
+      "takes_value": false,
+      "description": "Print help",
+      "multiple": false,
+      "conflicts_with": [],
+      "requires": []
+    }
+  ],
+  "subcommands": [
+    {
+      "name": "clean",
+      "description": "Remove artifacts that cargo has generated in the past",
+      "flags": [
+        {
+          "short": null,
+          "long": "--doc",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Whether or not to clean just the documentation directory",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-n",
+          "long": "--dry-run",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Display what would be deleted without deleting anything",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-v",
+          "long": "--verbose",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Use verbose output (-vv very verbose/build.rs output)",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-q",
+          "long": "--quiet",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Do not print cargo log messages",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--color",
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Coloring [possible values: auto, always, never]",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--config",
+          "value_type": "File",
+          "takes_value": true,
+          "description": "Override a configuration value",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-Z",
+          "long": null,
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Unstable (nightly-only) flags to Cargo, see 'cargo -Z help' for",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-h",
+          "long": "--help",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Print help",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        }
+      ],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "new",
+      "description": "Create a new cargo package at <path>",
+      "flags": [
+        {
+          "short": null,
+          "long": "--vcs",
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Initialize a new repository for the given version control system,",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--bin",
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Use a binary (application) template [default]",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--lib",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Use a library template",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--edition",
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Edition to set for the crate generated [possible values: 2015,",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--name",
+          "value_type": "Directory",
+          "takes_value": true,
+          "description": "Set the resulting package name, defaults to the directory name",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--registry",
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Registry to use",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-v",
+          "long": "--verbose",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Use verbose output (-vv very verbose/build.rs output)",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-q",
+          "long": "--quiet",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Do not print cargo log messages",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--color",
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Coloring [possible values: auto, always, never]",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--config",
+          "value_type": "File",
+          "takes_value": true,
+          "description": "Override a configuration value",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-Z",
+          "long": null,
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Unstable (nightly-only) flags to Cargo, see 'cargo -Z help' for",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-h",
+          "long": "--help",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Print help",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        }
+      ],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "init",
+      "description": "Create a new cargo package in an existing directory",
+      "flags": [
+        {
+          "short": null,
+          "long": "--vcs",
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Initialize a new repository for the given version control system,",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--bin",
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Use a binary (application) template [default]",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--lib",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Use a library template",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--edition",
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Edition to set for the crate generated [possible values: 2015,",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--name",
+          "value_type": "Directory",
+          "takes_value": true,
+          "description": "Set the resulting package name, defaults to the directory name",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--registry",
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Registry to use",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-v",
+          "long": "--verbose",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Use verbose output (-vv very verbose/build.rs output)",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-q",
+          "long": "--quiet",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Do not print cargo log messages",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--color",
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Coloring [possible values: auto, always, never]",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--config",
+          "value_type": "File",
+          "takes_value": true,
+          "description": "Override a configuration value",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-Z",
+          "long": null,
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Unstable (nightly-only) flags to Cargo, see 'cargo -Z help' for",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-h",
+          "long": "--help",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Print help",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        }
+      ],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "add",
+      "description": "Add dependencies to a Cargo.toml manifest file",
+      "flags": [
+        {
+          "short": null,
+          "long": "--no-default-features",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": null,
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--default-features",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": null,
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-F",
+          "long": "--features",
+          "value_type": "String",
+          "takes_value": true,
+          "description": null,
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--optional",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": null,
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--no-optional",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": null,
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--public",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": null,
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--no-public",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": null,
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--rename",
+          "value_type": "String",
+          "takes_value": true,
+          "description": null,
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        }
+      ],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "remove",
+      "description": "Remove dependencies from a Cargo.toml manifest file",
+      "flags": [
+        {
+          "short": "-n",
+          "long": "--dry-run",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Don't actually write the manifest",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-v",
+          "long": "--verbose",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Use verbose output (-vv very verbose/build.rs output)",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-q",
+          "long": "--quiet",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Do not print cargo log messages",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--color",
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Coloring [possible values: auto, always, never]",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--config",
+          "value_type": "File",
+          "takes_value": true,
+          "description": "Override a configuration value",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-Z",
+          "long": null,
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Unstable (nightly-only) flags to Cargo, see 'cargo -Z help' for",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-h",
+          "long": "--help",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Print help",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        }
+      ],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "bench",
+      "description": "Execute all benchmarks of a local package",
+      "flags": [
+        {
+          "short": null,
+          "long": "--no-run",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Compile, but don't run benchmarks",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--no-fail-fast",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Run all benchmarks regardless of failure",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--message-format",
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Error format [possible values: human, short, json,",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-v",
+          "long": "--verbose",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Use verbose output (-vv very verbose/build.rs output)",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-q",
+          "long": "--quiet",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Do not print cargo log messages",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--color",
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Coloring [possible values: auto, always, never]",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--config",
+          "value_type": "File",
+          "takes_value": true,
+          "description": "Override a configuration value",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-Z",
+          "long": null,
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Unstable (nightly-only) flags to Cargo, see 'cargo -Z help' for",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-h",
+          "long": "--help",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Print help",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        }
+      ],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "update",
+      "description": "Update dependencies as recorded in the local lock file",
+      "flags": [
+        {
+          "short": "-n",
+          "long": "--dry-run",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Don't actually write the lockfile",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--recursive",
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Force updating all dependencies of [SPEC]... as well",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--precise",
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Update [SPEC] to exactly PRECISE",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-b",
+          "long": "--breaking",
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Update [SPEC] to latest SemVer-breaking version (unstable)",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-v",
+          "long": "--verbose",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Use verbose output (-vv very verbose/build.rs output)",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-q",
+          "long": "--quiet",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Do not print cargo log messages",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--color",
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Coloring [possible values: auto, always, never]",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--config",
+          "value_type": "File",
+          "takes_value": true,
+          "description": "Override a configuration value",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-Z",
+          "long": null,
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Unstable (nightly-only) flags to Cargo, see 'cargo -Z help' for",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-h",
+          "long": "--help",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Print help",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        }
+      ],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "search",
+      "description": "Search packages in the registry. Default registry is crates.io",
+      "flags": [
+        {
+          "short": null,
+          "long": "--limit",
+          "value_type": "Number",
+          "takes_value": true,
+          "description": "Limit the number of results (default: 10, max: 100)",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--index",
+          "value_type": "Url",
+          "takes_value": true,
+          "description": "Registry index URL to search packages in",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--registry",
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Registry to search packages in",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-v",
+          "long": "--verbose",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Use verbose output (-vv very verbose/build.rs output)",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-q",
+          "long": "--quiet",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Do not print cargo log messages",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--color",
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Coloring [possible values: auto, always, never]",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--config",
+          "value_type": "File",
+          "takes_value": true,
+          "description": "Override a configuration value",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-Z",
+          "long": null,
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Unstable (nightly-only) flags to Cargo, see 'cargo -Z help' for",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-h",
+          "long": "--help",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Print help",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        }
+      ],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "publish",
+      "description": "Upload a package to the registry",
+      "flags": [
+        {
+          "short": "-n",
+          "long": "--dry-run",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Perform all checks without uploading",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--index",
+          "value_type": "Url",
+          "takes_value": true,
+          "description": "Registry index URL to upload the package to",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--registry",
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Registry to upload the package to",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--no-verify",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Don't verify the contents by building them",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--allow-dirty",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Allow dirty working directories to be packaged",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-v",
+          "long": "--verbose",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Use verbose output (-vv very verbose/build.rs output)",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-q",
+          "long": "--quiet",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Do not print cargo log messages",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--color",
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Coloring [possible values: auto, always, never]",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--config",
+          "value_type": "File",
+          "takes_value": true,
+          "description": "Override a configuration value",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-Z",
+          "long": null,
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Unstable (nightly-only) flags to Cargo, see 'cargo -Z help' for",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-h",
+          "long": "--help",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Print help",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        }
+      ],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "install",
+      "description": "Install a Rust binary",
+      "flags": [
+        {
+          "short": null,
+          "long": "--version",
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Specify a version to install",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--index",
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Registry index to install from",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--registry",
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Registry to use",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--git",
+          "value_type": "Url",
+          "takes_value": true,
+          "description": "Git URL to install the specified crate from",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--branch",
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Branch to use when installing from git",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--tag",
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Tag to use when installing from git",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--rev",
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Specific commit to use when installing from git",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--path",
+          "value_type": "File",
+          "takes_value": true,
+          "description": "Filesystem path to local crate to install from",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--root",
+          "value_type": "Directory",
+          "takes_value": true,
+          "description": "Directory to install packages into",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-f",
+          "long": "--force",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Force overwriting existing crates or binaries",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-n",
+          "long": "--dry-run",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Perform all checks without installing (unstable)",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--no-track",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Do not save tracking information",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--list",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "List all installed packages and their versions",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--message-format",
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Error format [possible values: human, short, json,",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--debug",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Build in debug mode (with the 'dev' profile) instead of release",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-v",
+          "long": "--verbose",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Use verbose output (-vv very verbose/build.rs output)",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-q",
+          "long": "--quiet",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Do not print cargo log messages",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--color",
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Coloring [possible values: auto, always, never]",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--config",
+          "value_type": "File",
+          "takes_value": true,
+          "description": "Override a configuration value",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-Z",
+          "long": null,
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Unstable (nightly-only) flags to Cargo, see 'cargo -Z help' for",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-h",
+          "long": "--help",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Print help",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        }
+      ],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    },
+    {
+      "name": "uninstall",
+      "description": "Remove a Rust binary",
+      "flags": [
+        {
+          "short": null,
+          "long": "--root",
+          "value_type": "Directory",
+          "takes_value": true,
+          "description": "Directory to uninstall packages from",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-v",
+          "long": "--verbose",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Use verbose output (-vv very verbose/build.rs output)",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-q",
+          "long": "--quiet",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Do not print cargo log messages",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--color",
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Coloring [possible values: auto, always, never]",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": null,
+          "long": "--config",
+          "value_type": "File",
+          "takes_value": true,
+          "description": "Override a configuration value",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-Z",
+          "long": null,
+          "value_type": "String",
+          "takes_value": true,
+          "description": "Unstable (nightly-only) flags to Cargo, see 'cargo -Z help' for",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        },
+        {
+          "short": "-h",
+          "long": "--help",
+          "value_type": "Bool",
+          "takes_value": false,
+          "description": "Print help",
+          "multiple": false,
+          "conflicts_with": [],
+          "requires": []
+        }
+      ],
+      "positional": [],
+      "subcommands": [],
+      "aliases": []
+    }
+  ],
+  "positional": [],
+  "source": "HelpCommand",
+  "confidence": 1.0,
+  "version": null
+}
