@@ -6,8 +6,9 @@
 use rusqlite::Connection;
 use tracing::{debug, info};
 
+use command_schema_core::SubcommandSchema;
+
 use super::error::CIError;
-use super::schema::SubcommandSchema;
 use super::schema_index::SchemaIndex;
 
 /// Seeds the command hierarchy from schema index data if bootstrap has not run.

@@ -1,8 +1,6 @@
-//! Command schema extraction and storage.
+//! Command schema types and learned-overlay storage.
 //!
-//! This module provides shared schema types from `command-schema-core`
-//! and local schema storage for learned overlays.
+//! Command schema types are re-exported from `command-schema-core`.
 
-pub mod storage;
-pub mod types;
-pub use types::*;
+pub(crate) mod storage;
+pub use command_schema_core::*;

@@ -18,13 +18,13 @@
 
 use std::collections::HashMap;
 
+use command_schema_core::{CommandSchema, FlagSchema, SchemaSource, SubcommandSchema, ValueType};
 use rusqlite::Connection;
 use tracing::{debug, info, warn};
 
 use super::error::CIError;
 use super::patterns::{self, flags, hierarchy, pipes, sequences};
 use super::schema::storage::SchemaStore;
-use super::schema::{CommandSchema, FlagSchema, SchemaSource, SubcommandSchema, ValueType};
 use super::schema_index::SchemaIndex;
 use super::templates;
 use super::tokenizer::{analyze_command, compute_command_hash};
@@ -355,7 +355,7 @@ pub(crate) fn upsert_schema_from_tokens(
     };
 
     // Embedded curated schemas are authoritative for structure.
-    if schema_index.has_schema(base_command) {
+    if schema_index.is_curated(base_command) {
         return Ok(());
     }
 

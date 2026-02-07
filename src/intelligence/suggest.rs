@@ -26,12 +26,12 @@
 //! then deduplicated, penalized for low success rates, and boosted for high
 //! success rates before final ranking.
 
+use command_schema_core::{CommandSchema, FlagSchema, SubcommandSchema, ValueType};
 use rusqlite::Connection;
 use tracing::debug;
 
 use super::fuzzy;
 use super::patterns;
-use super::schema::{CommandSchema, FlagSchema, SubcommandSchema, ValueType};
 use super::schema_index::SchemaIndex;
 use super::scoring::{self, ContextMatch};
 use super::sessions;
