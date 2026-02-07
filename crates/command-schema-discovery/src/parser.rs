@@ -13,7 +13,7 @@ use std::sync::LazyLock;
 use tracing::debug;
 
 use command_schema_core::{
-    CommandSchema, FlagSchema, HelpFormat, SchemaSource, SubcommandSchema, ValueType,
+    ArgSchema, CommandSchema, FlagSchema, HelpFormat, SchemaSource, SubcommandSchema, ValueType,
 };
 
 /// Weighted score for a detected help-output format.
@@ -68,6 +68,7 @@ struct SectionBuckets {
     subcommands: Vec<SectionEntry>,
     flags: Vec<SectionEntry>,
     options: Vec<SectionEntry>,
+    arguments: Vec<SectionEntry>,
 }
 
 /// Regex patterns for parsing help output.
@@ -253,6 +254,19 @@ impl HelpParser {
                 schema.global_flags.extend(flags);
             }
         }
+        if !sections.arguments.is_empty() {
+            let refs: Vec<&str> = sections
+                .arguments
+                .iter()
+                .map(|entry| entry.text.as_str())
+                .collect();
+            let args = self.parse_arguments_section(&refs);
+            if !args.is_empty() {
+                recognized_indices.extend(sections.arguments.iter().map(|entry| entry.index));
+                parsers_used.push("section-arguments".to_string());
+                schema.positional.extend(args);
+            }
+        }
 
         // Stage 2: format-aware and well-known structural fallbacks.
 
@@ -314,8 +328,19 @@ impl HelpParser {
             }
         }
 
+        if schema.positional.is_empty() {
+            let (usage_args, usage_arg_recognized) =
+                self.parse_usage_positionals(&indexed_lines, !schema.subcommands.is_empty());
+            if !usage_args.is_empty() {
+                recognized_indices.extend(usage_arg_recognized);
+                parsers_used.push("usage-positionals".to_string());
+                schema.positional.extend(usage_args);
+            }
+        }
+
         schema.global_flags = Self::dedupe_flags(schema.global_flags);
         schema.subcommands = Self::dedupe_subcommands(schema.subcommands);
+        schema.positional = Self::dedupe_args(schema.positional);
         self.apply_flag_choice_hints(
             &indexed_lines,
             &mut schema.global_flags,
@@ -416,7 +441,11 @@ impl HelpParser {
                     index: line.index,
                     text: trimmed.to_string(),
                 }),
-                Some(SectionKind::Arguments) | None => {}
+                Some(SectionKind::Arguments) => buckets.arguments.push(SectionEntry {
+                    index: line.index,
+                    text: trimmed.to_string(),
+                }),
+                None => {}
             }
         }
 
@@ -628,6 +657,228 @@ impl HelpParser {
         })
     }
 
+    fn parse_arguments_section(&self, lines: &[&str]) -> Vec<ArgSchema> {
+        let mut positional = Vec::new();
+        let mut seen = HashSet::new();
+
+        for line in lines {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || Self::looks_like_flag_row_start(trimmed) {
+                continue;
+            }
+
+            let (left, description) = if let Some((name_col, desc_col)) = Self::split_two_columns(trimmed)
+            {
+                (name_col, Some(desc_col))
+            } else {
+                (trimmed, None)
+            };
+
+            for mut arg in Self::parse_argument_tokens(left) {
+                if arg.description.is_none() {
+                    arg.description = description.map(ToOwned::to_owned);
+                }
+                if arg.value_type == ValueType::String
+                    && let Some(desc) = arg.description.as_deref()
+                {
+                    arg.value_type = self.infer_value_type(desc);
+                }
+                let key = arg.name.to_ascii_lowercase();
+                if seen.insert(key) {
+                    positional.push(arg);
+                }
+            }
+        }
+
+        positional
+    }
+
+    fn parse_argument_tokens(value: &str) -> Vec<ArgSchema> {
+        let mut args = Vec::new();
+
+        for raw in value.split_whitespace() {
+            let token = raw.trim_matches(|ch| matches!(ch, ',' | ';' | ':'));
+            if token.is_empty() || token.starts_with('-') || token == "|" || token == "or" {
+                continue;
+            }
+
+            let mut multiple = token.contains("...");
+            let required = !token.starts_with('[');
+
+            let mut cleaned = token.trim_matches(|ch| matches!(ch, '[' | ']' | '<' | '>' | '(' | ')' | '{' | '}'));
+            cleaned = cleaned.trim_start_matches('+');
+            cleaned = cleaned.trim_end_matches("...");
+            cleaned = cleaned.trim_matches(|ch| matches!(ch, ',' | ';' | ':'));
+
+            if cleaned.is_empty() {
+                continue;
+            }
+            if Self::is_placeholder_keyword(cleaned) {
+                continue;
+            }
+            if !Self::looks_like_argument_name(cleaned) {
+                continue;
+            }
+            if raw.ends_with("...") {
+                multiple = true;
+            }
+
+            args.push(ArgSchema {
+                name: cleaned.to_string(),
+                value_type: Self::infer_argument_value_type(cleaned),
+                required,
+                multiple,
+                description: None,
+            });
+        }
+
+        args
+    }
+
+    fn parse_usage_positionals(
+        &self,
+        lines: &[IndexedLine],
+        has_subcommands: bool,
+    ) -> (Vec<ArgSchema>, HashSet<usize>) {
+        let mut usage_text = String::new();
+        let mut recognized = HashSet::new();
+        let mut in_usage = false;
+
+        for line in lines {
+            let raw = line.text.as_str();
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                if in_usage {
+                    break;
+                }
+                continue;
+            }
+
+            if trimmed.to_ascii_lowercase().starts_with("usage:") {
+                in_usage = true;
+                recognized.insert(line.index);
+                usage_text.push_str(trimmed);
+                usage_text.push(' ');
+                continue;
+            }
+
+            if !in_usage {
+                continue;
+            }
+
+            if raw.starts_with(' ') || raw.starts_with('\t') {
+                recognized.insert(line.index);
+                usage_text.push_str(trimmed);
+                usage_text.push(' ');
+                continue;
+            }
+
+            break;
+        }
+
+        if usage_text.is_empty() {
+            return (Vec::new(), HashSet::new());
+        }
+
+        let usage_lower = usage_text.to_ascii_lowercase();
+        let mut args = Vec::new();
+        let mut seen = HashSet::new();
+        for raw in usage_text.split_whitespace() {
+            let token = raw.trim_matches(|ch| matches!(ch, ',' | ';' | ':'));
+            if token.eq_ignore_ascii_case("usage:") || token.starts_with('-') {
+                continue;
+            }
+            if token.eq_ignore_ascii_case(&self.command) {
+                continue;
+            }
+            if token.contains("::=") {
+                continue;
+            }
+
+            let has_placeholder_markers =
+                token.contains('<') || token.contains('[') || token.contains("...");
+            let looks_upper_placeholder = token.chars().any(|ch| ch.is_ascii_uppercase())
+                && token
+                    .chars()
+                    .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || matches!(ch, '_' | '[' | ']' | '.' | '+' | '<' | '>'));
+            if !has_placeholder_markers && !looks_upper_placeholder {
+                continue;
+            }
+
+            for mut arg in Self::parse_argument_tokens(token) {
+                let lower = arg.name.to_ascii_lowercase();
+                if has_subcommands && matches!(lower.as_str(), "command" | "subcommand" | "cmd") {
+                    continue;
+                }
+                if matches!(
+                    lower.as_str(),
+                    "usage" | "options" | "option" | "flags" | "flag" | "args" | "arguments"
+                ) {
+                    continue;
+                }
+                // Avoid parsing grammar rows from network/route tools.
+                if usage_lower.contains(":=") && arg.name.chars().all(|ch| ch.is_ascii_uppercase()) {
+                    continue;
+                }
+                let key = arg.name.to_ascii_lowercase();
+                if seen.insert(key) {
+                    if token.starts_with('[') {
+                        arg.required = false;
+                    }
+                    args.push(arg);
+                }
+            }
+        }
+
+        if args.is_empty() {
+            (args, HashSet::new())
+        } else {
+            (args, recognized)
+        }
+    }
+
+    fn infer_argument_value_type(name: &str) -> ValueType {
+        let lower = name.to_ascii_lowercase();
+        if lower.contains("file") {
+            return ValueType::File;
+        }
+        if lower.contains("dir") || lower.contains("path") {
+            return ValueType::Directory;
+        }
+        if lower.contains("url") || lower.contains("uri") {
+            return ValueType::Url;
+        }
+        if lower.contains("num") || lower.contains("count") || lower.contains("size") {
+            return ValueType::Number;
+        }
+        ValueType::String
+    }
+
+    fn is_placeholder_keyword(token: &str) -> bool {
+        matches!(
+            token.to_ascii_lowercase().as_str(),
+            "options"
+                | "option"
+                | "flags"
+                | "flag"
+                | "args"
+                | "arguments"
+                | "usage"
+                | "command"
+                | "subcommand"
+                | "commands"
+        )
+    }
+
+    fn looks_like_argument_name(token: &str) -> bool {
+        if token.is_empty() || token.len() > 64 {
+            return false;
+        }
+        token
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.'))
+    }
+
     /// Parses flag/option lines.
     fn parse_flags(&self, lines: &[&str]) -> Vec<FlagSchema> {
         let mut flags = Vec::new();
@@ -715,6 +966,7 @@ impl HelpParser {
         let mut takes_value = false;
         let mut value_type = ValueType::Bool;
         let mut description: Option<String> = None;
+        let mut inferred_multiple = false;
 
         // Try combined format first: -m, --message
         if let Some(caps) = PATTERNS.combined_flag.captures(trimmed) {
@@ -728,6 +980,17 @@ impl HelpParser {
             short = Some(caps[1].to_string());
         } else {
             return None;
+        }
+
+        if let Some(short_flag) = short.as_mut() {
+            let (normalized, multiple) = Self::normalize_flag_token(short_flag);
+            *short_flag = normalized;
+            inferred_multiple = inferred_multiple || multiple;
+        }
+        if let Some(long_flag) = long.as_mut() {
+            let (normalized, multiple) = Self::normalize_flag_token(long_flag);
+            *long_flag = normalized;
+            inferred_multiple = inferred_multiple || multiple;
         }
 
         // Check for value indicator
@@ -756,16 +1019,128 @@ impl HelpParser {
             }
         }
 
+        let mut conflicts_with = Vec::new();
+        let mut requires = Vec::new();
+        if let Some(desc) = description.as_deref() {
+            let (parsed_conflicts, parsed_requires) = Self::extract_flag_relationships(desc);
+            conflicts_with = parsed_conflicts;
+            requires = parsed_requires;
+        }
+
+        let multiple = Self::infer_multiple_flag_occurrences(
+            definition_part,
+            description.as_deref(),
+            inferred_multiple,
+        );
+
+        if let Some(this_short) = short.as_deref() {
+            conflicts_with.retain(|item| item != this_short);
+            requires.retain(|item| item != this_short);
+        }
+        if let Some(this_long) = long.as_deref() {
+            conflicts_with.retain(|item| item != this_long);
+            requires.retain(|item| item != this_long);
+        }
+
         Some(FlagSchema {
             short,
             long,
             value_type,
             takes_value,
             description,
-            multiple: false,
-            conflicts_with: Vec::new(),
-            requires: Vec::new(),
+            multiple,
+            conflicts_with,
+            requires,
         })
+    }
+
+    fn normalize_flag_token(raw: &str) -> (String, bool) {
+        let mut token = raw
+            .trim()
+            .trim_end_matches(',')
+            .trim_end_matches(';')
+            .to_string();
+        let mut multiple = false;
+
+        if token.starts_with("--[no-]") {
+            token = format!("--{}", token.trim_start_matches("--[no-]"));
+        }
+
+        if token.ends_with("...") {
+            token.truncate(token.len().saturating_sub(3));
+            multiple = true;
+        }
+        while token.ends_with('.') {
+            token.pop();
+            multiple = true;
+        }
+
+        token = token
+            .trim_end_matches(',')
+            .trim_end_matches(';')
+            .trim()
+            .to_string();
+        (token, multiple)
+    }
+
+    fn infer_multiple_flag_occurrences(
+        definition: &str,
+        description: Option<&str>,
+        explicit: bool,
+    ) -> bool {
+        if explicit {
+            return true;
+        }
+
+        let mut hint_text = definition.to_ascii_lowercase();
+        if let Some(desc) = description {
+            hint_text.push(' ');
+            hint_text.push_str(&desc.to_ascii_lowercase());
+        }
+
+        hint_text.contains("...") ||
+            hint_text.contains("multiple times") ||
+            hint_text.contains("more than once") ||
+            hint_text.contains("repeatable")
+    }
+
+    fn extract_flag_relationships(description: &str) -> (Vec<String>, Vec<String>) {
+        static FLAG_REF_RE: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"(--[a-zA-Z][-a-zA-Z0-9.]*|-[a-zA-Z0-9?@]{1,3})").unwrap()
+        });
+        let lower = description.to_ascii_lowercase();
+        let mut conflicts = Vec::new();
+        let mut requires = Vec::new();
+
+        let is_conflict = lower.contains("conflict")
+            || lower.contains("cannot be used with")
+            || lower.contains("mutually exclusive")
+            || lower.contains("incompatible with")
+            || lower.contains("overrides ");
+        if is_conflict {
+            for capture in FLAG_REF_RE.captures_iter(description) {
+                let (normalized, _) = Self::normalize_flag_token(&capture[1]);
+                if !normalized.is_empty() && !conflicts.contains(&normalized) {
+                    conflicts.push(normalized);
+                }
+            }
+        }
+
+        let is_requirement = lower.contains("requires ")
+            || lower.contains("require ")
+            || lower.contains("must be used with")
+            || lower.contains("only with")
+            || lower.contains("equivalent to specifying both");
+        if is_requirement {
+            for capture in FLAG_REF_RE.captures_iter(description) {
+                let (normalized, _) = Self::normalize_flag_token(&capture[1]);
+                if !normalized.is_empty() && !requires.contains(&normalized) {
+                    requires.push(normalized);
+                }
+            }
+        }
+
+        (conflicts, requires)
     }
 
     fn normalize_help_output(raw: &str) -> String {
@@ -1778,6 +2153,28 @@ impl HelpParser {
         deduped
     }
 
+    fn dedupe_args(args: Vec<ArgSchema>) -> Vec<ArgSchema> {
+        let mut deduped: Vec<ArgSchema> = Vec::new();
+        for arg in args {
+            if let Some(existing) = deduped
+                .iter_mut()
+                .find(|item| item.name.eq_ignore_ascii_case(&arg.name))
+            {
+                existing.required = existing.required || arg.required;
+                existing.multiple = existing.multiple || arg.multiple;
+                if existing.description.is_none() {
+                    existing.description = arg.description;
+                }
+                if existing.value_type == ValueType::String && arg.value_type != ValueType::String {
+                    existing.value_type = arg.value_type;
+                }
+            } else {
+                deduped.push(arg);
+            }
+        }
+        deduped
+    }
+
     fn apply_flag_choice_hints(
         &self,
         lines: &[IndexedLine],
@@ -2397,6 +2794,25 @@ Shell options:
   -abefhkmnptuvxBCEHPT or -o option
 "#;
 
+    const ARGUMENTS_SECTION_HELP: &str = r#"
+Usage: sample [OPTIONS] <SOURCE> <DEST>
+
+Arguments:
+  <SOURCE>    Source file path
+  <DEST>      Destination file path
+"#;
+
+    const USAGE_POSITIONAL_HELP: &str = r#"
+Usage: cargo [+toolchain] [OPTIONS] [COMMAND]
+"#;
+
+    const FLAG_RELATION_AND_MULTIPLE_HELP: &str = r#"
+Options:
+  --verbose...               Increase output verbosity (can be used multiple times)
+  --locked                   Assert lockfile is unchanged (conflicts with --offline)
+  --frozen                   Requires --locked and --offline
+"#;
+
     #[test]
     fn test_detect_clap_format() {
         let mut parser = HelpParser::new("myapp", CLAP_HELP);
@@ -2981,5 +3397,69 @@ Special settings:
 
         assert!(!has_short("-ilrsD"));
         assert!(!has_short("-abefhkmnptuvxBCEHPT"));
+    }
+
+    #[test]
+    fn test_parse_arguments_section_into_positionals() {
+        let mut parser = HelpParser::new("sample", ARGUMENTS_SECTION_HELP);
+        let schema = parser.parse().unwrap();
+
+        let source = schema
+            .positional
+            .iter()
+            .find(|arg| arg.name == "SOURCE")
+            .expect("SOURCE positional should exist");
+        assert!(source.required);
+        assert_eq!(source.value_type, ValueType::File);
+
+        let dest = schema
+            .positional
+            .iter()
+            .find(|arg| arg.name == "DEST")
+            .expect("DEST positional should exist");
+        assert!(dest.required);
+        assert_eq!(dest.value_type, ValueType::File);
+    }
+
+    #[test]
+    fn test_parse_usage_positionals_when_argument_section_missing() {
+        let mut parser = HelpParser::new("cargo", USAGE_POSITIONAL_HELP);
+        let schema = parser.parse().unwrap();
+
+        assert!(schema.positional.iter().any(|arg| arg.name == "toolchain"));
+        assert!(
+            schema
+                .positional
+                .iter()
+                .all(|arg| !matches!(arg.name.as_str(), "COMMAND" | "command"))
+        );
+    }
+
+    #[test]
+    fn test_parse_flag_relations_and_multiple_from_description() {
+        let mut parser = HelpParser::new("sample", FLAG_RELATION_AND_MULTIPLE_HELP);
+        let schema = parser.parse().unwrap();
+
+        let verbose = schema
+            .global_flags
+            .iter()
+            .find(|flag| flag.long.as_deref() == Some("--verbose"))
+            .expect("--verbose should exist");
+        assert!(verbose.multiple);
+
+        let locked = schema
+            .global_flags
+            .iter()
+            .find(|flag| flag.long.as_deref() == Some("--locked"))
+            .expect("--locked should exist");
+        assert!(locked.conflicts_with.contains(&"--offline".to_string()));
+
+        let frozen = schema
+            .global_flags
+            .iter()
+            .find(|flag| flag.long.as_deref() == Some("--frozen"))
+            .expect("--frozen should exist");
+        assert!(frozen.requires.contains(&"--locked".to_string()));
+        assert!(frozen.requires.contains(&"--offline".to_string()));
     }
 }
