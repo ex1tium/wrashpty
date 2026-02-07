@@ -23,9 +23,8 @@ use tracing::{debug, info, warn};
 
 use super::error::CIError;
 use super::patterns::{self, flags, hierarchy, pipes, sequences};
-use super::schema::{
-    CommandSchema, FlagSchema, SchemaSource, SchemaStore, SubcommandSchema, ValueType,
-};
+use super::schema::storage::SchemaStore;
+use super::schema::{CommandSchema, FlagSchema, SchemaSource, SubcommandSchema, ValueType};
 use super::templates;
 use super::tokenizer::{analyze_command, compute_command_hash};
 use super::types::SyncStats;
@@ -351,8 +350,6 @@ pub(crate) fn upsert_schema_from_tokens(
         return Ok(());
     };
 
-    maybe_extract_schema_for_command(conn, base_command)?;
-
     let store = SchemaStore::new(conn);
     let mut schema = store
         .get(base_command)?
@@ -435,39 +432,6 @@ pub(crate) fn upsert_schema_from_tokens(
 
     store.store(&schema)
 }
-
-/// Best-effort schema extraction for commands missing schema rows.
-///
-/// Extraction is intentionally skipped in tests to keep them hermetic.
-fn maybe_extract_schema_for_command(conn: &Connection, base_command: &str) -> Result<(), CIError> {
-    if cfg!(test) {
-        return Ok(());
-    }
-
-    let store = SchemaStore::new(conn);
-    if store.has_schema(base_command) {
-        return Ok(());
-    }
-
-    // Keep extraction focused on known compound commands to avoid expensive probes.
-    if !super::tokenizer::is_compound_command(base_command) {
-        return Ok(());
-    }
-
-    let extraction = super::schema::extract_command_schema(base_command);
-    if extraction.success {
-        if let Some(schema) = extraction.schema {
-            store.store(&schema)?;
-            debug!(
-                command = base_command,
-                "Extracted and stored command schema"
-            );
-        }
-    }
-
-    Ok(())
-}
-
 fn extract_subcommand_path(
     base_command: &str,
     tokens: &[super::types::AnalyzedToken],

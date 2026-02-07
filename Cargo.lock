@@ -289,6 +289,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55b672471b4e9f9e95499ea597ff64941a309b2cdbffcc46f2cc5e2d971fd335"
 
 [[package]]
+name = "command-schema-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "command-schema-discovery"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "command-schema-core",
+ "regex",
+ "tracing",
+ "wait-timeout",
+]
+
+[[package]]
 name = "compact_str"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2444,6 +2464,7 @@ dependencies = [
  "assert_cmd",
  "chrono",
  "clap",
+ "command-schema-core",
  "crossterm",
  "dirs",
  "getrandom 0.2.17",

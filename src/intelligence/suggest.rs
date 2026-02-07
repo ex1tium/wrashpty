@@ -31,7 +31,8 @@ use tracing::debug;
 
 use super::fuzzy;
 use super::patterns;
-use super::schema::{CommandSchema, FlagSchema, SchemaStore, SubcommandSchema, ValueType};
+use super::schema::storage::SchemaStore;
+use super::schema::{CommandSchema, FlagSchema, SubcommandSchema, ValueType};
 use super::scoring::{self, ContextMatch};
 use super::sessions;
 use super::templates;
@@ -696,7 +697,8 @@ fn suggest_from_historical_frequency(conn: &Connection, limit: usize) -> Vec<Sug
 mod tests {
     use super::*;
     use crate::intelligence::db_schema;
-    use crate::intelligence::schema::{SchemaSource, store_schema};
+    use crate::intelligence::schema::SchemaSource;
+    use crate::intelligence::schema::storage::store_schema;
     use crate::intelligence::schema::{SubcommandSchema, ValueType};
     use crate::intelligence::tokenizer::compute_command_hash;
     use crate::intelligence::types::AnalyzedToken;

@@ -11,7 +11,7 @@ use regex::Regex;
 use std::sync::LazyLock;
 use tracing::debug;
 
-use super::types::{
+use command_schema_core::{
     CommandSchema, FlagSchema, HelpFormat, SchemaSource, SubcommandSchema, ValueType,
 };
 
@@ -30,10 +30,8 @@ struct HelpPatterns {
     flags_section: Regex,
     options_section: Regex,
     arguments_section: Regex,
-    usage_line: Regex,
 
     // Value indicators
-    value_placeholder: Regex,
     choice_values: Regex,
 
     // Version extraction
@@ -70,14 +68,8 @@ impl HelpPatterns {
             arguments_section: Regex::new(
                 r"(?i)^(arguments|positional arguments|args)\s*:?\s*$"
             ).unwrap(),
-            usage_line: Regex::new(
-                r"(?i)^usage:\s*(.+)$"
-            ).unwrap(),
 
             // Value indicators
-            value_placeholder: Regex::new(
-                r"[<\[]([A-Za-z_][A-Za-z0-9_]*)[>\]]"
-            ).unwrap(),
             choice_values: Regex::new(
                 r"\{([^}]+)\}"
             ).unwrap(),
@@ -219,71 +211,6 @@ impl HelpParser {
             }
         }
         None
-    }
-
-    /// Identifies sections in the help output.
-    fn identify_sections<'a>(
-        &self,
-        lines: &'a [&'a str],
-    ) -> std::collections::HashMap<&'static str, Vec<&'a str>> {
-        let mut sections = std::collections::HashMap::new();
-        let mut current_section: Option<&'static str> = None;
-        let mut section_lines: Vec<&str> = Vec::new();
-
-        for line in lines {
-            let trimmed = line.trim();
-
-            // Check for section headers
-            if PATTERNS.subcommands_section.is_match(trimmed) {
-                if let Some(sec) = current_section {
-                    sections.insert(sec, std::mem::take(&mut section_lines));
-                }
-                current_section = Some("subcommands");
-                continue;
-            }
-            if PATTERNS.flags_section.is_match(trimmed) {
-                if let Some(sec) = current_section {
-                    sections.insert(sec, std::mem::take(&mut section_lines));
-                }
-                current_section = Some("flags");
-                continue;
-            }
-            if PATTERNS.options_section.is_match(trimmed) {
-                if let Some(sec) = current_section {
-                    sections.insert(sec, std::mem::take(&mut section_lines));
-                }
-                current_section = Some("options");
-                continue;
-            }
-            if PATTERNS.arguments_section.is_match(trimmed) {
-                if let Some(sec) = current_section {
-                    sections.insert(sec, std::mem::take(&mut section_lines));
-                }
-                current_section = Some("arguments");
-                continue;
-            }
-
-            // Check for new section (line ending with colon, not a flag)
-            if trimmed.ends_with(':') && !trimmed.starts_with('-') && trimmed.len() < 30 {
-                if let Some(sec) = current_section {
-                    sections.insert(sec, std::mem::take(&mut section_lines));
-                }
-                current_section = None; // Unknown section
-                continue;
-            }
-
-            // Add line to current section
-            if current_section.is_some() && !trimmed.is_empty() {
-                section_lines.push(trimmed);
-            }
-        }
-
-        // Don't forget the last section
-        if let Some(sec) = current_section {
-            sections.insert(sec, section_lines);
-        }
-
-        sections
     }
 
     /// Identifies sections in the help output (returns owned strings).

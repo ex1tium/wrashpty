@@ -3,7 +3,7 @@
 use rusqlite::{Connection, OptionalExtension};
 use tracing::info;
 
-use super::types::{CommandSchema, SchemaSource, SubcommandSchema};
+use super::{CommandSchema, SchemaSource, SubcommandSchema};
 use crate::intelligence::error::CIError;
 
 /// Schema storage operations.
@@ -275,7 +275,7 @@ pub fn get_all_schemas(conn: &Connection) -> Result<Vec<String>, CIError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::intelligence::schema::types::{FlagSchema, ValueType};
+    use crate::intelligence::schema::{FlagSchema, ValueType};
 
     fn setup_test_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
