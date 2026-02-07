@@ -366,7 +366,11 @@ impl HelpParser {
         // Generic two-column command rows when explicit command sections were not
         // identified (or were empty). This is still structural and should happen
         // before more permissive fallbacks.
-        if subcommand_candidates.is_empty() && !keybinding_document {
+        if subcommand_candidates.is_empty()
+            && !keybinding_document
+            && sections.subcommands.is_empty()
+            && sections.arguments.is_empty()
+        {
             let (generic_subcommands, generic_recognized) =
                 self.parse_two_column_subcommands(&indexed_lines);
             if !generic_subcommands.is_empty() {
@@ -3670,6 +3674,27 @@ Flags:
                 .global_flags
                 .iter()
                 .any(|flag| flag.long.as_deref() == Some("--verbose"))
+        );
+    }
+
+    #[test]
+    fn test_argument_section_rows_are_not_treated_as_subcommands() {
+        let help = r#"
+Usage: service <option> [service_name [command]]
+
+Arguments:
+  service_name    service to operate on
+  command         service command to execute
+"#;
+        let mut parser = HelpParser::new("service", help);
+        let schema = parser.parse().unwrap();
+
+        assert!(schema.subcommands.is_empty());
+        assert!(
+            schema
+                .positional
+                .iter()
+                .any(|arg| arg.name == "service_name")
         );
     }
 
