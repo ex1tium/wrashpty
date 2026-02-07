@@ -788,7 +788,10 @@ mod tests {
     #[test]
     fn test_non_echo_subcommand_schema_is_not_treated_as_parent_echo() {
         let mut parsed = CommandSchema::new("git remote", SchemaSource::HelpCommand);
-        parsed.subcommands = vec![SubcommandSchema::new("add"), SubcommandSchema::new("remove")];
+        parsed.subcommands = vec![
+            SubcommandSchema::new("add"),
+            SubcommandSchema::new("remove"),
+        ];
 
         let sibling_names = ["remote", "commit", "push"]
             .into_iter()

@@ -5,7 +5,7 @@ CUSTOM_CSV ?= schemas/command-lists/custom-tools.csv
 
 .PHONY: schema-extract-superuser schema-extract-devops schema-extract-custom schema-extract-all
 .PHONY: schema-extract-superuser-installed schema-extract-devops-installed schema-extract-custom-installed schema-extract-all-installed
-.PHONY: schema-validate
+.PHONY: schema-validate schema-snapshot-test
 
 schema-extract-superuser:
 	@commands="$$(tr -d '\r\n' < "$(SUPERUSER_CSV)")"; \
@@ -43,3 +43,12 @@ schema-extract-all-installed:
 
 schema-validate:
 	cargo run -p command-schema-discovery -- validate "$(SCHEMA_OUTPUT)"
+
+schema-snapshot-test:
+	@echo "Running snapshot extraction test..."
+	@cargo run -p command-schema-discovery -- extract \
+		--commands "git,cargo,apt,ls,tar,stty" \
+		--output "schemas/test-snapshot"
+	@echo "Comparing with curated schemas..."
+	@diff -r schemas/curated schemas/test-snapshot || \
+		(echo "Schema differences detected. Review changes."; exit 1)

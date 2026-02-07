@@ -1,0 +1,11 @@
+apt 2.8.3 (amd64)
+Usage: apt-cache [options] command
+       apt-cache [options] show pkg1 [pkg2 ...]
+
+Most used commands:
+  showsrc - Show source records
+  search - Search the package list for a regex pattern
+  show - Show a readable record for the package
+  policy - Show policy settings
+
+See apt-cache(8) for more information about the available commands.

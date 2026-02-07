@@ -1,0 +1,10 @@
+Usage: cp [OPTION]... SOURCE... DIRECTORY
+  or:  cp [OPTION]... SOURCE DEST
+Copy SOURCE to DEST, or multiple SOURCE(s) to DIRECTORY.
+
+  -a, --archive              same as -dR --preserve=all
+  -f, --force                if an existing destination file cannot be opened, remove it and try again
+  -i, --interactive          prompt before overwrite
+  -r, -R, --recursive        copy directories recursively
+      --help                 display this help and exit
+      --version              output version information and exit
