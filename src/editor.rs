@@ -15,8 +15,8 @@ use std::collections::VecDeque;
 
 use anyhow::{Context, Result};
 use reedline::{
-    ColumnarMenu, EditCommand, History, KeyCode, KeyModifiers, MenuBuilder, Prompt,
-    Reedline, ReedlineEvent, ReedlineMenu, Signal, default_emacs_keybindings,
+    ColumnarMenu, EditCommand, History, KeyCode, KeyModifiers, MenuBuilder, Prompt, Reedline,
+    ReedlineEvent, ReedlineMenu, Signal, default_emacs_keybindings,
 };
 use tracing::{debug, info, warn};
 
@@ -157,7 +157,7 @@ impl Editor {
             ColumnarMenu::default()
                 .with_name("completion_menu")
                 .with_columns(4)
-                .with_column_width(None) // auto-width
+                .with_column_width(None), // auto-width
         );
 
         // Set up keybindings with Tab triggering the completion menu
@@ -175,6 +175,28 @@ impl Editor {
             KeyModifiers::CONTROL,
             KeyCode::Char(' '),
             ReedlineEvent::ExecuteHostCommand(format!("{}open_panel", HOST_COMMAND_PREFIX)),
+        );
+
+        // Add scrollback keybindings - these return control to the host
+        keybindings.add_binding(
+            KeyModifiers::NONE,
+            KeyCode::PageUp,
+            ReedlineEvent::ExecuteHostCommand(format!("{}scroll_up", HOST_COMMAND_PREFIX)),
+        );
+        keybindings.add_binding(
+            KeyModifiers::NONE,
+            KeyCode::PageDown,
+            ReedlineEvent::ExecuteHostCommand(format!("{}scroll_down", HOST_COMMAND_PREFIX)),
+        );
+        keybindings.add_binding(
+            KeyModifiers::SHIFT,
+            KeyCode::PageUp,
+            ReedlineEvent::ExecuteHostCommand(format!("{}scroll_line_up", HOST_COMMAND_PREFIX)),
+        );
+        keybindings.add_binding(
+            KeyModifiers::SHIFT,
+            KeyCode::PageDown,
+            ReedlineEvent::ExecuteHostCommand(format!("{}scroll_line_down", HOST_COMMAND_PREFIX)),
         );
 
         // Create reedline with history, completions, menu, and autosuggestions
@@ -248,7 +270,8 @@ impl Editor {
     /// * `text` - The text to insert into the buffer
     pub fn prefill_buffer(&mut self, text: &str) {
         if !text.is_empty() {
-            self.reedline.run_edit_commands(&[EditCommand::InsertString(text.to_string())]);
+            self.reedline
+                .run_edit_commands(&[EditCommand::InsertString(text.to_string())]);
             debug!(text = %text, "Pre-filled editor buffer");
         }
     }

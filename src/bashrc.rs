@@ -141,9 +141,9 @@ __wrash_precmd() {{
 # Set our precmd as PROMPT_COMMAND
 PROMPT_COMMAND='__wrash_precmd'
 
-# Prepend PROMPT marker to PS1
-# This marks the exact boundary where prompt output ends
-PS1="\[\e]777;${{__wrash_token}};PROMPT\a\]${{PS1}}"
+# Set PS1 to marker-only (no visible shell prompt text).
+# Reedline owns prompt rendering in Edit mode; bash only emits boundary markers.
+PS1="\[\e]777;${{__wrash_token}};PROMPT\a\]"
 
 # Capture existing DEBUG trap before installing ours
 __wrash_original_debug_trap=""

@@ -7,6 +7,7 @@
 use ratatui_core::buffer::Buffer;
 use ratatui_core::layout::Rect;
 use ratatui_core::style::{Color, Modifier, Style};
+use unicode_width::UnicodeWidthStr;
 
 /// Converts a ratatui buffer to ANSI escape sequences.
 ///
@@ -29,7 +30,15 @@ pub fn buffer_to_ansi(buffer: &Buffer, area: Rect) -> String {
         // Position cursor at start of row (1-indexed for terminal)
         result.push_str(&format!("\x1b[{};{}H", y + 1, area.x + 1));
 
+        let mut skip = 0u16;
         for x in area.x..area.x + area.width {
+            // Skip continuation cells left by wide characters.
+            // Ratatui resets these to " " but the wide char already occupies the columns.
+            if skip > 0 {
+                skip -= 1;
+                continue;
+            }
+
             let cell = buffer.cell((x, y));
             if let Some(cell) = cell {
                 let style = cell.style();
@@ -40,8 +49,14 @@ pub fn buffer_to_ansi(buffer: &Buffer, area: Rect) -> String {
                     current_style = Some(style);
                 }
 
-                // Emit cell symbol
-                result.push_str(cell.symbol());
+                let symbol = cell.symbol();
+                result.push_str(symbol);
+
+                // If this symbol is wider than 1 column, skip the continuation cells
+                let w = UnicodeWidthStr::width(symbol);
+                if w > 1 {
+                    skip = (w as u16) - 1;
+                }
             }
         }
     }
@@ -240,5 +255,61 @@ mod tests {
     fn test_color_to_ansi_bg_indexed() {
         let code = color_to_ansi_bg(Color::Indexed(202));
         assert_eq!(code, "48;5;202");
+    }
+
+    #[test]
+    fn test_buffer_to_ansi_wide_char_no_duplicate() {
+        // CJK character "你" occupies 2 columns. Ratatui stores it in cell 0
+        // and resets cell 1 to " ". Our converter must skip the continuation cell.
+        let area = Rect::new(0, 0, 4, 1);
+        let mut buffer = Buffer::empty(area);
+        buffer.set_string(0, 0, "你a", Style::default());
+
+        let ansi = buffer_to_ansi(&buffer, area);
+
+        // Should contain "你" exactly once and "a" once, no spurious space between them
+        assert!(ansi.contains("你a"), "Wide char followed by ASCII: got {ansi:?}");
+        // The continuation space should NOT appear
+        let after_cursor = ansi.split("\x1b[1;1H").nth(1).unwrap_or("");
+        // Strip style codes to get visible content
+        let visible: String = strip_ansi_for_test(after_cursor);
+        assert_eq!(visible, "你a ", "Expected 'you' + 'a' + trailing space, got: {visible:?}");
+    }
+
+    #[test]
+    fn test_buffer_to_ansi_mixed_wide_and_ascii() {
+        let area = Rect::new(0, 0, 6, 1);
+        let mut buffer = Buffer::empty(area);
+        buffer.set_string(0, 0, "a你好", Style::default());
+
+        let ansi = buffer_to_ansi(&buffer, area);
+
+        let after_cursor = ansi.split("\x1b[1;1H").nth(1).unwrap_or("");
+        let visible: String = strip_ansi_for_test(after_cursor);
+        // "a" (1 col) + "你" (2 cols) + "好" (2 cols) = 5 cols, 1 trailing space
+        assert_eq!(visible, "a你好 ", "Mixed content: got {visible:?}");
+    }
+
+    /// Helper: strip ANSI escape sequences for test assertions.
+    fn strip_ansi_for_test(s: &str) -> String {
+        let mut result = String::new();
+        let mut chars = s.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\x1b' {
+                // Skip until final byte of escape sequence
+                if chars.peek() == Some(&'[') {
+                    chars.next();
+                    while let Some(&c) = chars.peek() {
+                        chars.next();
+                        if c.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                }
+            } else {
+                result.push(ch);
+            }
+        }
+        result
     }
 }

@@ -16,6 +16,9 @@ nix = { version = "0.27", features = ["term", "signal", "poll", "fs"] }
 signal-hook = "0.3"
 libc = "0.2"
 
+# Process timeout handling
+wait-timeout = "0.2"
+
 # Cryptographic session tokens
 getrandom = "0.2"
 
@@ -39,8 +42,9 @@ tracing-subscriber = "0.3"
 # Path resolution
 dirs = "5.0"
 
-# Unicode display width
-unicode-width = "0.1"
+# Unicode display width and segmentation
+unicode-width = "0.2.2"
+unicode-segmentation = "1.11"
 
 # TUI rendering primitives (Buffer, Rect, Style, Layout)
 ratatui-core = "0.1"
@@ -49,6 +53,9 @@ ratatui-widgets = "0.3"
 
 # Regex for Makefile/config parsing
 regex = "1.10"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
 
 # JSON parsing for package.json
 serde_json = "1.0"
@@ -64,6 +71,9 @@ chrono = "0.4"
 
 # Lazy static initialization
 once_cell = "1.19"
+
+# Clipboard access (for yank/copy feature)
+arboard = "3"
 
 [dev-dependencies]
 rexpect = "0.5"

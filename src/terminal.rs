@@ -369,7 +369,6 @@ mod tests {
                 }
                 Err(e) => {
                     eprintln!("Skipping test (no terminal): {}", e);
-                    return;
                 }
             }
         }

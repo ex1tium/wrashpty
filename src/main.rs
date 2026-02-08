@@ -10,11 +10,11 @@ use std::sync::Mutex;
 use anyhow::{Context, Result};
 use clap::Parser;
 use tracing::{debug, info};
+use wrashpty::Config;
 use wrashpty::app::App;
 use wrashpty::bashrc;
 use wrashpty::safety::install_panic_hook;
 use wrashpty::types::ChromeMode;
-use wrashpty::Config;
 
 /// Modern interactive shell on stock Bash
 #[derive(Parser)]

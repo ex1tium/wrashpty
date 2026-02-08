@@ -12,8 +12,10 @@ pub mod marker;
 pub mod pty;
 pub mod pump;
 pub mod safety;
+pub mod scrollback;
 pub mod terminal;
 pub mod types;
+pub mod ui;
 
 // Application modules - public for binary crate access
 pub mod app;
@@ -24,10 +26,11 @@ pub mod editor;
 pub mod git;
 pub mod history;
 pub mod history_store;
+pub mod intelligence;
 pub mod prompt;
 pub mod signals;
 mod suggest;
 
 // Re-export key types for convenience
-pub use chrome::ChromeContext;
+pub use chrome::TopbarState;
 pub use config::Config;

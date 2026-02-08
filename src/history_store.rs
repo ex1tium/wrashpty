@@ -15,6 +15,9 @@ use rusqlite::Connection;
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
+use crate::chrome::command_edit::CommandToken;
+use crate::intelligence::{CommandIntelligence, FileContext, Suggestion, build_context};
+
 /// Errors that can occur when interacting with the history store.
 #[derive(Debug, Error)]
 pub enum HistoryStoreError {
@@ -116,6 +119,10 @@ pub struct HistoryStore {
     last_command_id: Option<HistoryItemId>,
     /// The reedline history instance (for getting last command ID).
     reedline_history: Option<SqliteBackedHistory>,
+    /// Command Intelligence engine for learned suggestions.
+    intelligence: Option<CommandIntelligence>,
+    /// Last command executed (for learning on completion).
+    last_command_text: Option<String>,
 }
 
 impl HistoryStore {
@@ -151,11 +158,12 @@ impl HistoryStore {
         let is_first_run = !db_path.exists();
 
         // Create the reedline history instance
-        // Pass None for session_id to use all sessions, and None for timestamp retention
+        // Second parameter is optional session_id metadata; None means no session metadata
+        // is recorded with history entries for this instance.
         let reedline_history = SqliteBackedHistory::with_file(
             db_path.clone(),
-            None,  // No session filtering
-            None,  // No timestamp retention filtering
+            None, // No session_id metadata is recorded.
+            None, // No session_timestamp metadata is recorded.
         )?;
 
         // Set restrictive permissions on the DB file (owner read/write only)
@@ -167,15 +175,31 @@ impl HistoryStore {
         }
 
         let mut store = Self {
-            db_path,
+            db_path: db_path.clone(),
             last_command_id: None,
             reedline_history: Some(reedline_history),
+            intelligence: None,
+            last_command_text: None,
         };
 
         // Create settings table if it doesn't exist
         if let Err(e) = store.create_settings_table() {
             warn!("Failed to create settings table: {}", e);
         }
+
+        // Initialize Command Intelligence lazily (separate connection)
+        match CommandIntelligence::from_path(&db_path) {
+            Ok(ci) => {
+                store.intelligence = Some(ci);
+                info!("Command Intelligence initialized");
+            }
+            Err(e) => {
+                warn!("Failed to initialize Command Intelligence: {}", e);
+            }
+        }
+
+        // Load intelligence settings (restore user preference)
+        store.load_intelligence_settings();
 
         // Migrate from bash_history on first run
         if is_first_run {
@@ -211,11 +235,9 @@ impl HistoryStore {
     /// does not exist, and propagates database errors.
     pub fn get_setting(&self, key: &str) -> Result<Option<String>, HistoryStoreError> {
         let conn = self.open_connection()?;
-        match conn.query_row(
-            "SELECT value FROM settings WHERE key = ?1",
-            [key],
-            |row| row.get(0),
-        ) {
+        match conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
+            row.get(0)
+        }) {
             Ok(value) => Ok(Some(value)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(HistoryStoreError::from(e)),
@@ -274,11 +296,7 @@ impl HistoryStore {
             Ok(Box::new(history))
         } else {
             // Create a new instance if already taken
-            let history = SqliteBackedHistory::with_file(
-                self.db_path.clone(),
-                None,
-                None,
-            )?;
+            let history = SqliteBackedHistory::with_file(self.db_path.clone(), None, None)?;
             Ok(Box::new(history))
         }
     }
@@ -435,7 +453,7 @@ impl HistoryStore {
                  cwd, exit_status, duration_ms,
                  1 as exec_count,
                  1.0 as frecency
-                 FROM history WHERE 1=1"
+                 FROM history WHERE 1=1",
             )
         };
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -463,7 +481,9 @@ impl HistoryStore {
         if needs_full_aggregation {
             sql.push_str(" GROUP BY command_line");
             match sort {
-                SortMode::Frequency => sql.push_str(" ORDER BY exec_count DESC, start_timestamp DESC"),
+                SortMode::Frequency => {
+                    sql.push_str(" ORDER BY exec_count DESC, start_timestamp DESC")
+                }
                 SortMode::Frecency => sql.push_str(" ORDER BY frecency DESC"),
                 SortMode::Recency => sql.push_str(" ORDER BY start_timestamp DESC"),
             }
@@ -562,6 +582,58 @@ impl HistoryStore {
         Ok(())
     }
 
+    /// Deduplicates the SQLite history, removing consecutive duplicate commands.
+    ///
+    /// Keeps the most recent occurrence of each consecutive duplicate sequence.
+    /// Non-consecutive duplicates are preserved (like HISTCONTROL=ignoredups).
+    ///
+    /// # Returns
+    ///
+    /// The number of duplicate entries removed.
+    pub fn dedupe(&self) -> Result<usize, HistoryStoreError> {
+        let conn = self.open_connection()?;
+
+        // Find IDs of entries to delete (all but the last in each consecutive duplicate sequence)
+        // This query finds entries where the next entry (by timestamp) has the same command
+        let removed: usize = conn.execute(
+            "DELETE FROM history WHERE id IN (
+                SELECT h1.id FROM history h1
+                INNER JOIN history h2 ON h1.command_line = h2.command_line
+                WHERE h2.start_timestamp > h1.start_timestamp
+                AND NOT EXISTS (
+                    SELECT 1 FROM history h3
+                    WHERE h3.start_timestamp > h1.start_timestamp
+                    AND h3.start_timestamp < h2.start_timestamp
+                    AND h3.command_line != h1.command_line
+                )
+            )",
+            [],
+        )?;
+
+        if removed > 0 {
+            // Reclaim space
+            conn.execute("VACUUM", [])?;
+            info!(removed, "Deduplicated SQLite history");
+        }
+
+        Ok(removed)
+    }
+
+    /// Deduplicates both SQLite and bash_history.
+    ///
+    /// # Returns
+    ///
+    /// A tuple of (sqlite_removed, bash_removed).
+    pub fn dedupe_all(&self) -> Result<(usize, usize), HistoryStoreError> {
+        let sqlite_removed = self.dedupe()?;
+
+        let bash_removed = crate::history::dedupe_bash_history().map_err(|e| {
+            HistoryStoreError::Internal(format!("bash_history dedupe failed: {}", e))
+        })?;
+
+        Ok((sqlite_removed, bash_removed))
+    }
+
     /// Returns the path to the database file.
     pub fn db_path(&self) -> &PathBuf {
         &self.db_path
@@ -587,6 +659,20 @@ impl HistoryStore {
     ) -> Result<Vec<String>, HistoryStoreError> {
         let conn = self.open_connection()?;
 
+        fn escape_like_prefix(input: &str) -> String {
+            let mut escaped = String::with_capacity(input.len());
+            for ch in input.chars() {
+                match ch {
+                    '%' | '_' | '\\' => {
+                        escaped.push('\\');
+                        escaped.push(ch);
+                    }
+                    _ => escaped.push(ch),
+                }
+            }
+            escaped
+        }
+
         // Build the prefix pattern for LIKE matching
         let prefix = if preceding.is_empty() {
             String::new()
@@ -594,11 +680,12 @@ impl HistoryStore {
             format!("{} ", preceding.join(" "))
         };
 
-        let pattern = format!("{}%", prefix);
+        let escaped_prefix = escape_like_prefix(&prefix);
+        let pattern = format!("{}%", escaped_prefix);
 
         // Query commands that match the prefix
         let mut stmt = conn.prepare(
-            "SELECT command_line FROM history WHERE command_line LIKE ?1 LIMIT 1000"
+            "SELECT command_line FROM history WHERE command_line LIKE ?1 ESCAPE '\\' LIMIT 1000",
         )?;
 
         let rows = stmt.query_map([&pattern], |row| {
@@ -619,10 +706,7 @@ impl HistoryStore {
             let remainder = &row[prefix_len..];
 
             // Extract the first token (up to next space or end)
-            let next_token = remainder
-                .split_whitespace()
-                .next()
-                .map(|s| s.to_string());
+            let next_token = remainder.split_whitespace().next().map(|s| s.to_string());
 
             if let Some(token) = next_token {
                 if !token.is_empty() {
@@ -637,6 +721,253 @@ impl HistoryStore {
 
         // Return just the tokens, limited
         Ok(tokens.into_iter().take(limit).map(|(t, _)| t).collect())
+    }
+
+    // ========================================================================
+    // Command Intelligence Integration
+    // ========================================================================
+
+    /// Starts an intelligence session.
+    ///
+    /// Should be called when the terminal opens.
+    pub fn start_intelligence_session(&mut self, session_id: &str) {
+        if let Some(ref mut ci) = self.intelligence {
+            if let Err(e) = ci.start_session(session_id) {
+                warn!("Failed to start intelligence session: {}", e);
+            }
+        }
+    }
+
+    /// Ends the intelligence session.
+    ///
+    /// Should be called when the terminal closes.
+    pub fn end_intelligence_session(&mut self) {
+        if let Some(ref mut ci) = self.intelligence {
+            if let Err(e) = ci.end_session() {
+                warn!("Failed to end intelligence session: {}", e);
+            }
+        }
+    }
+
+    /// Syncs intelligence with history.
+    ///
+    /// Should be called periodically to learn from new history entries.
+    pub fn sync_intelligence(&mut self) {
+        if let Some(ref mut ci) = self.intelligence {
+            match ci.sync() {
+                Ok(stats) => {
+                    if stats.commands_processed > 0 {
+                        debug!(
+                            commands = stats.commands_processed,
+                            tokens = stats.tokens_extracted,
+                            "Intelligence synced"
+                        );
+                    }
+                }
+                Err(e) => {
+                    debug!("Intelligence sync skipped: {}", e);
+                }
+            }
+        }
+    }
+
+    /// Records a command submission for later learning.
+    ///
+    /// Should be called when the user submits a command.
+    pub fn record_command_submission(&mut self, command: &str) {
+        self.last_command_text = Some(command.to_string());
+    }
+
+    /// Saves a command to both SQLite history and ~/.bash_history.
+    ///
+    /// This method should be called for commands that bypass reedline's normal
+    /// input flow (e.g., commands executed from the panel). It ensures the command
+    /// appears in:
+    /// - wrashpty's SQLite history (for reedline Up/Down navigation)
+    /// - ~/.bash_history (for other bash sessions)
+    ///
+    /// # Arguments
+    ///
+    /// * `command` - The command to save
+    /// * `cwd` - Optional current working directory
+    ///
+    /// # Returns
+    ///
+    /// The history item ID if successfully saved to SQLite.
+    pub fn save_command(
+        &mut self,
+        command: &str,
+        cwd: Option<&PathBuf>,
+    ) -> Result<Option<HistoryItemId>, HistoryStoreError> {
+        // Skip empty commands
+        if command.trim().is_empty() {
+            return Ok(None);
+        }
+
+        // Save to SQLite history
+        let conn = self.open_connection()?;
+        let timestamp_ms = chrono::Utc::now().timestamp_millis();
+        let cwd_str = cwd.map(|p| p.to_string_lossy().to_string());
+
+        conn.execute(
+            "INSERT INTO history (command_line, start_timestamp, cwd) VALUES (?1, ?2, ?3)",
+            rusqlite::params![command, timestamp_ms, cwd_str],
+        )?;
+
+        let id = conn.last_insert_rowid();
+        debug!(
+            id,
+            command_len = command.len(),
+            "Saved command to SQLite history"
+        );
+
+        // Also record for intelligence learning
+        self.last_command_text = Some(command.to_string());
+
+        // Append to bash_history for other sessions
+        if let Err(e) = crate::history::append_to_bash_history(command) {
+            warn!("Failed to append to bash_history: {}", e);
+            // Don't fail the whole operation - SQLite save succeeded
+        }
+
+        Ok(Some(HistoryItemId::new(id)))
+    }
+
+    /// Appends a command to ~/.bash_history only.
+    ///
+    /// Use this for commands that are already saved to SQLite by reedline
+    /// but need to be synced to bash_history for other sessions.
+    ///
+    /// # Arguments
+    ///
+    /// * `command` - The command to append
+    pub fn sync_to_bash_history(&self, command: &str) {
+        if command.trim().is_empty() {
+            return;
+        }
+
+        if let Err(e) = crate::history::append_to_bash_history(command) {
+            warn!("Failed to sync to bash_history: {}", e);
+        }
+    }
+
+    /// Learns from command completion.
+    ///
+    /// Should be called when a command finishes executing with its exit status.
+    pub fn learn_command_completion(&mut self, exit_status: Option<i32>) {
+        let command = match self.last_command_text.take() {
+            Some(cmd) => cmd,
+            None => return,
+        };
+
+        if let Some(ref mut ci) = self.intelligence {
+            if let Err(e) = ci.learn_command(&command, exit_status) {
+                debug!("Failed to learn from command: {}", e);
+            }
+        }
+    }
+
+    /// Gets intelligent suggestions for the given context.
+    /// Gets intelligent suggestions for the current editing context.
+    ///
+    /// Uses the unified command hierarchy as the primary source, providing
+    /// position-aware token suggestions that naturally adapt to any command.
+    ///
+    /// # Arguments
+    ///
+    /// * `tokens` - The tokens preceding the current edit position
+    /// * `partial` - The partial text being typed
+    /// * `cwd` - Current working directory
+    /// * `file_context` - File context if in file browser
+    /// * `last_command` - Last executed command for transition suggestions
+    pub fn intelligent_suggest(
+        &self,
+        tokens: &[CommandToken],
+        partial: &str,
+        cwd: Option<PathBuf>,
+        file_context: Option<FileContext>,
+        last_command: Option<String>,
+    ) -> Vec<Suggestion> {
+        let Some(ref ci) = self.intelligence else {
+            return Vec::new();
+        };
+
+        let session = ci.current_session().cloned();
+        let context = build_context(tokens, partial, cwd, file_context, session, last_command);
+
+        ci.suggest(&context, 20)
+    }
+
+    /// Expands an alias if it exists.
+    pub fn expand_alias(&self, text: &str) -> Option<String> {
+        self.intelligence
+            .as_ref()
+            .and_then(|ci| ci.expand_alias(text))
+    }
+
+    /// Returns whether intelligence is available and enabled.
+    pub fn is_intelligence_enabled(&self) -> bool {
+        self.intelligence
+            .as_ref()
+            .map(|ci| ci.is_enabled())
+            .unwrap_or(false)
+    }
+
+    /// Returns whether intelligence is available and enabled.
+    #[deprecated(note = "Use is_intelligence_enabled() instead")]
+    pub fn has_intelligence(&self) -> bool {
+        self.is_intelligence_enabled()
+    }
+
+    /// Enables or disables intelligence.
+    ///
+    /// The setting is persisted to the database on a best-effort basis.
+    pub fn set_intelligence_enabled(&mut self, enabled: bool) {
+        if let Some(ref mut ci) = self.intelligence {
+            ci.set_enabled(enabled);
+        }
+
+        // Persist the setting
+        let value = if enabled { "true" } else { "false" };
+        if let Err(e) = self.set_setting("intelligence.enabled", value) {
+            warn!("Failed to persist intelligence.enabled setting: {}", e);
+        }
+    }
+
+    /// Resets the intelligence database, deleting all learned patterns.
+    ///
+    /// This drops and recreates all `ci_*` tables, giving a clean slate.
+    /// Returns an error if intelligence is not available.
+    pub fn reset_intelligence(&mut self) -> Result<(), HistoryStoreError> {
+        if let Some(ref mut ci) = self.intelligence {
+            ci.reset().map_err(|e| {
+                HistoryStoreError::internal(format!("Intelligence reset failed: {}", e))
+            })
+        } else {
+            Err(HistoryStoreError::internal("Intelligence not available"))
+        }
+    }
+
+    /// Loads intelligence enabled state from settings.
+    ///
+    /// Should be called after initialization to restore user preference.
+    /// Intelligence defaults to disabled unless explicitly set to "true".
+    pub fn load_intelligence_settings(&mut self) {
+        if let Ok(Some(value)) = self.get_setting("intelligence.enabled") {
+            // Explicit opt-in: only enable if exactly "true"
+            let enabled = value == "true";
+            if !enabled && value != "false" {
+                // Log invalid values but don't enable
+                debug!(
+                    setting_value = %value,
+                    "Invalid intelligence.enabled setting value, defaulting to disabled"
+                );
+            }
+            if let Some(ref mut ci) = self.intelligence {
+                ci.set_enabled(enabled);
+            }
+        }
+        // If setting is missing, intelligence remains in its default state (disabled)
     }
 }
 

@@ -6,10 +6,16 @@
 //! - Quote style cycling
 //! - Undo/redo stack
 //! - Pluggable suggestion providers
+//! - Intelligent suggestions from learned patterns
 
-use super::command_knowledge::COMMAND_KNOWLEDGE;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
 use super::theme::Theme;
 use ratatui_core::style::{Modifier, Style};
+
+use crate::history_store::HistoryStore;
+use crate::intelligence::FileContext;
 
 // ============================================================================
 // Token Types and Classification
@@ -90,7 +96,8 @@ pub fn classify_token(text: &str, position: usize, prev_token: Option<&str>) -> 
     // Check for subcommand (second token after known compound commands)
     if position == 1 {
         if let Some(cmd) = prev_token {
-            if is_compound_command(cmd) {
+            // Use canonical implementation from tokenizer
+            if crate::intelligence::tokenizer::is_compound_command(cmd) {
                 return TokenType::Subcommand;
             }
         }
@@ -98,19 +105,12 @@ pub fn classify_token(text: &str, position: usize, prev_token: Option<&str>) -> 
     TokenType::Argument
 }
 
-/// Returns true if the command has subcommands.
-fn is_compound_command(cmd: &str) -> bool {
-    matches!(
-        cmd,
-        "git" | "docker" | "kubectl" | "cargo" | "npm" | "yarn"
-        | "systemctl" | "journalctl" | "apt" | "brew" | "pacman"
-    )
-}
-
 /// Returns the style for a token based on its type.
 pub fn token_type_style(token_type: TokenType, theme: &Theme) -> Style {
     match token_type {
-        TokenType::Command => Style::default().fg(theme.semantic_success).add_modifier(Modifier::BOLD),
+        TokenType::Command => Style::default()
+            .fg(theme.semantic_success)
+            .add_modifier(Modifier::BOLD),
         TokenType::Subcommand => Style::default().fg(theme.header_fg),
         TokenType::Flag => Style::default().fg(theme.text_highlight),
         TokenType::Path => Style::default().fg(theme.semantic_info),
@@ -120,17 +120,23 @@ pub fn token_type_style(token_type: TokenType, theme: &Theme) -> Style {
     }
 }
 
-/// Returns a superscript digit for display (¹²³...²⁰).
-pub fn superscript_digit(n: usize) -> &'static str {
-    const SUPERSCRIPTS: [&str; 20] = [
-        "¹", "²", "³", "⁴", "⁵", "⁶", "⁷", "⁸", "⁹", "¹⁰",
-        "¹¹", "¹²", "¹³", "¹⁴", "¹⁵", "¹⁶", "¹⁷", "¹⁸", "¹⁹", "²⁰",
-    ];
-    if n >= 1 && n <= 20 {
-        SUPERSCRIPTS[n - 1]
-    } else {
-        "·"
+/// Returns a superscript representation of any positive number.
+/// Converts each digit to its Unicode superscript equivalent.
+pub fn superscript_number(n: usize) -> String {
+    const SUPERSCRIPT_DIGITS: [char; 10] = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
+
+    if n == 0 {
+        return "⁰".to_string();
     }
+
+    n.to_string()
+        .chars()
+        .map(|c| {
+            c.to_digit(10)
+                .map(|d| SUPERSCRIPT_DIGITS[d as usize])
+                .unwrap_or(c)
+        })
+        .collect()
 }
 
 // ============================================================================
@@ -168,7 +174,32 @@ pub fn quote_for_shell(text: &str) -> String {
 
     // Check if quoting is needed
     let needs_quoting = text.chars().any(|c| {
-        matches!(c, ' ' | '\t' | '\n' | '"' | '\'' | '\\' | '$' | '`' | '!' | '*' | '?' | '[' | ']' | '(' | ')' | '{' | '}' | '<' | '>' | '|' | '&' | ';' | '#' | '~')
+        matches!(
+            c,
+            ' ' | '\t'
+                | '\n'
+                | '"'
+                | '\''
+                | '\\'
+                | '$'
+                | '`'
+                | '!'
+                | '*'
+                | '?'
+                | '['
+                | ']'
+                | '('
+                | ')'
+                | '{'
+                | '}'
+                | '<'
+                | '>'
+                | '|'
+                | '&'
+                | ';'
+                | '#'
+                | '~'
+        )
     });
 
     if !needs_quoting {
@@ -201,22 +232,34 @@ pub fn check_dangerous_command(command: &str) -> Option<DangerWarning> {
     let lower = command.to_lowercase();
 
     if lower.contains("rm -rf") || lower.contains("rm -fr") {
-        return Some(DangerWarning { message: "Recursive force delete" });
+        return Some(DangerWarning {
+            message: "Recursive force delete",
+        });
     }
     if lower.contains("dd if=") && lower.contains("of=/dev/") {
-        return Some(DangerWarning { message: "Direct disk write" });
+        return Some(DangerWarning {
+            message: "Direct disk write",
+        });
     }
     if lower.contains("mkfs") {
-        return Some(DangerWarning { message: "Filesystem format" });
+        return Some(DangerWarning {
+            message: "Filesystem format",
+        });
     }
     if lower.contains("> /dev/sd") || lower.contains(">/dev/sd") {
-        return Some(DangerWarning { message: "Direct device write" });
+        return Some(DangerWarning {
+            message: "Direct device write",
+        });
     }
     if lower.contains("chmod -r 777") || lower.contains("chmod 777 -r") {
-        return Some(DangerWarning { message: "Overly permissive chmod" });
+        return Some(DangerWarning {
+            message: "Overly permissive chmod",
+        });
     }
     if lower.contains(":(){ :|:& };:") {
-        return Some(DangerWarning { message: "Fork bomb" });
+        return Some(DangerWarning {
+            message: "Fork bomb",
+        });
     }
 
     None
@@ -275,7 +318,11 @@ pub fn tokenize_command(command: &str) -> Vec<CommandToken> {
         .iter()
         .enumerate()
         .map(|(i, text)| {
-            let prev = if i > 0 { Some(raw_tokens[i - 1].as_str()) } else { None };
+            let prev = if i > 0 {
+                Some(raw_tokens[i - 1].as_str())
+            } else {
+                None
+            };
             let token_type = classify_token(text, i, prev);
             CommandToken::new(text.clone(), token_type)
         })
@@ -348,7 +395,7 @@ pub struct ConfirmState {
 ///
 /// This is the core editing state used by both history and file browsers.
 /// Features can be enabled/disabled via `EditConfig`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CommandEditState {
     // --- Core State ---
     /// The original command (for revert and change detection).
@@ -387,6 +434,40 @@ pub struct CommandEditState {
     // --- Context ---
     /// Optional context for suggestions (e.g., filename for file browser).
     context: Option<String>,
+
+    // --- Intelligence Context ---
+    /// History store for intelligent suggestions.
+    history_store: Option<Arc<Mutex<HistoryStore>>>,
+    /// Current working directory for context-aware suggestions.
+    cwd: Option<PathBuf>,
+    /// File context for file-type specific suggestions.
+    file_context: Option<FileContext>,
+    /// Last executed command for session-based suggestions.
+    last_command: Option<String>,
+}
+
+impl std::fmt::Debug for CommandEditState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CommandEditState")
+            .field("original", &self.original)
+            .field("tokens", &self.tokens)
+            .field("selected", &self.selected)
+            .field("edit_buffer", &self.edit_buffer)
+            .field("config", &self.config)
+            .field("suggestions", &self.suggestions)
+            .field("suggestion_index", &self.suggestion_index)
+            .field("pending_confirm", &self.pending_confirm)
+            .field("skip_danger_check", &self.skip_danger_check)
+            .field("context", &self.context)
+            .field(
+                "history_store",
+                &self.history_store.as_ref().map(|_| "<HistoryStore>"),
+            )
+            .field("cwd", &self.cwd)
+            .field("file_context", &self.file_context)
+            .field("last_command", &self.last_command)
+            .finish()
+    }
 }
 
 impl CommandEditState {
@@ -400,7 +481,11 @@ impl CommandEditState {
         if tokens.is_empty() {
             tokens.push(CommandToken::new(String::new(), TokenType::Command));
         }
-        let original = tokens.iter().map(|t| t.text.as_str()).collect::<Vec<_>>().join(" ");
+        let original = tokens
+            .iter()
+            .map(|t| t.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
         let edit_buffer = tokens.first().map(|t| t.text.clone()).unwrap_or_default();
         let original_tokens = tokens.clone();
         Self {
@@ -416,6 +501,10 @@ impl CommandEditState {
             pending_confirm: None,
             skip_danger_check: false,
             context: None,
+            history_store: None,
+            cwd: None,
+            file_context: None,
+            last_command: None,
         }
     }
 
@@ -442,6 +531,44 @@ impl CommandEditState {
     }
 
     // ========================================================================
+    // Intelligence Context Setters
+    // ========================================================================
+
+    /// Sets the history store for intelligent suggestions.
+    pub fn set_history_store(&mut self, store: Arc<Mutex<HistoryStore>>) {
+        self.history_store = Some(store);
+    }
+
+    /// Sets the current working directory for context-aware suggestions.
+    pub fn set_cwd(&mut self, cwd: PathBuf) {
+        self.cwd = Some(cwd);
+    }
+
+    /// Sets the file context for file-type specific suggestions.
+    pub fn set_file_context(&mut self, file_context: FileContext) {
+        self.file_context = Some(file_context);
+    }
+
+    /// Sets the last executed command for session-based suggestions.
+    pub fn set_last_command(&mut self, last_command: String) {
+        self.last_command = Some(last_command);
+    }
+
+    /// Configures all intelligence context at once.
+    pub fn set_intelligence_context(
+        &mut self,
+        history_store: Arc<Mutex<HistoryStore>>,
+        cwd: Option<PathBuf>,
+        file_context: Option<FileContext>,
+        last_command: Option<String>,
+    ) {
+        self.history_store = Some(history_store);
+        self.cwd = cwd;
+        self.file_context = file_context;
+        self.last_command = last_command;
+    }
+
+    // ========================================================================
     // Token Access
     // ========================================================================
 
@@ -452,7 +579,10 @@ impl CommandEditState {
 
     /// Returns true if the selected token is locked.
     pub fn is_selected_locked(&self) -> bool {
-        self.tokens.get(self.selected).map(|t| t.locked).unwrap_or(false)
+        self.tokens
+            .get(self.selected)
+            .map(|t| t.locked)
+            .unwrap_or(false)
     }
 
     /// Returns the currently selected token, if any.
@@ -575,11 +705,8 @@ impl CommandEditState {
         if !self.config.enable_undo {
             return;
         }
-        self.undo_stack.push((
-            self.tokens.clone(),
-            self.edit_buffer.clone(),
-            self.selected,
-        ));
+        self.undo_stack
+            .push((self.tokens.clone(), self.edit_buffer.clone(), self.selected));
         if self.undo_stack.len() > self.config.max_undo_size {
             self.undo_stack.remove(0);
         }
@@ -610,7 +737,9 @@ impl CommandEditState {
         if self.selected >= self.tokens.len() {
             self.selected = self.tokens.len().saturating_sub(1);
         }
-        self.edit_buffer = self.tokens.get(self.selected)
+        self.edit_buffer = self
+            .tokens
+            .get(self.selected)
             .map(|t| t.text.clone())
             .unwrap_or_default();
         self.reclassify_tokens();
@@ -673,7 +802,11 @@ impl CommandEditState {
 
         let new_index = match self.suggestion_index {
             None => {
-                if direction > 0 { 0 } else { self.suggestions.len() - 1 }
+                if direction > 0 {
+                    0
+                } else {
+                    self.suggestions.len() - 1
+                }
             }
             Some(idx) => {
                 let len = self.suggestions.len();
@@ -717,50 +850,52 @@ impl CommandEditState {
     /// When on a locked token, suggestions are preserved (not cleared) so
     /// the suggestion rows remain visible for context. Users can't cycle
     /// suggestions on locked tokens, but they can still see what was suggested.
+    ///
+    /// Suggestions are gathered from the learned command hierarchy, which includes
+    /// bootstrapped knowledge for common commands. The hierarchy learns from user
+    /// command history and provides position-aware token suggestions.
     pub fn update_suggestions(&mut self) {
         if self.is_selected_locked() {
             // Don't clear suggestions on locked tokens - preserve them for display
             return;
         }
 
-        // Get preceding tokens for context
-        let preceding: Vec<&str> = self.tokens[..self.selected]
-            .iter()
-            .map(|t| t.text.as_str())
-            .collect();
+        self.suggestions.clear();
 
-        // Check for pipe context
-        let has_pipe_before = preceding.iter().any(|t| *t == "|" || t.ends_with('|'));
+        // Primary source: intelligent suggestions from learned hierarchy
+        // The hierarchy includes bootstrapped data, so it handles all cases
+        if let Some(ref store) = self.history_store {
+            if let Ok(store) = store.lock() {
+                if store.is_intelligence_enabled() {
+                    let tokens = &self.tokens[..self.selected];
 
-        if has_pipe_before {
-            // After pipe: suggest pipeable commands
-            self.suggestions = COMMAND_KNOWLEDGE
-                .pipeable_commands()
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
-        } else if self.selected == 0 {
-            // First position: suggest based on context or general commands
-            if let Some(ref filename) = self.context {
-                self.suggestions = COMMAND_KNOWLEDGE
-                    .commands_for_filetype(filename)
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect();
-            } else {
-                self.suggestions = COMMAND_KNOWLEDGE
-                    .suggestions_for_position(&[])
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect();
+                    // Only apply prefix filter when user has modified the text
+                    // If edit_buffer matches the original token, show all suggestions
+                    let current_token_text = self
+                        .tokens
+                        .get(self.selected)
+                        .map(|t| t.text.as_str())
+                        .unwrap_or("");
+                    let partial = if self.edit_buffer == current_token_text {
+                        "" // Show all suggestions - user hasn't started typing
+                    } else {
+                        &self.edit_buffer // Filter by what user is typing
+                    };
+
+                    let intelligent_suggestions = store.intelligent_suggest(
+                        tokens,
+                        partial,
+                        self.cwd.clone(),
+                        self.file_context.clone(),
+                        self.last_command.clone(),
+                    );
+
+                    self.suggestions = intelligent_suggestions
+                        .into_iter()
+                        .map(|s| s.text)
+                        .collect();
+                }
             }
-        } else {
-            // Other positions: use command knowledge
-            self.suggestions = COMMAND_KNOWLEDGE
-                .suggestions_for_position(&preceding)
-                .iter()
-                .map(|s| s.to_string())
-                .collect();
         }
 
         self.suggestion_index = None;
@@ -789,13 +924,19 @@ impl CommandEditState {
 
     /// Returns true if there are any changes from the original.
     pub fn is_changed(&self) -> bool {
-        let current: String = self.tokens.iter().enumerate().map(|(i, t)| {
-            if i == self.selected && !t.locked {
-                self.edit_buffer.clone()
-            } else {
-                t.text.clone()
-            }
-        }).collect::<Vec<_>>().join(" ");
+        let current: String = self
+            .tokens
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                if i == self.selected && !t.locked {
+                    self.edit_buffer.clone()
+                } else {
+                    t.text.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
         current != self.original
     }
 
@@ -803,10 +944,15 @@ impl CommandEditState {
     pub fn revert(&mut self) {
         self.tokens = self.original_tokens.clone();
         if self.tokens.is_empty() {
-            self.tokens.push(CommandToken::new(String::new(), TokenType::Command));
+            self.tokens
+                .push(CommandToken::new(String::new(), TokenType::Command));
         }
         self.selected = 0;
-        self.edit_buffer = self.tokens.first().map(|t| t.text.clone()).unwrap_or_default();
+        self.edit_buffer = self
+            .tokens
+            .first()
+            .map(|t| t.text.clone())
+            .unwrap_or_default();
         self.undo_stack.clear();
         self.suggestion_index = None;
     }
@@ -899,67 +1045,124 @@ mod tests {
     }
 
     #[test]
-    fn test_for_file_populates_suggestions() {
+    fn test_for_file_starts_with_empty_suggestions_without_intelligence() {
+        // Without intelligence configured, for_file creates state but suggestions are empty
+        // Suggestions require a HistoryStore with intelligence enabled
         let state = CommandEditState::for_file("test.rs", "/path/to/test.rs");
-        // Should have suggestions for Rust files
-        assert!(!state.suggestions.is_empty(), "Suggestions should be populated for .rs files");
-        assert!(state.suggestions.iter().any(|s| s.contains("cargo")), "Should suggest cargo commands for .rs files");
+
+        // State is correctly initialized
+        assert_eq!(state.tokens.len(), 2);
+        assert_eq!(state.tokens[0].text, "");
+        assert_eq!(state.tokens[1].text, "/path/to/test.rs");
+
+        // Without intelligence, suggestions are empty (no static fallback)
+        assert!(
+            state.suggestions.is_empty(),
+            "Without intelligence, suggestions should be empty"
+        );
     }
 
     #[test]
     fn test_next_prev_suggestion() {
-        let state = CommandEditState::for_file("test.rs", "/path/to/test.rs");
+        let mut state = CommandEditState::for_file("test.rs", "/path/to/test.rs");
+        // Manually populate suggestions to test cycling mechanics
+        state.suggestions = vec!["cat".to_string(), "less".to_string(), "vim".to_string()];
+
         // Should return suggestions for display
-        assert!(state.next_suggestion().is_some(), "next_suggestion should return Some when suggestions exist");
-        assert!(state.prev_suggestion().is_some(), "prev_suggestion should return Some when suggestions exist");
+        assert!(
+            state.next_suggestion().is_some(),
+            "next_suggestion should return Some when suggestions exist"
+        );
+        assert!(
+            state.prev_suggestion().is_some(),
+            "prev_suggestion should return Some when suggestions exist"
+        );
+
+        // Verify cycling works correctly
+        assert_eq!(state.next_suggestion(), Some("cat"));
+        assert_eq!(state.prev_suggestion(), Some("vim"));
     }
 
     #[test]
     fn test_suggestions_preserved_on_locked_token() {
         let mut state = CommandEditState::for_file("test.rs", "/path/to/test.rs");
-        // Initially on command token (index 0), suggestions should exist
-        assert!(!state.suggestions.is_empty(), "Suggestions should exist initially");
+        // Manually populate suggestions to test preservation behavior
+        state.suggestions = vec!["cat".to_string(), "less".to_string(), "vim".to_string()];
         let initial_count = state.suggestions.len();
 
         // Move to locked token (filename)
         state.next();
         state.update_suggestions();
 
-        // Suggestions should be preserved, not cleared
-        assert_eq!(state.suggestions.len(), initial_count, "Suggestions should be preserved when on locked token");
-        assert!(state.next_suggestion().is_some(), "next_suggestion should still work on locked token");
+        // Suggestions should be preserved, not cleared (key behavior being tested)
+        assert_eq!(
+            state.suggestions.len(),
+            initial_count,
+            "Suggestions should be preserved when on locked token"
+        );
+        assert!(
+            state.next_suggestion().is_some(),
+            "next_suggestion should still work on locked token"
+        );
     }
 
     #[test]
-    fn test_history_browser_suggestions() {
-        // Simulate history browser: "git remote add origin url"
-        let mut state = CommandEditState::from_command("git remote add origin git@github.com:user/repo.git");
+    fn test_history_browser_suggestions_cycling() {
+        // Test suggestion cycling in history browser context
+        let mut state =
+            CommandEditState::from_command("git remote add origin git@github.com:user/repo.git");
 
-        // from_command doesn't call update_suggestions, so we need to call it (like history browser does)
-        state.update_suggestions();
-
-        // Initially at token 0 (git), suggestions should be populated
-        assert!(!state.suggestions.is_empty(), "Suggestions should exist for git command");
-
-        // Move to token 1 (remote)
-        state.select(1);
-        state.update_suggestions();
-
-        // After moving, suggestions should be for git subcommands
-        assert!(!state.suggestions.is_empty(), "Suggestions should exist for git subcommand position");
-        assert!(state.suggestions.len() > 1, "Should have multiple suggestions: {:?}", state.suggestions);
+        // Manually populate suggestions to test cycling mechanics
+        state.suggestions = vec![
+            "status".to_string(),
+            "push".to_string(),
+            "pull".to_string(),
+            "commit".to_string(),
+        ];
 
         // Both prev and next should return values
         let prev = state.prev_suggestion();
         let next = state.next_suggestion();
 
-        assert!(prev.is_some(), "prev_suggestion should return Some, got None. Suggestions: {:?}", state.suggestions);
-        assert!(next.is_some(), "next_suggestion should return Some, got None. Suggestions: {:?}, suggestion_index: {:?}", state.suggestions, state.suggestion_index);
+        assert!(
+            prev.is_some(),
+            "prev_suggestion should return Some when suggestions exist"
+        );
+        assert!(
+            next.is_some(),
+            "next_suggestion should return Some when suggestions exist"
+        );
 
-        // They should be different (not same item)
-        if state.suggestions.len() > 1 {
-            assert_ne!(prev, next, "prev and next should show different suggestions");
-        }
+        // They should be different (cycling through list)
+        assert_ne!(
+            prev, next,
+            "prev and next should show different suggestions"
+        );
+
+        // Test cycling updates edit_buffer
+        state.cycle_suggestion(1);
+        assert!(
+            !state.edit_buffer.is_empty(),
+            "edit_buffer should update after cycling"
+        );
+    }
+
+    #[test]
+    fn test_update_suggestions_clears_without_intelligence() {
+        // Without intelligence configured, update_suggestions clears suggestions
+        let mut state = CommandEditState::from_command("git status");
+
+        // Manually populate some suggestions
+        state.suggestions = vec!["push".to_string(), "pull".to_string()];
+
+        // Call update_suggestions without history_store set
+        state.update_suggestions();
+
+        // Without intelligence, suggestions are cleared
+        assert!(
+            state.suggestions.is_empty(),
+            "Without intelligence, update_suggestions should clear suggestions"
+        );
     }
 
     #[test]
@@ -972,22 +1175,34 @@ mod tests {
         assert_eq!(state.tokens[1].text, "/path/to/test.txt");
         assert!(state.tokens[1].locked);
 
-        // User cycles through suggestions to select "cat"
-        assert!(!state.suggestions.is_empty(), "Should have suggestions");
-        state.cycle_suggestion(1); // Cycle to first suggestion
-        assert!(!state.edit_buffer.is_empty(), "Edit buffer should have suggestion after cycling");
+        // Manually populate suggestions to test cycling behavior
+        state.suggestions = vec!["cat".to_string(), "less".to_string(), "vim".to_string()];
 
-        // Simulate finding "cat" in suggestions (it should be there for a .txt file)
-        // For testing, manually set it
-        state.edit_buffer = "cat".to_string();
+        // User cycles through suggestions to select "cat"
+        state.cycle_suggestion(1); // Cycle to first suggestion
+        assert_eq!(
+            state.edit_buffer, "cat",
+            "Edit buffer should have 'cat' after cycling"
+        );
 
         // User presses Enter - build_command should create the full command
         let command = state.build_command();
 
         assert!(!command.is_empty(), "Command should not be empty");
-        assert!(command.starts_with("cat"), "Command should start with 'cat', got: {}", command);
-        assert!(command.contains("/path/to/test.txt"), "Command should contain the filepath, got: {}", command);
-        assert_eq!(command, "cat /path/to/test.txt", "Full command should be 'cat /path/to/test.txt'");
+        assert!(
+            command.starts_with("cat"),
+            "Command should start with 'cat', got: {}",
+            command
+        );
+        assert!(
+            command.contains("/path/to/test.txt"),
+            "Command should contain the filepath, got: {}",
+            command
+        );
+        assert_eq!(
+            command, "cat /path/to/test.txt",
+            "Full command should be 'cat /path/to/test.txt'"
+        );
     }
 
     #[test]
@@ -1079,18 +1294,30 @@ mod tests {
     }
 
     #[test]
-    fn test_superscript_digit() {
-        assert_eq!(superscript_digit(1), "¹");
-        assert_eq!(superscript_digit(10), "¹⁰");
-        assert_eq!(superscript_digit(20), "²⁰");
-        assert_eq!(superscript_digit(21), "·");
+    fn test_superscript_number() {
+        assert_eq!(superscript_number(0), "⁰");
+        assert_eq!(superscript_number(1), "¹");
+        assert_eq!(superscript_number(10), "¹⁰");
+        assert_eq!(superscript_number(20), "²⁰");
+        assert_eq!(superscript_number(21), "²¹");
+        assert_eq!(superscript_number(99), "⁹⁹");
+        assert_eq!(superscript_number(123), "¹²³");
     }
 
     #[test]
     fn test_split_quotes() {
-        assert_eq!(split_quotes("hello"), ("hello".to_string(), QuoteStyle::None));
-        assert_eq!(split_quotes("'hello'"), ("hello".to_string(), QuoteStyle::Single));
-        assert_eq!(split_quotes("\"hello\""), ("hello".to_string(), QuoteStyle::Double));
+        assert_eq!(
+            split_quotes("hello"),
+            ("hello".to_string(), QuoteStyle::None)
+        );
+        assert_eq!(
+            split_quotes("'hello'"),
+            ("hello".to_string(), QuoteStyle::Single)
+        );
+        assert_eq!(
+            split_quotes("\"hello\""),
+            ("hello".to_string(), QuoteStyle::Double)
+        );
     }
 
     #[test]
