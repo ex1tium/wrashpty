@@ -1739,7 +1739,7 @@ mod tests {
     use crate::scrollback::features::FilterState;
 
     #[test]
-    fn test_filter_offset_for_line_centered_returns_expected_offset() {
+    fn test_filter_offset_for_line_with_viewport_centered_returns_5() {
         let filter = FilterState {
             matching_lines: (0..20).collect(),
             ..FilterState::default()
@@ -1749,7 +1749,7 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_offset_for_line_bottom_returns_zero_offset() {
+    fn test_filter_offset_for_line_with_viewport_bottom_returns_0() {
         let filter = FilterState {
             matching_lines: (0..20).collect(),
             ..FilterState::default()
@@ -1759,7 +1759,7 @@ mod tests {
     }
 
     #[test]
-    fn test_filter_offset_for_line_out_of_range_returns_zero_offset() {
+    fn test_filter_offset_for_line_with_viewport_out_of_range_returns_0() {
         let filter = FilterState {
             matching_lines: vec![2, 4, 6, 8],
             ..FilterState::default()
@@ -1769,7 +1769,7 @@ mod tests {
     }
 
     #[test]
-    fn test_try_scroll_action_prefix_page_keys_return_expected_action_and_len() {
+    fn test_try_scroll_action_prefix_bytes_page_keys_returns_pageup_and_len4() {
         assert_eq!(
             try_scroll_action_prefix_bytes(b"\x1b[5~rest"),
             Some((ScrollAction::PageUp, 4))
@@ -1781,7 +1781,7 @@ mod tests {
     }
 
     #[test]
-    fn test_try_scroll_action_prefix_line_keys_return_expected_action_and_len() {
+    fn test_try_scroll_action_prefix_bytes_line_keys_returns_lineup_and_len6() {
         assert_eq!(
             try_scroll_action_prefix_bytes(b"\x1b[5;2~"),
             Some((ScrollAction::LineUp, 6))
@@ -1793,7 +1793,7 @@ mod tests {
     }
 
     #[test]
-    fn test_try_scroll_action_prefix_home_end_keys_return_expected_action_and_len() {
+    fn test_try_scroll_action_prefix_bytes_home_end_keys_returns_home_end_and_lens() {
         assert_eq!(
             try_scroll_action_prefix_bytes(b"\x1b[1~"),
             Some((ScrollAction::Home, 4))
@@ -1813,7 +1813,7 @@ mod tests {
     }
 
     #[test]
-    fn test_try_scroll_action_prefix_non_scroll_input_returns_none() {
+    fn test_try_scroll_action_prefix_bytes_non_scroll_input_returns_none() {
         assert_eq!(try_scroll_action_prefix_bytes(b"abc"), None);
         assert_eq!(try_scroll_action_prefix_bytes(b"\x1b[9~"), None);
         assert_eq!(try_scroll_action_prefix_bytes(b"\x1b["), None);

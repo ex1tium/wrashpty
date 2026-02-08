@@ -8,15 +8,15 @@ CUSTOM_CSV ?= schemas/command-lists/custom-tools.csv
 .PHONY: schema-validate schema-snapshot-test
 
 schema-extract-superuser:
-	@commands="$$(tr -d '\r\n' < "$(SUPERUSER_CSV)")"; \
+	@commands="$$(cat "$(SUPERUSER_CSV)" | tr ',' '\n' | sed 's/\r//g' | sed '/^\s*$$/d' | awk '!seen[$$0]++' | paste -sd, -)"; \
 	cargo run -p command-schema-discovery -- extract --commands "$$commands" --output "$(SCHEMA_OUTPUT)"
 
 schema-extract-devops:
-	@commands="$$(tr -d '\r\n' < "$(DEVOPS_CSV)")"; \
+	@commands="$$(cat "$(DEVOPS_CSV)" | tr ',' '\n' | sed 's/\r//g' | sed '/^\s*$$/d' | awk '!seen[$$0]++' | paste -sd, -)"; \
 	cargo run -p command-schema-discovery -- extract --commands "$$commands" --output "$(SCHEMA_OUTPUT)"
 
 schema-extract-custom:
-	@commands="$$(tr -d '\r\n' < "$(CUSTOM_CSV)")"; \
+	@commands="$$(cat "$(CUSTOM_CSV)" | tr ',' '\n' | sed 's/\r//g' | sed '/^\s*$$/d' | awk '!seen[$$0]++' | paste -sd, -)"; \
 	if [ -z "$$commands" ]; then echo "custom-tools.csv is empty"; exit 1; fi; \
 	cargo run -p command-schema-discovery -- extract --commands "$$commands" --output "$(SCHEMA_OUTPUT)"
 
@@ -25,15 +25,15 @@ schema-extract-all:
 	cargo run -p command-schema-discovery -- extract --commands "$$commands" --output "$(SCHEMA_OUTPUT)"
 
 schema-extract-superuser-installed:
-	@commands="$$(tr -d '\r\n' < "$(SUPERUSER_CSV)")"; \
+	@commands="$$(cat "$(SUPERUSER_CSV)" | tr ',' '\n' | sed 's/\r//g' | sed '/^\s*$$/d' | awk '!seen[$$0]++' | paste -sd, -)"; \
 	cargo run -p command-schema-discovery -- extract --commands "$$commands" --installed-only --output "$(SCHEMA_OUTPUT)"
 
 schema-extract-devops-installed:
-	@commands="$$(tr -d '\r\n' < "$(DEVOPS_CSV)")"; \
+	@commands="$$(cat "$(DEVOPS_CSV)" | tr ',' '\n' | sed 's/\r//g' | sed '/^\s*$$/d' | awk '!seen[$$0]++' | paste -sd, -)"; \
 	cargo run -p command-schema-discovery -- extract --commands "$$commands" --installed-only --output "$(SCHEMA_OUTPUT)"
 
 schema-extract-custom-installed:
-	@commands="$$(tr -d '\r\n' < "$(CUSTOM_CSV)")"; \
+	@commands="$$(cat "$(CUSTOM_CSV)" | tr ',' '\n' | sed 's/\r//g' | sed '/^\s*$$/d' | awk '!seen[$$0]++' | paste -sd, -)"; \
 	if [ -z "$$commands" ]; then echo "custom-tools.csv is empty"; exit 1; fi; \
 	cargo run -p command-schema-discovery -- extract --commands "$$commands" --installed-only --output "$(SCHEMA_OUTPUT)"
 

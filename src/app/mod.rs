@@ -1234,11 +1234,6 @@ impl App {
         panel_height: u16,
         _total_rows: u16,
     ) -> Result<PanelResult> {
-        use crossterm::terminal::enable_raw_mode;
-
-        // Ensure raw mode is enabled for crossterm event handling
-        enable_raw_mode().context("Failed to enable raw mode for panel")?;
-
         // RAII guard ensures cursor is shown on all exit paths (including panics/errors)
         let _cursor_guard = CursorGuard::new().context("Failed to hide cursor for panel")?;
 

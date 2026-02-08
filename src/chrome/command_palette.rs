@@ -516,7 +516,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_command_palette_new() {
+    fn test_command_palette_panel_new_initial_state_empty_selection() {
         let panel = CommandPalettePanel::new(&AMBER_THEME);
         assert!(panel.items.is_empty());
         assert!(panel.filtered.is_empty());
@@ -524,14 +524,14 @@ mod tests {
     }
 
     #[test]
-    fn test_command_source_icon() {
+    fn test_command_source_icon_variants_return_expected_icons() {
         assert_eq!(CommandSource::Makefile.icon(), "M");
         assert_eq!(CommandSource::PackageJson.icon(), "N");
         assert_eq!(CommandSource::CargoToml.icon(), "C");
     }
 
     #[test]
-    fn test_apply_filter_empty() {
+    fn test_command_palette_panel_apply_filter_no_filter_returns_all_items() {
         let mut panel = CommandPalettePanel::new(&AMBER_THEME);
         panel.items.push(CommandItem {
             name: "test".to_string(),
@@ -545,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_filter_match() {
+    fn test_command_palette_panel_apply_filter_with_matching_filter_returns_matching_index() {
         let mut panel = CommandPalettePanel::new(&AMBER_THEME);
         panel.items.push(CommandItem {
             name: "build".to_string(),

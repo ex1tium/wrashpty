@@ -97,8 +97,8 @@ impl FileBrowserPanel {
                 // Create CommandEditState with locked filepath token
                 // Token 0: Command (editable)
                 // Token 1: Filepath (locked, non-editable)
-                let filepath_str = shell_quote(&entry.path.to_string_lossy());
-                let mut edit_state = CommandEditState::for_file(&entry.name, &filepath_str);
+                let raw_path = entry.path.to_string_lossy();
+                let mut edit_state = CommandEditState::for_file(&entry.name, &raw_path);
 
                 // Set intelligence context
                 if let Some(store) = &self.history_store {
@@ -1036,13 +1036,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_file_browser_new() {
+    fn test_file_browser_new_default_show_hidden_false() {
         let panel = FileBrowserPanel::new(&AMBER_THEME);
         assert!(!panel.show_hidden);
     }
 
     #[test]
-    fn test_format_size() {
+    fn test_format_size_various_units_expected_strings() {
         assert_eq!(format_size(0), "0B");
         assert_eq!(format_size(500), "500B");
         assert_eq!(format_size(1024), "1.0K");
@@ -1052,7 +1052,7 @@ mod tests {
     }
 
     #[test]
-    fn test_toggle_hidden() {
+    fn test_toggle_hidden_toggles_show_hidden() {
         let mut panel = FileBrowserPanel::new(&AMBER_THEME);
         assert!(!panel.show_hidden);
         panel.toggle_hidden();
@@ -1062,13 +1062,13 @@ mod tests {
     }
 
     #[test]
-    fn test_shell_quote_no_special_chars() {
+    fn test_shell_quote_plain_path_returns_unquoted() {
         assert_eq!(shell_quote("filename.txt"), "filename.txt");
         assert_eq!(shell_quote("path/to/file"), "path/to/file");
     }
 
     #[test]
-    fn test_shell_quote_with_spaces() {
+    fn test_shell_quote_path_with_spaces_returns_single_quoted() {
         assert_eq!(shell_quote("file name.txt"), "'file name.txt'");
         assert_eq!(
             shell_quote("path with spaces/file"),
@@ -1077,19 +1077,19 @@ mod tests {
     }
 
     #[test]
-    fn test_shell_quote_with_single_quote() {
+    fn test_shell_quote_path_with_single_quote_returns_escaped() {
         assert_eq!(shell_quote("it's here"), "'it'\\''s here'");
     }
 
     #[test]
-    fn test_shell_quote_with_special_chars() {
+    fn test_shell_quote_path_with_special_chars_returns_quoted() {
         assert_eq!(shell_quote("file$var"), "'file$var'");
         assert_eq!(shell_quote("file*"), "'file*'");
         assert_eq!(shell_quote("file?"), "'file?'");
     }
 
     #[test]
-    fn test_shell_quote_empty_string() {
+    fn test_shell_quote_empty_returns_empty_quotes() {
         assert_eq!(shell_quote(""), "''");
     }
 }
