@@ -126,8 +126,11 @@ pub(super) fn pty_drain_loop(pty_fd: RawFd, stop: Arc<AtomicBool>, tx: SyncSende
         }
 
         if let Some(revents) = pollfds[0].revents() {
-            if revents.contains(PollFlags::POLLHUP) || revents.contains(PollFlags::POLLERR) {
-                // EOF detected - notify receiver, then stop.
+            if revents.contains(PollFlags::POLLHUP)
+                || revents.contains(PollFlags::POLLERR)
+                || revents.contains(PollFlags::POLLNVAL)
+            {
+                // EOF or invalid fd detected - notify receiver, then stop.
                 send_final_result(&tx, pending_dropped_bytes, true, false);
                 final_result_sent = true;
                 break;
@@ -175,8 +178,7 @@ pub(super) fn pty_drain_loop(pty_fd: RawFd, stop: Arc<AtomicBool>, tx: SyncSende
                         Err(e) => {
                             warn!("Edit-mode PTY drain read failed: {}", e);
                             send_final_result(&tx, pending_dropped_bytes, true, false);
-                            final_result_sent = true;
-                            break;
+                            return;
                         }
                     }
                 }
