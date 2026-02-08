@@ -14,6 +14,7 @@ mod state;
 mod viewer;
 
 pub use alt_screen::{AltScreenDetector, AltScreenEvent};
+pub use ansi::sanitize_for_display;
 pub use boundaries::CommandBoundaries;
 pub use buffer::{ScrollLine, ScrollbackBuffer};
 pub use capture::{CaptureState, CapturedLine};

@@ -1109,8 +1109,12 @@ impl<'a> PanelGuard<'a> {
 impl Drop for PanelGuard<'_> {
     fn drop(&mut self) {
         if self.armed {
+            // Use current terminal size (may have changed during panel mode)
+            let total_rows = TerminalGuard::get_size()
+                .map(|(_, rows)| rows)
+                .unwrap_or(self.total_rows);
             // Ignore the Result in Drop - we can't propagate errors here
-            let _ = self.chrome.collapse_panel(self.total_rows);
+            let _ = self.chrome.collapse_panel(total_rows);
         }
     }
 }
@@ -1141,23 +1145,21 @@ impl App {
         let (cols, rows) =
             TerminalGuard::get_size().context("Failed to get terminal size for panel")?;
 
-        // Minimum terminal height needed for panel mode (panel + at least 1 row for PTY)
-        const MIN_PANEL_ROWS: u16 = 6; // 5 for panel + 1 for PTY
+        // Minimum terminal height needed for panel mode (panel + at least 2 rows for PTY)
+        const MIN_PANEL_ROWS: u16 = 10;
         if rows < MIN_PANEL_ROWS {
             debug!(rows, min = MIN_PANEL_ROWS, "Terminal too small for panel");
             return Ok(PanelResult::Dismiss);
         }
 
-        // Calculate panel height (min of preferred and half terminal height)
-        // Clamp to ensure at least 1 row remains for the PTY
+        // Calculate panel height: use full preferred height, bounded by terminal size.
+        // The panel occupies the top of the screen while the PTY is resized to fit below.
+        // Leave at least 2 rows for the PTY so the shell prompt remains visible.
         let preferred = panel.preferred_height();
-        let max_panel_height = rows.saturating_sub(1); // Leave at least 1 row for PTY
-        let panel_height = preferred
-            .min(max_panel_height / 2)
-            .max(5)
-            .min(max_panel_height);
+        let max_panel_height = rows.saturating_sub(2);
+        let panel_height = preferred.min(max_panel_height).max(8);
 
-        // Calculate effective rows and verify it's valid
+        // Calculate effective rows for PTY
         let effective_rows = rows.saturating_sub(panel_height);
         if effective_rows == 0 {
             debug!(rows, panel_height, "Cannot open panel: no space for PTY");
@@ -1194,6 +1196,39 @@ impl App {
             return Err(e).context("Failed to resize PTY for panel");
         }
 
+        // Flush capture state so scrollback buffer has all content up to this point
+        if let Some(captured) = self.capture_state.flush() {
+            match captured {
+                crate::scrollback::CapturedLine::Append(content) => {
+                    let dropped = self.scrollback_buffer.push_line(content);
+                    if dropped > 0 {
+                        self.viewer_state
+                            .boundaries
+                            .adjust_for_dropped_lines(dropped);
+                    }
+                }
+                crate::scrollback::CapturedLine::Overwrite {
+                    lines_back,
+                    content,
+                } => {
+                    let len = self.scrollback_buffer.len();
+                    if lines_back > 0 && lines_back <= len {
+                        self.scrollback_buffer
+                            .replace_line(len - lines_back, content);
+                    }
+                }
+                crate::scrollback::CapturedLine::EraseBelow { lines_back } => {
+                    let len = self.scrollback_buffer.len();
+                    if lines_back > 0 && lines_back <= len {
+                        self.scrollback_buffer.erase_from(len - lines_back);
+                    }
+                }
+            }
+        }
+
+        // Remember how many visible rows the PTY had before panel (for scrollback repaint)
+        let pre_panel_effective_rows = rows.saturating_sub(1) as usize; // minus chrome bar
+
         // Use catch_unwind for panic safety during panel_input_loop
         // Note: We don't use PanelGuard here because we need &mut self for panel_input_loop,
         // and the guard would hold a mutable borrow of self.chrome. The catch_unwind
@@ -1202,19 +1237,26 @@ impl App {
             self.panel_input_loop(panel, cols, panel_height, rows)
         }));
 
+        // Get current terminal size (may have changed during panel mode due to resize)
+        let (current_cols, current_rows) =
+            TerminalGuard::get_size().unwrap_or((cols, rows));
+
         // Collapse panel - always runs after panel_input_loop completes or panics
         self.chrome
-            .collapse_panel(rows)
+            .collapse_panel(current_rows)
             .context("Failed to collapse panel")?;
+
+        // Repaint scrollback content into the freed rows to restore previous display
+        self.repaint_after_panel(panel_height, pre_panel_effective_rows);
 
         // Restore PTY size (accounting for chrome bar if active)
         let effective_rows = if self.chrome.is_active() {
-            rows.saturating_sub(1)
+            current_rows.saturating_sub(1)
         } else {
-            rows
+            current_rows
         };
         self.pty
-            .resize(cols, effective_rows)
+            .resize(current_cols, effective_rows)
             .context("Failed to restore PTY size")?;
 
         debug!("Exited panel mode");
@@ -1230,8 +1272,8 @@ impl App {
     fn panel_input_loop<P: Panel>(
         &mut self,
         panel: &mut P,
-        cols: u16,
-        panel_height: u16,
+        mut cols: u16,
+        mut panel_height: u16,
         _total_rows: u16,
     ) -> Result<PanelResult> {
         // RAII guard ensures cursor is shown on all exit paths (including panics/errors)
@@ -1252,15 +1294,17 @@ impl App {
         // The TerminalGuard manages the overall raw mode state
         // Cursor will be shown when _cursor_guard is dropped
 
-        self.panel_input_loop_inner(panel, cols, panel_height)
+        self.panel_input_loop_inner(panel, &mut cols, &mut panel_height)
     }
 
     /// Inner implementation of panel input loop.
+    ///
+    /// `cols` and `panel_height` are mutable so the resize handler can update them.
     fn panel_input_loop_inner<P: Panel>(
         &mut self,
         panel: &mut P,
-        cols: u16,
-        panel_height: u16,
+        cols: &mut u16,
+        panel_height: &mut u16,
     ) -> Result<PanelResult> {
         use ratatui_core::style::Style;
         use ratatui_core::widgets::Widget;
@@ -1278,7 +1322,7 @@ impl App {
             if needs_redraw {
                 // Create buffer for panel area (starting at row 1, which is terminal row 1)
                 // We use row 0 in buffer coordinates, which maps to terminal row 1
-                let area = Rect::new(0, 0, cols, panel_height);
+                let area = Rect::new(0, 0, *cols, *panel_height);
                 let mut buffer = Buffer::empty(area);
 
                 // Create a bordered block for the panel with theme colors
@@ -1336,8 +1380,47 @@ impl App {
                         }
                         Ok(Event::Resize(new_cols, new_rows)) => {
                             debug!(new_cols, new_rows, "Terminal resized during panel");
-                            // For now, just dismiss on resize - could handle more gracefully
-                            return Ok(PanelResult::Dismiss);
+
+                            // If terminal is too small, dismiss
+                            if new_rows < 10 {
+                                return Ok(PanelResult::Dismiss);
+                            }
+
+                            // Recalculate panel height
+                            let preferred = panel.preferred_height();
+                            let max_ph = new_rows.saturating_sub(2);
+                            let new_panel_height = preferred.min(max_ph).max(8);
+                            let new_effective = new_rows.saturating_sub(new_panel_height);
+                            if new_effective == 0 {
+                                return Ok(PanelResult::Dismiss);
+                            }
+
+                            // Resize panel scroll region
+                            self.chrome
+                                .resize_panel(new_panel_height, new_rows)
+                                .context("Failed to resize panel")?;
+
+                            // Resize PTY to fit below panel
+                            self.pty
+                                .resize(new_cols, new_effective)
+                                .context("Failed to resize PTY during panel resize")?;
+
+                            // Update tracked dimensions
+                            *cols = new_cols;
+                            *panel_height = new_panel_height;
+
+                            // Clear panel area for clean redraw
+                            {
+                                let stdout = std::io::stdout();
+                                let mut out = stdout.lock();
+                                use std::io::Write;
+                                for row in 1..=new_panel_height {
+                                    write!(out, "\x1b[{};1H\x1b[K", row)?;
+                                }
+                                out.flush()?;
+                            }
+
+                            needs_redraw = true;
                         }
                         Ok(_) => {
                             // Mouse or other events - ignore but don't redraw
@@ -1364,6 +1447,56 @@ impl App {
                 return Ok(PanelResult::Dismiss);
             }
         }
+    }
+
+    /// Repaints scrollback content into the rows that were occupied by the panel.
+    ///
+    /// After the panel is collapsed, the rows it occupied are blank. This method
+    /// writes scrollback buffer content to those rows to restore the previous display.
+    fn repaint_after_panel(&self, panel_height: u16, pre_panel_visible_rows: usize) {
+        use std::io::Write;
+
+        // Row 1 is the chrome bar (restored by collapse_panel via setup_scroll_region).
+        // We need to fill rows 2 through panel_height with scrollback content.
+        let repaint_count = panel_height.saturating_sub(1) as usize;
+        if repaint_count == 0 || self.scrollback_buffer.is_empty() {
+            return;
+        }
+
+        // The PTY area below the panel still has its content intact.
+        // We need to show the scrollback lines that were above that area before the panel.
+        // Those lines are offset from the bottom of the scrollback buffer by the number of
+        // PTY-visible rows that existed before the panel (minus the rows we're repainting).
+        let offset_from_bottom = pre_panel_visible_rows.saturating_sub(repaint_count);
+        let lines: Vec<_> = self
+            .scrollback_buffer
+            .get_from_bottom(offset_from_bottom, repaint_count)
+            .collect();
+
+        if lines.is_empty() {
+            return;
+        }
+
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+
+        // Sanitize and write each line to the correct terminal row
+        for (i, line) in lines.iter().enumerate() {
+            let row = 2 + i as u16; // Row 1 is chrome bar
+            if row > panel_height {
+                break;
+            }
+            // Position cursor, reset attributes
+            let _ = write!(out, "\x1b[{};1H\x1b[0m", row);
+            // Write sanitized line content (strip dangerous CSI, preserve colors)
+            let sanitized =
+                crate::scrollback::sanitize_for_display(line.content());
+            let _ = out.write_all(&sanitized);
+            // Clear rest of line
+            let _ = write!(out, "\x1b[K");
+        }
+
+        let _ = out.flush();
     }
 
     /// Opens the command panel.
@@ -1438,9 +1571,15 @@ impl App {
             warn!("Failed to redraw context bar after panel: {}", e);
         }
 
-        // Position cursor in scroll region (but not at bottom - let reedline handle it)
+        // Position cursor at the BOTTOM of the scroll region where the shell prompt was.
+        // This is critical: reedline uses Clear(FromCursorDown) when painting the prompt,
+        // which wipes everything below the cursor. By placing the cursor at the bottom,
+        // the repainted scrollback content and PTY content above are preserved.
         if self.chrome.is_active() {
-            self.chrome.position_cursor_in_scroll_region()?;
+            use std::io::Write;
+            let mut out = std::io::stdout();
+            write!(out, "\x1b[{};1H", rows)?;
+            out.flush()?;
         }
 
         Ok(())
