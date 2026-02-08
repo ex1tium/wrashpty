@@ -164,8 +164,8 @@ mod tests {
             let info = get_git_info(&cwd);
             // If we're in a git repo, we should have a branch
             // (This may or may not be the case depending on test environment)
-            if info.branch.is_some() {
-                assert!(!info.branch.as_ref().unwrap().is_empty());
+            if let Some(branch) = &info.branch {
+                assert!(!branch.is_empty());
             }
         }
     }

@@ -551,9 +551,8 @@ mod tests {
 
     #[test]
     fn test_filesystem_completer_new() {
-        let completer = FilesystemCompleter::new();
+        let _completer = FilesystemCompleter::new();
         // Should create without panicking
-        drop(completer);
     }
 
     #[test]
@@ -731,9 +730,8 @@ mod tests {
 
     #[test]
     fn test_git_completer_new() {
-        let completer = GitCompleter::new();
+        let _completer = GitCompleter::new();
         // Should create without panicking
-        drop(completer);
     }
 
     #[test]

@@ -13,21 +13,24 @@ use ratatui_core::layout::{Constraint, Layout, Rect};
 use ratatui_core::style::{Color, Modifier, Style};
 use ratatui_core::text::{Line, Span};
 use ratatui_core::widgets::Widget;
-use ratatui_widgets::paragraph::Paragraph;
+use ratatui_widgets::paragraph::{Paragraph, Wrap};
 use tracing::{debug, warn};
 
-use super::command_edit::{superscript_digit, token_type_style, CommandEditState};
+use super::command_edit::{
+    superscript_number, token_type_style, CommandEditState, CommandToken, TokenType,
+};
+use super::command_knowledge::COMMAND_KNOWLEDGE;
 use super::panel::{Panel, PanelResult};
 use super::theme::Theme;
 use crate::history_store::{FilterMode, HistoryRecord, HistoryStore, SortMode};
 
 /// Column widths for the table view
 struct ColumnWidths {
-    command: u16,   // Command (flexible, first column)
-    time: u16,      // Relative time
-    duration: u16,  // Command duration
-    count: u16,     // Execution count (optional)
-    status: u16,    // Exit status indicator
+    command: u16,  // Command (flexible, first column)
+    time: u16,     // Relative time
+    duration: u16, // Command duration
+    count: u16,    // Execution count (optional)
+    status: u16,   // Exit status indicator
 }
 
 impl ColumnWidths {
@@ -40,7 +43,13 @@ impl ColumnWidths {
         let fixed = time + duration + count + status + separators;
         let command = total_width.saturating_sub(fixed);
 
-        Self { command, time, duration, count, status }
+        Self {
+            command,
+            time,
+            duration,
+            count,
+            status,
+        }
     }
 }
 
@@ -170,7 +179,19 @@ impl HistoryBrowserPanel {
     fn enter_edit_mode(&mut self) {
         if let Some(cmd) = self.selected_command() {
             debug!(command = %cmd, "Entering edit mode");
-            self.edit_mode = Some(CommandEditState::from_command(cmd));
+            let mut edit_state = CommandEditState::from_command(cmd);
+
+            // Configure intelligence context if available
+            if let Some(ref store) = self.history_store {
+                edit_state.set_intelligence_context(
+                    Arc::clone(store),
+                    self.current_cwd.clone(),
+                    None, // No file context in history browser
+                    None, // Last command could be tracked separately
+                );
+            }
+
+            self.edit_mode = Some(edit_state);
             self.update_suggestions_with_history();
         }
     }
@@ -185,22 +206,56 @@ impl HistoryBrowserPanel {
         self.edit_mode.is_some()
     }
 
-    /// Updates suggestions with history data after navigation.
+    /// Updates suggestions with intelligent or history-based data after navigation.
+    ///
+    /// The CommandEditState now handles intelligent suggestions internally when
+    /// history_store is configured. This method provides a fallback to simple
+    /// history-based token suggestions when intelligence is disabled.
+    ///
+    /// When editing after a pipe, pipeable commands are suggested instead.
     fn update_suggestions_with_history(&mut self) {
-        let Some(edit_state) = &mut self.edit_mode else { return };
+        let Some(edit_state) = &mut self.edit_mode else {
+            return;
+        };
 
-        // First update from command knowledge
+        // Check if we're editing after a pipe - if so, suggest pipeable commands
+        // This mirrors the file browser's pipe handling behavior
+        let editing_after_pipe = if edit_state.selected > 0 {
+            edit_state
+                .tokens
+                .get(edit_state.selected.saturating_sub(1))
+                .map(|t| t.text == "|")
+                .unwrap_or(false)
+        } else {
+            false
+        };
+
+        if editing_after_pipe {
+            edit_state.suggestions = COMMAND_KNOWLEDGE
+                .pipeable_commands()
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            edit_state.suggestion_index = None;
+            return;
+        }
+
+        // update_suggestions() handles both static and intelligent suggestions
+        // (if history_store was configured via set_intelligence_context)
         edit_state.update_suggestions();
 
-        // Then add history-based suggestions
+        // Fallback: add simple history-based suggestions if intelligence is not available
+        // This provides at least some history-aware completions even without full intelligence
         if let Some(store) = &self.history_store {
             if let Ok(store) = store.lock() {
-                let preceding: Vec<&str> = edit_state.tokens[..edit_state.selected]
-                    .iter()
-                    .map(|t| t.text.as_str())
-                    .collect();
-                if let Ok(history_suggestions) = store.tokens_at_position(&preceding, 20) {
-                    edit_state.add_suggestions(history_suggestions);
+                if !store.is_intelligence_enabled() {
+                    let preceding: Vec<&str> = edit_state.tokens[..edit_state.selected]
+                        .iter()
+                        .map(|t| t.text.as_str())
+                        .collect();
+                    if let Ok(history_suggestions) = store.tokens_at_position(&preceding, 20) {
+                        edit_state.add_suggestions(history_suggestions);
+                    }
                 }
             }
         }
@@ -208,7 +263,9 @@ impl HistoryBrowserPanel {
 
     /// Renders the edit mode UI with three-row depth display.
     fn render_edit_mode(&self, buffer: &mut Buffer, area: Rect) {
-        let Some(edit_state) = &self.edit_mode else { return };
+        let Some(edit_state) = &self.edit_mode else {
+            return;
+        };
 
         // Check if showing danger confirmation
         if edit_state.is_confirming() {
@@ -226,23 +283,33 @@ impl HistoryBrowserPanel {
             Constraint::Length(1), // 5: Spacer
             Constraint::Length(1), // 6: Edit input line
             Constraint::Length(1), // 7: Spacer before result
-            Constraint::Length(1), // 8: Result preview
-            Constraint::Min(1),    // 9: Flexible spacer
-            Constraint::Length(1), // 10: Border
-            Constraint::Length(1), // 11: Keybind hints
+            Constraint::Min(2),    // 8: Result preview (wraps to multiple lines)
+            Constraint::Length(1), // 9: Border
+            Constraint::Length(1), // 10: Keybind hints
         ])
         .split(area);
 
         // Title with suggestion count and unsafe indicator
-        let mut title_spans = vec![
-            Span::styled(" Edit Command", Style::default().fg(self.theme.header_fg).add_modifier(Modifier::BOLD)),
-        ];
+        let mut title_spans = vec![Span::styled(
+            " Edit Command",
+            Style::default()
+                .fg(self.theme.header_fg)
+                .add_modifier(Modifier::BOLD),
+        )];
         if !edit_state.suggestions.is_empty() {
             let sugg_count = format!(" [{} suggestions]", edit_state.suggestions.len());
-            title_spans.push(Span::styled(sugg_count, Style::default().fg(self.theme.text_secondary)));
+            title_spans.push(Span::styled(
+                sugg_count,
+                Style::default().fg(self.theme.text_secondary),
+            ));
         }
         if edit_state.skip_danger_check {
-            title_spans.push(Span::styled(" [UNSAFE]", Style::default().fg(self.theme.semantic_error).add_modifier(Modifier::BOLD)));
+            title_spans.push(Span::styled(
+                " [UNSAFE]",
+                Style::default()
+                    .fg(self.theme.semantic_error)
+                    .add_modifier(Modifier::BOLD),
+            ));
         }
         let title = Line::from(title_spans);
         Paragraph::new(title).render(chunks[0], buffer);
@@ -250,16 +317,31 @@ impl HistoryBrowserPanel {
         // Separator with original command hint
         let border_style = Style::default().fg(self.theme.panel_border);
         let orig_hint = format!(" Original: {} ", edit_state.original);
-        let hint_len = orig_hint.chars().count().min(area.width as usize - 4);
-        let truncated_hint: String = orig_hint.chars().take(hint_len).collect();
+        let max_hint_width = (area.width as usize).saturating_sub(4);
+        let truncated_hint: String =
+            crate::ui::text_width::truncate_to_width(&orig_hint, max_hint_width).into_owned();
+        // Collect chars for cell-by-cell rendering
+        let hint_chars: Vec<char> = truncated_hint.chars().collect();
 
+        // Track display column as we write hint chars into cells
+        let mut hint_idx = 0;
+        let mut col_offset: usize = 0;
         for x in chunks[1].x..chunks[1].x + chunks[1].width {
             if let Some(cell) = buffer.cell_mut((x, chunks[1].y)) {
-                let rel_x = (x - chunks[1].x) as usize;
-                if rel_x < truncated_hint.len() {
-                    let ch = truncated_hint.chars().nth(rel_x).unwrap_or('─');
+                if col_offset > 0 {
+                    // Skip continuation cell(s) from previous wide char.
+                    col_offset -= 1;
+                    continue;
+                }
+
+                if hint_idx < hint_chars.len() {
+                    let ch = hint_chars[hint_idx];
+                    let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
                     cell.set_char(ch);
                     cell.set_style(Style::default().fg(self.theme.text_secondary));
+                    hint_idx += 1;
+                    // For wide characters, skip continuation cells.
+                    col_offset = ch_w.saturating_sub(1);
                 } else {
                     cell.set_char('─');
                     cell.set_style(border_style);
@@ -267,19 +349,53 @@ impl HistoryBrowserPanel {
             }
         }
 
-        // Calculate the x-position where the selected token starts
-        let mut selected_x_offset: usize = 3;
+        // Calculate the x-position where the selected token starts and ends
+        // Token format: "   " + for each token: superscript(1-2 chars) + "⟦" + text + "⟧" + "   "
+        let mut selected_x_start: usize = 3; // Initial padding
+        let mut selected_x_end: usize = 3;
         for (i, token) in edit_state.tokens.iter().enumerate() {
+            let display_text = if i == edit_state.selected {
+                if edit_state.edit_buffer.is_empty() {
+                    "_"
+                } else {
+                    &edit_state.edit_buffer
+                }
+            } else if token.text.is_empty() {
+                "_"
+            } else {
+                &token.text
+            };
+            // superscript (n digits) + ⟦ (1) + text + ⟧ (1) + spacing (3)
+            let slot_num = i + 1;
+            let superscript_len = slot_num.to_string().len(); // Number of digits
+            let text_display_width = crate::ui::text_width::display_width(display_text);
+            let token_width = superscript_len + 1 + text_display_width + 1 + 3;
+
             if i == edit_state.selected {
+                selected_x_end = selected_x_start + superscript_len + 1 + text_display_width + 1;
                 break;
             }
-            selected_x_offset += 1 + 1 + token.text.len() + 1 + 3;
+            selected_x_start += token_width;
         }
-        selected_x_offset += 1 + 1;
+        // Add superscript + opening bracket to get to content start
+        let superscript_len = (edit_state.selected + 1).to_string().len();
+        let selected_x_offset = selected_x_start + superscript_len + 1;
 
-        // Previous suggestion row (dim, aligned under selected token)
+        // Calculate horizontal scroll offset to keep selected token visible
+        let viewport_width = chunks[3].width as usize;
+        let left_context = viewport_width / 3; // Show ~1/3 of viewport with previous tokens
+        let right_margin = 8; // Small margin on right edge
+        let scroll_offset = if selected_x_end > viewport_width.saturating_sub(right_margin) {
+            // Selected token is past right edge - scroll right, keeping previous tokens visible
+            selected_x_start.saturating_sub(left_context)
+        } else {
+            0
+        };
+
+        // Previous suggestion row (dim, aligned under selected token, accounting for scroll)
         if let Some(prev_sugg) = edit_state.prev_suggestion() {
-            let padding = " ".repeat(selected_x_offset);
+            let adjusted_offset = selected_x_offset.saturating_sub(scroll_offset);
+            let padding = " ".repeat(adjusted_offset);
             let prev_line = Line::from(vec![
                 Span::styled(padding, Style::default()),
                 Span::styled(prev_sugg, Style::default().fg(self.theme.text_secondary)),
@@ -300,14 +416,20 @@ impl HistoryBrowserPanel {
 
             // Superscript number
             let num_style = if is_selected {
-                Style::default().fg(self.theme.text_highlight).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(self.theme.text_highlight)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(self.theme.text_secondary)
             };
-            spans.push(Span::styled(superscript_digit(slot_num), num_style));
+            spans.push(Span::styled(superscript_number(slot_num), num_style));
 
             // Opening bracket
-            let bstyle = if is_selected { bracket_selected_style } else { bracket_style };
+            let bstyle = if is_selected {
+                bracket_selected_style
+            } else {
+                bracket_style
+            };
             spans.push(Span::styled("⟦", bstyle));
 
             // Token text with type-aware styling
@@ -325,12 +447,10 @@ impl HistoryBrowserPanel {
                 } else {
                     edit_state.edit_buffer.clone()
                 }
+            } else if token.text.is_empty() {
+                "_".to_string()
             } else {
-                if token.text.is_empty() {
-                    "_".to_string()
-                } else {
-                    token.text.clone()
-                }
+                token.text.clone()
             };
             spans.push(Span::styled(display_text, token_style));
 
@@ -342,11 +462,14 @@ impl HistoryBrowserPanel {
         }
 
         let token_line = Line::from(spans);
-        Paragraph::new(token_line).render(chunks[3], buffer);
+        Paragraph::new(token_line)
+            .scroll((0, scroll_offset as u16))
+            .render(chunks[3], buffer);
 
-        // Next suggestion row (dim, aligned under selected token)
+        // Next suggestion row (dim, aligned under selected token, accounting for scroll)
         if let Some(next_sugg) = edit_state.next_suggestion() {
-            let padding = " ".repeat(selected_x_offset);
+            let adjusted_offset = selected_x_offset.saturating_sub(scroll_offset);
+            let padding = " ".repeat(adjusted_offset);
             let next_line = Line::from(vec![
                 Span::styled(padding, Style::default()),
                 Span::styled(next_sugg, Style::default().fg(self.theme.text_secondary)),
@@ -357,29 +480,50 @@ impl HistoryBrowserPanel {
         // Edit input line with type hint and cycling indicator
         let type_hint = edit_state.type_hint();
         let cycling_indicator = if edit_state.suggestion_index.is_some() {
-            format!(" [{}/{}]",
+            format!(
+                " [{}/{}]",
                 edit_state.suggestion_index.unwrap_or(0) + 1,
-                edit_state.suggestions.len())
+                edit_state.suggestions.len()
+            )
         } else {
             String::new()
         };
-        let edit_label = format!("   {} {} > ", superscript_digit(edit_state.selected + 1), type_hint);
+        let edit_label = format!(
+            "   {} {} > ",
+            superscript_number(edit_state.selected + 1),
+            type_hint
+        );
         let edit_line = Line::from(vec![
             Span::styled(edit_label, Style::default().fg(self.theme.git_fg)),
-            Span::styled(&edit_state.edit_buffer, Style::default().fg(self.theme.text_primary).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                &edit_state.edit_buffer,
+                Style::default()
+                    .fg(self.theme.text_primary)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("█", Style::default().fg(self.theme.header_fg)),
-            Span::styled(cycling_indicator, Style::default().fg(self.theme.text_secondary)),
+            Span::styled(
+                cycling_indicator,
+                Style::default().fg(self.theme.text_secondary),
+            ),
         ]);
         Paragraph::new(edit_line).render(chunks[6], buffer);
 
         // Build and show result preview
-        let result_preview: String = edit_state.tokens.iter().enumerate().map(|(i, t)| {
-            if i == edit_state.selected {
-                edit_state.edit_buffer.clone()
-            } else {
-                t.text.clone()
-            }
-        }).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ");
+        let result_preview: String = edit_state
+            .tokens
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                if i == edit_state.selected {
+                    edit_state.edit_buffer.clone()
+                } else {
+                    t.text.clone()
+                }
+            })
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
 
         let preview_changed = result_preview != edit_state.original;
         let preview_style = if preview_changed {
@@ -391,10 +535,12 @@ impl HistoryBrowserPanel {
             Span::styled("  Result: ", Style::default().fg(self.theme.text_secondary)),
             Span::styled(&result_preview, preview_style),
         ]);
-        Paragraph::new(preview_line).render(chunks[8], buffer);
+        Paragraph::new(preview_line)
+            .wrap(Wrap { trim: false })
+            .render(chunks[8], buffer);
 
         // Border
-        for x in chunks[10].x..chunks[10].x + chunks[10].width {
+        for x in chunks[9].x..chunks[9].x + chunks[9].width {
             if let Some(cell) = buffer.cell_mut((x, chunks[10].y)) {
                 cell.set_char('─');
                 cell.set_style(border_style);
@@ -427,11 +573,16 @@ impl HistoryBrowserPanel {
             Span::styled("Esc", key_style),
             Span::styled(" Back", label_style),
         ]);
-        Paragraph::new(hints).render(chunks[11], buffer);
+        Paragraph::new(hints).render(chunks[10], buffer);
     }
 
     /// Renders the danger confirmation dialog.
-    fn render_danger_confirm(&self, buffer: &mut Buffer, area: Rect, edit_state: &CommandEditState) {
+    fn render_danger_confirm(
+        &self,
+        buffer: &mut Buffer,
+        area: Rect,
+        edit_state: &CommandEditState,
+    ) {
         let chunks = Layout::vertical([
             Constraint::Length(1), // Warning header
             Constraint::Length(1), // Warning message
@@ -443,23 +594,36 @@ impl HistoryBrowserPanel {
         .split(area);
 
         // Warning header
-        let header = Line::from(vec![
-            Span::styled(" ⚠ WARNING ", Style::default().fg(self.theme.bar_bg).bg(self.theme.semantic_warning).add_modifier(Modifier::BOLD)),
-        ]);
+        let header = Line::from(vec![Span::styled(
+            " ⚠ WARNING ",
+            Style::default()
+                .fg(self.theme.bar_bg)
+                .bg(self.theme.semantic_warning)
+                .add_modifier(Modifier::BOLD),
+        )]);
         Paragraph::new(header).render(chunks[0], buffer);
 
         // Warning message
-        let warning_msg = edit_state.pending_confirm.as_ref()
+        let warning_msg = edit_state
+            .pending_confirm
+            .as_ref()
             .map(|c| c.warning.message)
             .unwrap_or("Potentially dangerous command");
         let warning_line = Line::from(vec![
             Span::styled(" ", Style::default()),
-            Span::styled(warning_msg, Style::default().fg(self.theme.semantic_error).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                warning_msg,
+                Style::default()
+                    .fg(self.theme.semantic_error)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ]);
         Paragraph::new(warning_line).render(chunks[1], buffer);
 
         // Command
-        let cmd = edit_state.pending_confirm.as_ref()
+        let cmd = edit_state
+            .pending_confirm
+            .as_ref()
             .map(|c| c.command.as_str())
             .unwrap_or("");
         let cmd_line = Line::from(vec![
@@ -553,7 +717,9 @@ impl HistoryBrowserPanel {
                 // 1. If current token edit differs from saved token → revert token
                 // 2. If command differs from original → revert entire command
                 // 3. Exit edit mode
-                let token_text = edit_state.tokens.get(edit_state.selected)
+                let token_text = edit_state
+                    .tokens
+                    .get(edit_state.selected)
                     .map(|t| t.text.as_str())
                     .unwrap_or("");
 
@@ -614,6 +780,33 @@ impl HistoryBrowserPanel {
             }
             KeyCode::BackTab => {
                 edit_state.prev();
+                self.update_suggestions_with_history();
+                Some(PanelResult::Continue)
+            }
+            KeyCode::Char('|') => {
+                // Pipe: commit current token, add pipe, start new token with pipeable suggestions
+                // This mirrors the file browser's pipe handling behavior
+                if !edit_state.edit_buffer.is_empty() {
+                    // Save current edit to current token
+                    if let Some(token) = edit_state.tokens.get_mut(edit_state.selected) {
+                        if !token.locked {
+                            token.text = edit_state.edit_buffer.clone();
+                        }
+                    }
+                }
+                // Add the pipe as its own token
+                let pipe_pos = edit_state.selected + 1;
+                edit_state
+                    .tokens
+                    .insert(pipe_pos, CommandToken::new("|", TokenType::Argument));
+                // Point to virtual "new token" position by creating an empty token
+                let empty_pos = pipe_pos + 1;
+                edit_state
+                    .tokens
+                    .insert(empty_pos, CommandToken::new("", TokenType::Argument));
+                edit_state.selected = empty_pos;
+                edit_state.edit_buffer.clear();
+                edit_state.suggestion_index = None;
                 self.update_suggestions_with_history();
                 Some(PanelResult::Continue)
             }
@@ -682,9 +875,9 @@ impl HistoryBrowserPanel {
             Some(0) => ("ok", self.theme.semantic_success),
             Some(code) => {
                 if code > 128 {
-                    ("!!", self.theme.semantic_error)  // Signal
+                    ("!!", self.theme.semantic_error) // Signal
                 } else {
-                    ("!!", self.theme.semantic_warning)  // Non-zero exit
+                    ("!!", self.theme.semantic_warning) // Non-zero exit
                 }
             }
             None => ("  ", self.theme.text_secondary),
@@ -693,7 +886,9 @@ impl HistoryBrowserPanel {
 
     /// Renders the table header row.
     fn render_header(&self, buffer: &mut Buffer, area: Rect, cols: &ColumnWidths) {
-        let style = Style::default().fg(self.theme.header_fg).add_modifier(Modifier::BOLD);
+        let style = Style::default()
+            .fg(self.theme.header_fg)
+            .add_modifier(Modifier::BOLD);
         let dim = Style::default().fg(self.theme.text_secondary);
 
         let mut x = area.x;
@@ -783,7 +978,14 @@ impl HistoryBrowserPanel {
     }
 
     /// Renders a single table row.
-    fn render_row(&self, buffer: &mut Buffer, area: Rect, record: &HistoryRecord, cols: &ColumnWidths, is_selected: bool) {
+    fn render_row(
+        &self,
+        buffer: &mut Buffer,
+        area: Rect,
+        record: &HistoryRecord,
+        cols: &ColumnWidths,
+        is_selected: bool,
+    ) {
         let base_style = if is_selected {
             Style::default().bg(self.theme.selection_bg)
         } else {
@@ -804,26 +1006,30 @@ impl HistoryBrowserPanel {
 
         // Command column (first)
         let cmd_style = if is_selected {
-            base_style.fg(self.theme.selection_fg).add_modifier(Modifier::BOLD)
+            base_style
+                .fg(self.theme.selection_fg)
+                .add_modifier(Modifier::BOLD)
         } else {
             base_style.fg(self.theme.text_primary)
         };
         let cmd_width = cols.command.saturating_sub(1) as usize;
-        let cmd_display = if record.command.chars().count() > cmd_width {
-            let truncated: String = record.command
-                .chars()
-                .take(cmd_width.saturating_sub(3))
-                .collect();
-            format!("{}...", truncated)
+        let cmd_display = if crate::ui::text_width::display_width(&record.command) > cmd_width {
+            crate::ui::text_width::truncate_with_ellipsis(&record.command, cmd_width).into_owned()
         } else {
             record.command.clone()
         };
-        for (i, ch) in cmd_display.chars().enumerate() {
-            if (i as u16) < cols.command {
-                if let Some(cell) = buffer.cell_mut((x + (i as u16), area.y)) {
+        {
+            let mut col: u16 = 0;
+            for ch in cmd_display.chars() {
+                let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+                if col + ch_w > cols.command {
+                    break;
+                }
+                if let Some(cell) = buffer.cell_mut((x + col, area.y)) {
                     cell.set_char(ch);
                     cell.set_style(cmd_style);
                 }
+                col += ch_w;
             }
         }
         x += cols.command;
@@ -831,17 +1037,31 @@ impl HistoryBrowserPanel {
         // Separator
         if let Some(cell) = buffer.cell_mut((x, area.y)) {
             cell.set_char('|');
-            cell.set_style(if is_selected { base_style.fg(self.theme.text_secondary) } else { dim });
+            cell.set_style(if is_selected {
+                base_style.fg(self.theme.text_secondary)
+            } else {
+                dim
+            });
         }
         x += 1;
 
         // When column
         let time_text = self.format_relative_time(record);
         let time_style = base_style.fg(self.theme.semantic_info);
-        for (i, ch) in format!("{:>5}", time_text).chars().take(cols.time as usize - 1).enumerate() {
-            if let Some(cell) = buffer.cell_mut((x + i as u16, area.y)) {
-                cell.set_char(ch);
-                cell.set_style(time_style);
+        let time_padded = crate::ui::text_width::pad_right_align(&time_text, 5);
+        {
+            let max_col = cols.time.saturating_sub(1) as usize;
+            let mut col: u16 = 0;
+            for ch in time_padded.chars() {
+                let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+                if (col + ch_w) as usize > max_col {
+                    break;
+                }
+                if let Some(cell) = buffer.cell_mut((x + col, area.y)) {
+                    cell.set_char(ch);
+                    cell.set_style(time_style);
+                }
+                col += ch_w;
             }
         }
         x += cols.time;
@@ -849,17 +1069,31 @@ impl HistoryBrowserPanel {
         // Separator
         if let Some(cell) = buffer.cell_mut((x, area.y)) {
             cell.set_char('|');
-            cell.set_style(if is_selected { base_style.fg(self.theme.text_secondary) } else { dim });
+            cell.set_style(if is_selected {
+                base_style.fg(self.theme.text_secondary)
+            } else {
+                dim
+            });
         }
         x += 1;
 
         // Duration column
         let dur_text = self.format_duration(record);
         let dur_style = base_style.fg(self.theme.git_fg);
-        for (i, ch) in format!("{:>7}", dur_text).chars().take(cols.duration as usize - 1).enumerate() {
-            if let Some(cell) = buffer.cell_mut((x + i as u16, area.y)) {
-                cell.set_char(ch);
-                cell.set_style(dur_style);
+        let dur_padded = crate::ui::text_width::pad_right_align(&dur_text, 7);
+        {
+            let max_col = cols.duration.saturating_sub(1) as usize;
+            let mut col: u16 = 0;
+            for ch in dur_padded.chars() {
+                let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+                if (col + ch_w) as usize > max_col {
+                    break;
+                }
+                if let Some(cell) = buffer.cell_mut((x + col, area.y)) {
+                    cell.set_char(ch);
+                    cell.set_style(dur_style);
+                }
+                col += ch_w;
             }
         }
         x += cols.duration;
@@ -867,7 +1101,11 @@ impl HistoryBrowserPanel {
         // Separator
         if let Some(cell) = buffer.cell_mut((x, area.y)) {
             cell.set_char('|');
-            cell.set_style(if is_selected { base_style.fg(self.theme.text_secondary) } else { dim });
+            cell.set_style(if is_selected {
+                base_style.fg(self.theme.text_secondary)
+            } else {
+                dim
+            });
         }
         x += 1;
 
@@ -881,10 +1119,19 @@ impl HistoryBrowserPanel {
             } else {
                 base_style.fg(self.theme.text_secondary)
             };
-            for (i, ch) in count_text.chars().take(cols.count as usize - 1).enumerate() {
-                if let Some(cell) = buffer.cell_mut((x + i as u16, area.y)) {
-                    cell.set_char(ch);
-                    cell.set_style(count_style);
+            {
+                let max_col = cols.count.saturating_sub(1) as usize;
+                let mut col: u16 = 0;
+                for ch in count_text.chars() {
+                    let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+                    if (col + ch_w) as usize > max_col {
+                        break;
+                    }
+                    if let Some(cell) = buffer.cell_mut((x + col, area.y)) {
+                        cell.set_char(ch);
+                        cell.set_style(count_style);
+                    }
+                    col += ch_w;
                 }
             }
             x += cols.count;
@@ -892,7 +1139,11 @@ impl HistoryBrowserPanel {
             // Separator
             if let Some(cell) = buffer.cell_mut((x, area.y)) {
                 cell.set_char('|');
-                cell.set_style(if is_selected { base_style.fg(self.theme.text_secondary) } else { dim });
+                cell.set_style(if is_selected {
+                    base_style.fg(self.theme.text_secondary)
+                } else {
+                    dim
+                });
             }
             x += 1;
         }
@@ -900,10 +1151,19 @@ impl HistoryBrowserPanel {
         // Status column (last)
         let (status_text, status_color) = self.format_exit_status(record);
         let status_style = base_style.fg(status_color);
-        for (i, ch) in status_text.chars().take(cols.status as usize).enumerate() {
-            if let Some(cell) = buffer.cell_mut((x + i as u16, area.y)) {
-                cell.set_char(ch);
-                cell.set_style(status_style);
+        {
+            let max_col = cols.status as usize;
+            let mut col: u16 = 0;
+            for ch in status_text.chars() {
+                let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+                if (col + ch_w) as usize > max_col {
+                    break;
+                }
+                if let Some(cell) = buffer.cell_mut((x + col, area.y)) {
+                    cell.set_char(ch);
+                    cell.set_style(status_style);
+                }
+                col += ch_w;
             }
         }
     }
@@ -941,12 +1201,16 @@ impl Panel for HistoryBrowserPanel {
         .split(area);
 
         // Determine if we need count column (dedupe or frequency modes)
-        let show_count = self.filter_mode.dedupe || matches!(self.sort_mode, SortMode::Frequency | SortMode::Frecency);
+        let show_count = self.filter_mode.dedupe
+            || matches!(self.sort_mode, SortMode::Frequency | SortMode::Frecency);
         let cols = ColumnWidths::calculate(area.width, show_count);
 
         // Render filter input
         let filter_text = if self.filter.is_empty() {
-            Span::styled("Type to filter...", Style::default().fg(self.theme.text_secondary))
+            Span::styled(
+                "Type to filter...",
+                Style::default().fg(self.theme.text_secondary),
+            )
         } else {
             Span::styled(&self.filter, Style::default().fg(self.theme.text_primary))
         };
@@ -985,7 +1249,8 @@ impl Panel for HistoryBrowserPanel {
         let visible_height = chunks[3].height as usize;
         self.ensure_visible(visible_height);
 
-        for (display_idx, record) in self.records
+        for (display_idx, record) in self
+            .records
             .iter()
             .skip(self.scroll_offset)
             .take(visible_height)
@@ -1014,7 +1279,9 @@ impl Panel for HistoryBrowserPanel {
         // Render keybind bar
         let key_style = Style::default().fg(self.theme.text_highlight);
         let label_style = Style::default().fg(self.theme.text_secondary);
-        let active_label = Style::default().fg(self.theme.semantic_success).add_modifier(Modifier::BOLD);
+        let active_label = Style::default()
+            .fg(self.theme.semantic_success)
+            .add_modifier(Modifier::BOLD);
         let sort_style = Style::default().fg(self.theme.header_fg);
 
         let hints = Line::from(vec![
@@ -1022,13 +1289,34 @@ impl Panel for HistoryBrowserPanel {
             Span::styled(" Edit", label_style),
             Span::raw("  "),
             Span::styled("^D", key_style),
-            Span::styled(" Dedupe", if self.filter_mode.dedupe { active_label } else { label_style }),
+            Span::styled(
+                " Dedupe",
+                if self.filter_mode.dedupe {
+                    active_label
+                } else {
+                    label_style
+                },
+            ),
             Span::raw("  "),
             Span::styled("^G", key_style),
-            Span::styled(" CurDir", if self.filter_mode.current_dir_only { active_label } else { label_style }),
+            Span::styled(
+                " CurDir",
+                if self.filter_mode.current_dir_only {
+                    active_label
+                } else {
+                    label_style
+                },
+            ),
             Span::raw("  "),
             Span::styled("^X", key_style),
-            Span::styled(" Failed", if self.filter_mode.failed_only { active_label } else { label_style }),
+            Span::styled(
+                " Failed",
+                if self.filter_mode.failed_only {
+                    active_label
+                } else {
+                    label_style
+                },
+            ),
             Span::raw("  "),
             Span::styled("^S", key_style),
             Span::styled(format!(" {}", self.sort_mode.name()), sort_style),
@@ -1142,9 +1430,13 @@ impl Panel for HistoryBrowserPanel {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::super::buffer_convert::buffer_to_ansi;
+    use super::super::command_edit::{
+        apply_quotes, check_dangerous_command, split_quotes, tokenize_command, QuoteStyle,
+        TokenType,
+    };
     use super::super::theme::AMBER_THEME;
-    use super::super::command_edit::{tokenize_command, TokenType, check_dangerous_command, split_quotes, apply_quotes, QuoteStyle};
+    use super::*;
 
     #[test]
     fn test_history_browser_new() {
@@ -1221,10 +1513,19 @@ mod tests {
 
     // Quote handling tests
     #[test]
-    fn test_split_quotes() {
-        assert_eq!(split_quotes("hello"), ("hello".to_string(), QuoteStyle::None));
-        assert_eq!(split_quotes("'hello'"), ("hello".to_string(), QuoteStyle::Single));
-        assert_eq!(split_quotes("\"hello\""), ("hello".to_string(), QuoteStyle::Double));
+    fn test_split_quotes_styles_return_expected_quote_style() {
+        assert_eq!(
+            split_quotes("hello"),
+            ("hello".to_string(), QuoteStyle::None)
+        );
+        assert_eq!(
+            split_quotes("'hello'"),
+            ("hello".to_string(), QuoteStyle::Single)
+        );
+        assert_eq!(
+            split_quotes("\"hello\""),
+            ("hello".to_string(), QuoteStyle::Double)
+        );
     }
 
     #[test]
@@ -1274,5 +1575,43 @@ mod tests {
         assert_eq!(state.edit_buffer, "'hello'");
         state.cycle_quote();
         assert_eq!(state.edit_buffer, "\"hello\"");
+    }
+
+    #[test]
+    fn test_edit_mode_original_hint_preserves_wide_chars() {
+        let mut panel = HistoryBrowserPanel::new(&AMBER_THEME);
+        panel.edit_mode = Some(CommandEditState::from_command("echo 你好"));
+
+        let area = Rect::new(0, 0, 60, 12);
+        let mut buffer = Buffer::empty(area);
+        panel.render(&mut buffer, area);
+
+        let ansi = buffer_to_ansi(&buffer, area);
+        let visible = strip_ansi_for_test(&ansi);
+        assert!(
+            visible.contains("Original: echo 你好"),
+            "expected wide chars in original hint, got: {visible:?}"
+        );
+    }
+
+    fn strip_ansi_for_test(s: &str) -> String {
+        let mut result = String::new();
+        let mut chars = s.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\x1b' {
+                if chars.peek() == Some(&'[') {
+                    chars.next();
+                    while let Some(&c) = chars.peek() {
+                        chars.next();
+                        if c.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                }
+            } else {
+                result.push(ch);
+            }
+        }
+        result
     }
 }
