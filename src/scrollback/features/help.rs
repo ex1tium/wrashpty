@@ -72,8 +72,13 @@ impl LegendBar {
                     active: None,
                 },
                 LegendEntry {
-                    key: "Z",
+                    key: "x",
                     label: "Unfold",
+                    active: None,
+                },
+                LegendEntry {
+                    key: "X",
+                    label: "UnfoldAll",
                     active: None,
                 },
                 LegendEntry {
@@ -217,7 +222,12 @@ mod tests {
         assert!(
             entries
                 .iter()
-                .any(|entry| entry.key == "Z" && entry.label == "Unfold")
+                .any(|entry| entry.key == "x" && entry.label == "Unfold")
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.key == "X" && entry.label == "UnfoldAll")
         );
     }
 
