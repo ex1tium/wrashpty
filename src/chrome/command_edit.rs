@@ -1063,7 +1063,7 @@ mod tests {
     }
 
     #[test]
-    fn test_next_prev_suggestion() {
+    fn test_next_prev_suggestion_cycles_through_list() {
         let mut state = CommandEditState::for_file("test.rs", "/path/to/test.rs");
         // Manually populate suggestions to test cycling mechanics
         state.suggestions = vec!["cat".to_string(), "less".to_string(), "vim".to_string()];
@@ -1206,7 +1206,7 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_after() {
+    fn test_insert_token_after_increments_count_and_selection() {
         let mut state = CommandEditState::from_command("git push");
         assert_eq!(state.token_count(), 2);
         state.select(1);
@@ -1216,7 +1216,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cannot_delete_locked() {
+    fn test_delete_token_locked_token_preserves_count() {
         let mut state = CommandEditState::for_file("test.rs", "/path/to/test.rs");
         state.select(1); // Select locked token
         state.delete_token();
@@ -1224,7 +1224,7 @@ mod tests {
     }
 
     #[test]
-    fn test_undo() {
+    fn test_undo_after_delete_restores_token_count() {
         let mut state = CommandEditState::from_command("git push origin main");
         assert_eq!(state.token_count(), 4);
         state.select(2);
@@ -1235,7 +1235,7 @@ mod tests {
     }
 
     #[test]
-    fn test_quote_cycling() {
+    fn test_cycle_quote_selected_token_updates_edit_buffer_and_quotes() {
         let mut state = CommandEditState::from_command("echo hello");
         state.select(1);
         assert_eq!(state.edit_buffer, "hello");
@@ -1251,14 +1251,14 @@ mod tests {
     }
 
     #[test]
-    fn test_dangerous_command_detection() {
+    fn test_check_dangerous_command_detects_rm_rf_and_allows_safe() {
         assert!(check_dangerous_command("rm -rf /").is_some());
         assert!(check_dangerous_command("sudo rm -rf /tmp").is_some());
         assert!(check_dangerous_command("ls -la").is_none());
     }
 
     #[test]
-    fn test_is_changed_detects_modifications() {
+    fn test_is_changed_after_edit_returns_true() {
         let mut state = CommandEditState::from_command("echo hello");
         assert!(!state.is_changed());
 
@@ -1268,7 +1268,7 @@ mod tests {
     }
 
     #[test]
-    fn test_revert() {
+    fn test_revert_after_edit_restores_original_token() {
         let mut state = CommandEditState::from_command("echo hello");
         state.select(1);
         state.edit_buffer = "world".to_string();
@@ -1280,21 +1280,21 @@ mod tests {
     }
 
     #[test]
-    fn test_config_for_history() {
+    fn test_edit_config_for_history_enables_danger_check_and_quotes() {
         let config = EditConfig::for_history();
         assert!(config.danger_check);
         assert!(config.enable_quotes);
     }
 
     #[test]
-    fn test_config_for_file() {
+    fn test_edit_config_for_file_disables_danger_check_and_quotes() {
         let config = EditConfig::for_file();
         assert!(!config.danger_check);
         assert!(!config.enable_quotes);
     }
 
     #[test]
-    fn test_superscript_number() {
+    fn test_superscript_number_formats_digits_correctly() {
         assert_eq!(superscript_number(0), "⁰");
         assert_eq!(superscript_number(1), "¹");
         assert_eq!(superscript_number(10), "¹⁰");
@@ -1305,7 +1305,7 @@ mod tests {
     }
 
     #[test]
-    fn test_split_quotes() {
+    fn test_split_quotes_returns_text_and_style() {
         assert_eq!(
             split_quotes("hello"),
             ("hello".to_string(), QuoteStyle::None)
@@ -1321,7 +1321,7 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_quotes() {
+    fn test_apply_quotes_wraps_text_with_style() {
         assert_eq!(apply_quotes("hello", QuoteStyle::None), "hello");
         assert_eq!(apply_quotes("hello", QuoteStyle::Single), "'hello'");
         assert_eq!(apply_quotes("hello", QuoteStyle::Double), "\"hello\"");
