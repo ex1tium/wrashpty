@@ -133,7 +133,35 @@ OSC 777 format: `ESC ] 777 ; wrashpty ; <event> ; <token> ; <data> BEL`
 - **Unit tests**: Same file as implementation (`#[cfg(test)]` module)
 - **Property tests**: `proptest` for parser fuzzing
 - **Integration tests**: `rexpect` for PTY-based end-to-end tests
-- **Name pattern**: `test_<fn>_<scenario>_<expected>`
+
+### Test Naming (Required)
+
+All test functions **must** follow the pattern `test_<fn>_<scenario>_<expected>`:
+
+| Component | Meaning | Example fragment |
+|-----------|---------|------------------|
+| `<fn>` | Function or type under test | `parse_marker`, `shell_quote`, `render` |
+| `<scenario>` | Input condition or setup | `empty_input`, `with_spaces`, `when_dirty` |
+| `<expected>` | Observable outcome | `returns_none`, `shows_branch`, `preserves_count` |
+
+**Good names**:
+```
+test_shell_quote_path_with_spaces_returns_single_quoted
+test_render_when_dirty_shows_branch_and_dirty_symbol
+test_undo_after_delete_restores_token_count
+test_format_duration_with_minutes_formats_min_sec
+test_check_dangerous_command_detects_rm_rf
+```
+
+**Bad names** (too vague—don't use):
+```
+test_shell_quote          # missing scenario + expected
+test_undo                 # what scenario? what result?
+test_format_duration      # which case?
+test_new                  # what type? what state?
+```
+
+When writing or modifying tests, always apply this convention. When touching a test file, rename any non-conforming tests in the same `mod tests` block.
 
 ### What to Test
 

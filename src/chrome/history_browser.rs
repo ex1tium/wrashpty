@@ -1540,31 +1540,10 @@ mod tests {
         panel.render(&mut buffer, area);
 
         let ansi = buffer_to_ansi(&buffer, area);
-        let visible = strip_ansi_for_test(&ansi);
+        let visible = crate::chrome::test_utils::strip_ansi_for_test(&ansi);
         assert!(
             visible.contains("Original: echo 你好"),
             "expected wide chars in original hint, got: {visible:?}"
         );
-    }
-
-    fn strip_ansi_for_test(s: &str) -> String {
-        let mut result = String::new();
-        let mut chars = s.chars().peekable();
-        while let Some(ch) = chars.next() {
-            if ch == '\x1b' {
-                if chars.peek() == Some(&'[') {
-                    chars.next();
-                    while let Some(&c) = chars.peek() {
-                        chars.next();
-                        if c.is_ascii_alphabetic() {
-                            break;
-                        }
-                    }
-                }
-            } else {
-                result.push(ch);
-            }
-        }
-        result
     }
 }

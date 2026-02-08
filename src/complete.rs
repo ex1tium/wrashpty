@@ -766,9 +766,8 @@ mod tests {
 
     #[test]
     fn test_wrash_completer_new() {
-        let completer = WrashCompleter::new();
+        let _completer = WrashCompleter::new();
         // Should create without panicking
-        drop(completer);
     }
 
     #[test]

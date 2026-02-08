@@ -1313,25 +1313,10 @@ impl App {
     /// in Edit mode. Renders scrollback content and handles scroll navigation
     /// until user presses Esc or any non-scroll key.
     pub(super) fn run_scroll_view(&mut self) -> Result<()> {
-        use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
-
-        // RAII guard to ensure raw mode is disabled even on panic
-        struct RawModeGuard;
-        impl Drop for RawModeGuard {
-            fn drop(&mut self) {
-                let _ = disable_raw_mode();
-            }
-        }
-
-        // Enable raw mode for crossterm event capture
-        // Reedline may have disabled raw mode before returning via ExecuteHostCommand
-        if let Err(e) = enable_raw_mode() {
-            warn!("Failed to enable raw mode for scroll view: {}", e);
-            return Ok(());
-        }
-
-        // Guard ensures disable_raw_mode is called even if run_scroll_view_inner panics
-        let _guard = RawModeGuard;
+        // Ensure raw mode is active - reedline may have toggled terminal modes
+        self.terminal_guard
+            .ensure_raw_mode()
+            .context("Failed to ensure raw mode for scroll view")?;
 
         self.run_scroll_view_inner()
     }

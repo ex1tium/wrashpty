@@ -785,7 +785,7 @@ impl Panel for FileBrowserPanel {
 
         // If in edit mode, render the edit UI
         if let Some(ref state) = self.edit_mode {
-            self.render_file_edit_mode(buffer, area, &state.clone());
+            self.render_file_edit_mode(buffer, area, state);
             return;
         }
 
