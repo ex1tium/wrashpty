@@ -16,6 +16,9 @@
 //! 3. **Supplementary Sources** (context-specific):
 //!    - Flag values (`ci_flag_values`) for `--flag <value>` positions
 //!    - Pipe commands (`ci_pipe_chains`) for post-pipe positions
+//!    - Embedded curated command schemas (`SchemaIndex`) for subcommands/flags/value choices
+//!    - Session transitions (`ci_transitions`) for likely next commands
+//!    - Templates (`ci_templates`) for reusable command patterns
 //!
 //! # Scoring and Ranking
 //!
@@ -23,12 +26,16 @@
 //! then deduplicated, penalized for low success rates, and boosted for high
 //! success rates before final ranking.
 
+use command_schema_core::{CommandSchema, FlagSchema, SubcommandSchema, ValueType};
 use rusqlite::Connection;
 use tracing::debug;
 
 use super::fuzzy;
 use super::patterns;
+use super::schema_index::SchemaIndex;
 use super::scoring::{self, ContextMatch};
+use super::sessions;
+use super::templates;
 use super::types::{
     PositionType, Suggestion, SuggestionContext, SuggestionMetadata, SuggestionSource,
 };
@@ -36,8 +43,13 @@ use super::user_patterns;
 use super::variants;
 
 /// Main entry point for getting suggestions.
-pub fn suggest(conn: &Connection, context: &SuggestionContext, limit: usize) -> Vec<Suggestion> {
-    let mut suggestions = gather_suggestions(conn, context);
+pub fn suggest(
+    conn: &Connection,
+    schema_index: &SchemaIndex,
+    context: &SuggestionContext,
+    limit: usize,
+) -> Vec<Suggestion> {
+    let mut suggestions = gather_suggestions(conn, schema_index, context);
 
     // Apply prefix filter if partial text provided
     if !context.partial.is_empty() {
@@ -131,7 +143,11 @@ fn boost_successful(suggestions: &mut [Suggestion], threshold: f64, boost: f64) 
 /// position-aware token suggestions. This unified approach eliminates
 /// the need for separate token_mode handling - all token suggestions
 /// come from the same learned source.
-fn gather_suggestions(conn: &Connection, context: &SuggestionContext) -> Vec<Suggestion> {
+fn gather_suggestions(
+    conn: &Connection,
+    schema_index: &SchemaIndex,
+    context: &SuggestionContext,
+) -> Vec<Suggestion> {
     let mut suggestions = Vec::new();
 
     // 1. User patterns (highest priority) - always include, they're user-defined
@@ -141,7 +157,14 @@ fn gather_suggestions(conn: &Connection, context: &SuggestionContext) -> Vec<Sug
     // This provides position-aware token suggestions for all positions
     suggestions.extend(suggest_from_hierarchy(conn, context));
 
-    // 3. Supplementary sources for specific contexts
+    // 3. Schema source: extracted/bootstrapped command definitions
+    suggestions.extend(suggest_from_schema(schema_index, context));
+
+    // 4. Session transitions and template completions
+    suggestions.extend(suggest_from_session_transitions(conn, context));
+    suggestions.extend(suggest_from_templates(conn, context));
+
+    // 5. Supplementary sources for specific contexts
     match &context.position {
         PositionType::FlagValue { flag } => {
             // Add specialized flag value suggestions
@@ -150,6 +173,11 @@ fn gather_suggestions(conn: &Connection, context: &SuggestionContext) -> Vec<Sug
         PositionType::AfterPipe => {
             // Add learned pipe chain suggestions
             suggestions.extend(suggest_pipe_commands(conn, context));
+
+            // Fallback to frequent commands if no learned pipe transitions exist yet.
+            if suggestions.is_empty() {
+                suggestions.extend(suggest_from_historical_frequency(conn, 10));
+            }
         }
         PositionType::Command => {
             // For command position, add historical frequency suggestions as fallback
@@ -158,7 +186,7 @@ fn gather_suggestions(conn: &Connection, context: &SuggestionContext) -> Vec<Sug
         _ => {}
     }
 
-    // 4. Fuzzy search fallback: if partial text is provided and might be a typo
+    // 6. Fuzzy search fallback: if partial text is provided and might be a typo
     if !context.partial.is_empty() && context.partial.len() >= 2 {
         suggestions.extend(suggest_from_fuzzy_search(conn, &context.partial, 5));
     }
@@ -169,6 +197,271 @@ fn gather_suggestions(conn: &Connection, context: &SuggestionContext) -> Vec<Sug
 /// Suggests from user patterns.
 fn suggest_user_patterns(conn: &Connection, context: &SuggestionContext) -> Vec<Suggestion> {
     user_patterns::suggest_from_patterns(conn, context).unwrap_or_default()
+}
+
+/// Suggests likely next commands from session transition history.
+fn suggest_from_session_transitions(
+    conn: &Connection,
+    context: &SuggestionContext,
+) -> Vec<Suggestion> {
+    if !matches!(context.position, PositionType::Command) {
+        return Vec::new();
+    }
+
+    let transition_seed = context.last_command.as_deref().or_else(|| {
+        context
+            .session
+            .as_ref()
+            .and_then(|session| session.recent_commands.last().map(String::as_str))
+    });
+
+    transition_seed
+        .map(|last| sessions::suggest_next(conn, last))
+        .unwrap_or_default()
+}
+
+/// Suggests template-based command completions.
+fn suggest_from_templates(conn: &Connection, context: &SuggestionContext) -> Vec<Suggestion> {
+    if matches!(context.position, PositionType::AfterPipe) {
+        return Vec::new();
+    }
+
+    let now = chrono::Utc::now().timestamp();
+    let context_match = if context.preceding_tokens.is_empty() {
+        ContextMatch::Generic
+    } else {
+        ContextMatch::Exact
+    };
+
+    templates::suggest_templates(conn, context)
+        .into_iter()
+        .filter_map(|completion| {
+            let score = scoring::compute_score(
+                completion.template.frequency,
+                now,
+                None,
+                context_match,
+                SuggestionSource::Template,
+            ) * completion.confidence.max(0.1);
+
+            let preview = completion.preview;
+            let text = template_token_for_context(&preview, context)?;
+            Some(Suggestion {
+                text,
+                source: SuggestionSource::Template,
+                score,
+                metadata: SuggestionMetadata {
+                    frequency: completion.template.frequency,
+                    last_seen: Some(now),
+                    template_preview: Some(preview),
+                    ..Default::default()
+                },
+            })
+        })
+        .collect()
+}
+
+fn template_token_for_context(preview: &str, context: &SuggestionContext) -> Option<String> {
+    let token_index = context.preceding_tokens.len();
+    preview
+        .split_whitespace()
+        .nth(token_index)
+        .map(ToString::to_string)
+}
+
+/// Suggests from stored command schemas.
+///
+/// This integrates extracted/bootstrapped command schemas into the same
+/// unified suggestion pipeline used by learned hierarchy patterns.
+fn suggest_from_schema(schema_index: &SchemaIndex, context: &SuggestionContext) -> Vec<Suggestion> {
+    let mut suggestions = Vec::new();
+    let now = chrono::Utc::now().timestamp();
+
+    if matches!(context.position, PositionType::AfterPipe) {
+        return suggestions;
+    }
+
+    match &context.position {
+        PositionType::Command => {
+            for command in schema_index.commands().take(40) {
+                suggestions.push(schema_suggestion(
+                    command.to_string(),
+                    ContextMatch::Generic,
+                    now,
+                    "schema_command",
+                    None,
+                ));
+            }
+        }
+        PositionType::FlagValue { flag } => {
+            let Some(base_command) = context.preceding_tokens.first().map(|t| t.text.as_str())
+            else {
+                return suggestions;
+            };
+
+            if let Some(schema) = schema_index.get(base_command) {
+                let path = resolve_subcommand_path(schema, context);
+                let active_subcommand = find_subcommand_by_path(schema, &path);
+                let available_flags = schema_flags_for_context(schema, active_subcommand);
+
+                if let Some(flag_schema) = available_flags
+                    .iter()
+                    .find(|candidate| candidate.matches(flag))
+                {
+                    for value in schema_flag_value_candidates(flag_schema) {
+                        suggestions.push(schema_suggestion(
+                            value,
+                            ContextMatch::Exact,
+                            now,
+                            "schema_flag_value",
+                            flag_schema.description.clone(),
+                        ));
+                    }
+                }
+            }
+        }
+        PositionType::Subcommand | PositionType::Argument | PositionType::AfterRedirect => {
+            let Some(base_command) = context.preceding_tokens.first().map(|t| t.text.as_str())
+            else {
+                return suggestions;
+            };
+
+            if let Some(schema) = schema_index.get(base_command) {
+                let path = resolve_subcommand_path(schema, context);
+                let active_subcommand = find_subcommand_by_path(schema, &path);
+                let next_subcommands = active_subcommand
+                    .map(|sub| sub.subcommands.as_slice())
+                    .unwrap_or(schema.subcommands.as_slice());
+
+                let context_match = if active_subcommand.is_some() {
+                    ContextMatch::Exact
+                } else {
+                    ContextMatch::BaseCommand
+                };
+
+                for sub in next_subcommands {
+                    suggestions.push(schema_suggestion(
+                        sub.name.clone(),
+                        context_match,
+                        now,
+                        "schema_subcommand",
+                        sub.description.clone(),
+                    ));
+                }
+
+                if wants_flag_suggestions(context) {
+                    for flag in schema_flags_for_context(schema, active_subcommand) {
+                        if let Some(flag_text) = schema_flag_text(flag) {
+                            suggestions.push(schema_suggestion(
+                                flag_text,
+                                context_match,
+                                now,
+                                "schema_flag",
+                                flag.description.clone(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        PositionType::AfterPipe => {}
+    }
+
+    suggestions
+}
+
+fn schema_suggestion(
+    text: String,
+    context_match: ContextMatch,
+    last_seen: i64,
+    role: &str,
+    description: Option<String>,
+) -> Suggestion {
+    Suggestion {
+        text,
+        source: SuggestionSource::Schema,
+        score: scoring::compute_score(1, last_seen, None, context_match, SuggestionSource::Schema)
+            * 0.9,
+        metadata: SuggestionMetadata {
+            frequency: 1,
+            last_seen: Some(last_seen),
+            role: Some(role.to_string()),
+            description,
+            ..Default::default()
+        },
+    }
+}
+
+fn wants_flag_suggestions(context: &SuggestionContext) -> bool {
+    context.partial.starts_with('-')
+}
+
+fn schema_flag_text(flag: &FlagSchema) -> Option<String> {
+    flag.long.clone().or_else(|| flag.short.clone())
+}
+
+fn schema_flags_for_context<'a>(
+    schema: &'a CommandSchema,
+    active_subcommand: Option<&'a SubcommandSchema>,
+) -> Vec<&'a FlagSchema> {
+    let mut flags: Vec<&FlagSchema> = schema.global_flags.iter().collect();
+    if let Some(subcommand) = active_subcommand {
+        flags.extend(subcommand.flags.iter());
+    }
+    flags
+}
+
+fn schema_flag_value_candidates(flag: &FlagSchema) -> Vec<String> {
+    match &flag.value_type {
+        ValueType::Choice(choices) => choices.clone(),
+        ValueType::Branch => vec!["main".to_string(), "master".to_string()],
+        ValueType::Remote => vec!["origin".to_string(), "upstream".to_string()],
+        _ => Vec::new(),
+    }
+}
+
+fn resolve_subcommand_path(schema: &CommandSchema, context: &SuggestionContext) -> Vec<String> {
+    let mut path = Vec::new();
+    let mut current_subcommands = &schema.subcommands;
+
+    for token in context.preceding_tokens.iter().skip(1) {
+        let text = token.text.as_str();
+        if text.starts_with('-') || text == "|" || text == ">" || text == ">>" || text == "<" {
+            break;
+        }
+
+        let Some(next) = current_subcommands
+            .iter()
+            .find(|sub| sub.name == text || sub.aliases.iter().any(|alias| alias == text))
+        else {
+            break;
+        };
+
+        path.push(next.name.clone());
+        current_subcommands = &next.subcommands;
+    }
+
+    path
+}
+
+fn find_subcommand_by_path<'a>(
+    schema: &'a CommandSchema,
+    path: &[String],
+) -> Option<&'a SubcommandSchema> {
+    let first = path.first()?;
+    let mut current = schema
+        .subcommands
+        .iter()
+        .find(|sub| sub.name == *first || sub.aliases.iter().any(|alias| alias == first))?;
+
+    for segment in &path[1..] {
+        current = current
+            .subcommands
+            .iter()
+            .find(|sub| sub.name == *segment || sub.aliases.iter().any(|alias| alias == segment))?;
+    }
+
+    Some(current)
 }
 
 /// Primary suggestion source: learned command hierarchy.
@@ -405,7 +698,12 @@ fn suggest_from_historical_frequency(conn: &Connection, limit: usize) -> Vec<Sug
 mod tests {
     use super::*;
     use crate::intelligence::db_schema;
+    use crate::intelligence::schema_index::SchemaIndex;
+    use crate::intelligence::tokenizer::compute_command_hash;
     use crate::intelligence::types::AnalyzedToken;
+    use command_schema_core::{
+        CommandSchema, FlagSchema, SchemaSource, SubcommandSchema, ValueType,
+    };
 
     fn setup_test_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -413,15 +711,38 @@ mod tests {
         conn
     }
 
+    fn empty_schema_index() -> SchemaIndex {
+        SchemaIndex::from_schemas(Vec::new())
+    }
+
+    fn bootstrap_schema_index() -> SchemaIndex {
+        let mut git = CommandSchema::new("git", SchemaSource::Bootstrap);
+        let mut remote = SubcommandSchema::new("remote");
+        remote.subcommands = vec![
+            SubcommandSchema::new("add"),
+            SubcommandSchema::new("remove"),
+        ];
+        git.subcommands = vec![
+            SubcommandSchema::new("commit"),
+            SubcommandSchema::new("push"),
+            SubcommandSchema::new("pull"),
+            remote,
+        ];
+
+        SchemaIndex::from_schemas(vec![git])
+    }
+
     #[test]
     fn test_suggest_empty_context() {
         let conn = setup_test_db();
+        let schema_index = empty_schema_index();
         let context = SuggestionContext::default();
 
         // Bootstrap the database with some commands
-        crate::intelligence::bootstrap::bootstrap_if_empty(&conn).unwrap();
+        let bootstrap_index = bootstrap_schema_index();
+        crate::intelligence::bootstrap::bootstrap_if_empty(&conn, &bootstrap_index).unwrap();
 
-        let suggestions = suggest(&conn, &context, 10);
+        let suggestions = suggest(&conn, &schema_index, &context, 10);
         // Should return suggestions from bootstrapped hierarchy
         assert!(!suggestions.is_empty());
     }
@@ -429,9 +750,11 @@ mod tests {
     #[test]
     fn test_suggest_with_preceding() {
         let conn = setup_test_db();
+        let schema_index = empty_schema_index();
 
         // Bootstrap the database
-        crate::intelligence::bootstrap::bootstrap_if_empty(&conn).unwrap();
+        let bootstrap_index = bootstrap_schema_index();
+        crate::intelligence::bootstrap::bootstrap_if_empty(&conn, &bootstrap_index).unwrap();
 
         let context = SuggestionContext {
             preceding_tokens: vec![AnalyzedToken::new(
@@ -444,12 +767,16 @@ mod tests {
         };
 
         // Request enough to include all git subcommands (22 bootstrapped)
-        let suggestions = suggest(&conn, &context, 30);
+        let suggestions = suggest(&conn, &schema_index, &context, 30);
         // Should return git subcommands from bootstrapped hierarchy
         assert!(!suggestions.is_empty());
         // Verify we get git subcommands
         let texts: Vec<&str> = suggestions.iter().map(|s| s.text.as_str()).collect();
-        assert!(texts.contains(&"commit"), "expected 'commit' in {:?}", texts);
+        assert!(
+            texts.contains(&"commit"),
+            "expected 'commit' in {:?}",
+            texts
+        );
         assert!(texts.contains(&"push"), "expected 'push' in {:?}", texts);
         assert!(texts.contains(&"pull"), "expected 'pull' in {:?}", texts);
     }
@@ -565,9 +892,11 @@ mod tests {
     #[test]
     fn test_hierarchy_returns_tokens_not_full_commands() {
         let conn = setup_test_db();
+        let schema_index = empty_schema_index();
 
         // Bootstrap to get initial data
-        crate::intelligence::bootstrap::bootstrap_if_empty(&conn).unwrap();
+        let bootstrap_index = bootstrap_schema_index();
+        crate::intelligence::bootstrap::bootstrap_if_empty(&conn, &bootstrap_index).unwrap();
 
         // Context: git remote add (position 3)
         let context = SuggestionContext {
@@ -585,7 +914,7 @@ mod tests {
             ..Default::default()
         };
 
-        let suggestions = gather_suggestions(&conn, &context);
+        let suggestions = gather_suggestions(&conn, &schema_index, &context);
 
         // All suggestions should be individual tokens, not full commands
         for suggestion in &suggestions {
@@ -601,6 +930,7 @@ mod tests {
     #[test]
     fn test_hierarchy_provides_position_aware_suggestions() {
         let conn = setup_test_db();
+        let schema_index = empty_schema_index();
         let now = chrono::Utc::now().timestamp();
 
         // Create tokens
@@ -659,7 +989,7 @@ mod tests {
             ..Default::default()
         };
 
-        let suggestions = suggest(&conn, &context, 10);
+        let suggestions = suggest(&conn, &schema_index, &context, 10);
 
         // Should get 'origin' as a suggestion
         let texts: Vec<&str> = suggestions.iter().map(|s| s.text.as_str()).collect();
@@ -667,6 +997,194 @@ mod tests {
             texts.contains(&"origin"),
             "Expected 'origin' in suggestions, got: {:?}",
             texts
+        );
+    }
+
+    #[test]
+    fn test_schema_suggests_subcommands_without_learned_hierarchy() {
+        let conn = setup_test_db();
+
+        let mut schema =
+            crate::intelligence::schema::CommandSchema::new("tool", SchemaSource::Bootstrap);
+        schema.subcommands.push(SubcommandSchema::new("build"));
+        schema.subcommands.push(SubcommandSchema::new("deploy"));
+        let schema_index = SchemaIndex::from_schemas(vec![schema]);
+
+        let context = SuggestionContext {
+            preceding_tokens: vec![AnalyzedToken::new(
+                "tool",
+                crate::chrome::command_edit::TokenType::Command,
+                0,
+            )],
+            position: PositionType::Subcommand,
+            ..Default::default()
+        };
+
+        let suggestions = suggest(&conn, &schema_index, &context, 10);
+        let texts: Vec<&str> = suggestions.iter().map(|s| s.text.as_str()).collect();
+        assert!(texts.contains(&"build"), "expected 'build' in {:?}", texts);
+        assert!(
+            texts.contains(&"deploy"),
+            "expected 'deploy' in {:?}",
+            texts
+        );
+    }
+
+    #[test]
+    fn test_schema_suggests_nested_subcommands() {
+        let conn = setup_test_db();
+
+        let mut schema =
+            crate::intelligence::schema::CommandSchema::new("git", SchemaSource::Bootstrap);
+        let mut remote = SubcommandSchema::new("remote");
+        remote.subcommands.push(SubcommandSchema::new("add"));
+        remote.subcommands.push(SubcommandSchema::new("remove"));
+        schema.subcommands.push(remote);
+        let schema_index = SchemaIndex::from_schemas(vec![schema]);
+
+        let context = SuggestionContext {
+            preceding_tokens: vec![
+                AnalyzedToken::new("git", crate::chrome::command_edit::TokenType::Command, 0),
+                AnalyzedToken::new(
+                    "remote",
+                    crate::chrome::command_edit::TokenType::Subcommand,
+                    1,
+                ),
+            ],
+            position: PositionType::Argument,
+            ..Default::default()
+        };
+
+        let suggestions = suggest(&conn, &schema_index, &context, 10);
+        let texts: Vec<&str> = suggestions.iter().map(|s| s.text.as_str()).collect();
+        assert!(texts.contains(&"add"), "expected 'add' in {:?}", texts);
+        assert!(
+            texts.contains(&"remove"),
+            "expected 'remove' in {:?}",
+            texts
+        );
+    }
+
+    #[test]
+    fn test_schema_suggests_choice_values_for_flag_value_position() {
+        let conn = setup_test_db();
+
+        let mut schema =
+            crate::intelligence::schema::CommandSchema::new("tool", SchemaSource::Bootstrap);
+        schema.global_flags.push(FlagSchema::with_value(
+            None,
+            Some("--format"),
+            ValueType::Choice(vec!["json".to_string(), "yaml".to_string()]),
+        ));
+        let schema_index = SchemaIndex::from_schemas(vec![schema]);
+
+        let context = SuggestionContext {
+            preceding_tokens: vec![
+                AnalyzedToken::new("tool", crate::chrome::command_edit::TokenType::Command, 0),
+                AnalyzedToken::new("--format", crate::chrome::command_edit::TokenType::Flag, 1),
+            ],
+            position: PositionType::FlagValue {
+                flag: "--format".to_string(),
+            },
+            ..Default::default()
+        };
+
+        let suggestions = suggest(&conn, &schema_index, &context, 10);
+        let texts: Vec<&str> = suggestions.iter().map(|s| s.text.as_str()).collect();
+        assert!(texts.contains(&"json"), "expected 'json' in {:?}", texts);
+        assert!(texts.contains(&"yaml"), "expected 'yaml' in {:?}", texts);
+    }
+
+    #[test]
+    fn test_session_transition_source_is_used_in_main_suggest_pipeline() {
+        let conn = setup_test_db();
+        let schema_index = empty_schema_index();
+        let now = chrono::Utc::now().timestamp();
+        let from_command = "git status";
+        let to_command = "git commit -m test";
+        let from_hash = compute_command_hash(from_command);
+        let to_hash = compute_command_hash(to_command);
+
+        conn.execute(
+            "INSERT INTO ci_commands
+             (command_line, command_hash, token_ids, token_count, timestamp)
+             VALUES (?1, ?2, '[]', 0, ?3)",
+            rusqlite::params![to_command, to_hash, now],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO ci_transitions
+             (from_command_hash, to_command_hash, frequency, last_seen)
+             VALUES (?1, ?2, 4, ?3)",
+            rusqlite::params![from_hash, to_hash, now],
+        )
+        .unwrap();
+
+        let context = SuggestionContext {
+            position: PositionType::Command,
+            last_command: Some(from_command.to_string()),
+            ..Default::default()
+        };
+
+        let suggestions = suggest(&conn, &schema_index, &context, 10);
+        let transition = suggestions
+            .iter()
+            .find(|s| s.text == to_command && s.source == SuggestionSource::SessionTransition);
+        assert!(
+            transition.is_some(),
+            "expected session transition suggestion in {:?}",
+            suggestions
+                .iter()
+                .map(|s| (&s.text, s.source))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_template_source_suggests_next_token_in_main_pipeline() {
+        let conn = setup_test_db();
+        let schema_index = empty_schema_index();
+        let now = chrono::Utc::now().timestamp();
+        let template = "git checkout <BRANCH>";
+        let template_hash = compute_command_hash(template);
+
+        conn.execute(
+            "INSERT INTO ci_templates
+             (template, template_hash, base_command_id, placeholder_count, placeholders, frequency, last_seen, example_command)
+             VALUES (?1, ?2, NULL, 1, '[]', 6, ?3, 'git checkout main')",
+            rusqlite::params![template, template_hash, now],
+        )
+        .unwrap();
+
+        let context = SuggestionContext {
+            preceding_tokens: vec![AnalyzedToken::new(
+                "git",
+                crate::chrome::command_edit::TokenType::Command,
+                0,
+            )],
+            partial: "ch".to_string(),
+            position: PositionType::Subcommand,
+            ..Default::default()
+        };
+
+        let suggestions = suggest(&conn, &schema_index, &context, 10);
+        let template_suggestion = suggestions
+            .iter()
+            .find(|s| s.text == "checkout" && s.source == SuggestionSource::Template);
+        assert!(
+            template_suggestion.is_some(),
+            "expected template-derived token suggestion in {:?}",
+            suggestions
+                .iter()
+                .map(|s| (&s.text, s.source))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            template_suggestion
+                .and_then(|s| s.metadata.template_preview.as_deref())
+                .is_some(),
+            "template suggestion should preserve preview metadata"
         );
     }
 }

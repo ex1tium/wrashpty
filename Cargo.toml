@@ -1,3 +1,16 @@
+[workspace]
+members = [".", "crates/command-schema-core", "crates/command-schema-discovery"]
+
+[workspace.dependencies]
+serde = "1.0"
+serde_json = "1.0"
+thiserror = "1.0"
+regex = "1.10"
+wait-timeout = "0.2"
+tracing = "0.1"
+chrono = "0.4"
+clap = "4.5"
+
 [package]
 name = "wrashpty"
 version = "0.1.0"
@@ -17,14 +30,14 @@ signal-hook = "0.3"
 libc = "0.2"
 
 # Process timeout handling
-wait-timeout = "0.2"
+wait-timeout = { workspace = true }
 
 # Cryptographic session tokens
 getrandom = "0.2"
 
 # Error handling
 anyhow = "1.0"
-thiserror = "1.0"
+thiserror = { workspace = true }
 
 # Zero-allocation collections for hot paths
 smallvec = "1.15.1"
@@ -36,7 +49,7 @@ nu-ansi-term = "0.50"
 tempfile = "3.8"
 
 # Logging
-tracing = "0.1"
+tracing = { workspace = true }
 tracing-subscriber = "0.3"
 
 # Path resolution
@@ -52,22 +65,22 @@ ratatui-core = "0.1"
 ratatui-widgets = "0.3"
 
 # Regex for Makefile/config parsing
-regex = "1.10"
+regex = { workspace = true }
 
 # Serialization
-serde = { version = "1.0", features = ["derive"] }
+serde = { workspace = true, features = ["derive"] }
 
 # JSON parsing for package.json
-serde_json = "1.0"
+serde_json = { workspace = true }
 
 # TOML parsing for Cargo.toml
 toml = "0.8"
 
 # CLI argument parsing
-clap = { version = "4.5", features = ["derive"] }
+clap = { workspace = true, features = ["derive"] }
 
 # Time formatting for context bar
-chrono = "0.4"
+chrono = { workspace = true }
 
 # Lazy static initialization
 once_cell = "1.19"
@@ -75,11 +88,17 @@ once_cell = "1.19"
 # Clipboard access (for yank/copy feature)
 arboard = "3"
 
+command-schema-core = { path = "crates/command-schema-core" }
+
 [dev-dependencies]
 rexpect = "0.5"
 assert_cmd = "2.0"
 proptest = "1.4"
 serial_test = "3.2"
+
+[build-dependencies]
+command-schema-core = { path = "crates/command-schema-core" }
+serde_json = { workspace = true }
 
 [profile.release]
 lto = "thin"

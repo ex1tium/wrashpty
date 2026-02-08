@@ -6,7 +6,7 @@ use tracing::{debug, info};
 use super::error::CIError;
 
 /// Current schema version.
-pub const SCHEMA_VERSION: i32 = 1;
+pub const SCHEMA_VERSION: i32 = 2;
 
 /// Creates the Command Intelligence schema in the given database connection.
 ///
@@ -40,6 +40,12 @@ pub fn create_schema(conn: &Connection) -> Result<(), CIError> {
         return Err(e);
     }
 
+    // Apply incremental migrations for existing databases.
+    if let Err(e) = apply_migrations(conn, current_version, SCHEMA_VERSION) {
+        conn.execute_batch("ROLLBACK")?;
+        return Err(e);
+    }
+
     // Set schema version - only commit if this succeeds too
     if let Err(e) = set_schema_version(conn, SCHEMA_VERSION) {
         conn.execute_batch("ROLLBACK")?;
@@ -49,6 +55,24 @@ pub fn create_schema(conn: &Connection) -> Result<(), CIError> {
     // Both succeeded, commit the transaction
     conn.execute_batch("COMMIT")?;
     info!("Schema created successfully");
+
+    Ok(())
+}
+
+/// Applies schema migrations from one version to another.
+fn apply_migrations(conn: &Connection, from_version: i32, to_version: i32) -> Result<(), CIError> {
+    if from_version < 2 && to_version >= 2 {
+        // Phase 8b cutoff: purge legacy non-authoritative schema rows created by
+        // historical bootstrap/help probing paths. Learned rows are preserved.
+        let deleted = conn.execute(
+            "DELETE FROM ci_command_schemas WHERE source IN ('bootstrap', 'help')",
+            [],
+        )?;
+        debug!(
+            deleted,
+            "Applied schema v2 migration: purged bootstrap/help command schemas"
+        );
+    }
 
     Ok(())
 }
@@ -763,5 +787,73 @@ mod tests {
         // Create schema twice - should not error
         create_schema(&conn).unwrap();
         create_schema(&conn).unwrap();
+    }
+
+    #[test]
+    fn test_migration_v2_purges_bootstrap_and_help_schema_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+
+        conn.execute(
+            "CREATE TABLE ci_schema_version (
+                version INTEGER PRIMARY KEY,
+                applied_at INTEGER NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ci_schema_version (version, applied_at) VALUES (1, 0)",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "CREATE TABLE ci_command_schemas (
+                id INTEGER PRIMARY KEY,
+                command TEXT NOT NULL,
+                subcommand TEXT,
+                schema_json TEXT NOT NULL,
+                source TEXT NOT NULL,
+                confidence REAL DEFAULT 1.0,
+                extracted_at INTEGER NOT NULL,
+                last_validated INTEGER,
+                UNIQUE(command, subcommand)
+            )",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO ci_command_schemas (command, subcommand, schema_json, source, confidence, extracted_at)
+             VALUES ('git', NULL, '{}', 'bootstrap', 1.0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ci_command_schemas (command, subcommand, schema_json, source, confidence, extracted_at)
+             VALUES ('kubectl', NULL, '{}', 'help', 1.0, 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ci_command_schemas (command, subcommand, schema_json, source, confidence, extracted_at)
+             VALUES ('custom-tool', NULL, '{}', 'learned', 1.0, 0)",
+            [],
+        )
+        .unwrap();
+
+        create_schema(&conn).unwrap();
+
+        let sources: Vec<String> = conn
+            .prepare("SELECT source FROM ci_command_schemas ORDER BY command")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .filter_map(|row| row.ok())
+            .collect();
+        assert_eq!(sources, vec!["learned".to_string()]);
+
+        let version = get_schema_version(&conn).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
     }
 }

@@ -138,7 +138,7 @@ pub fn suggest_next(conn: &Connection, last_command: &str) -> Vec<Suggestion> {
 
     // Query transitions from the last command
     let mut stmt = match conn.prepare(
-        "SELECT t.to_command_hash, tr.frequency, c.command_line
+        "SELECT tr.frequency, c.command_line
          FROM ci_transitions tr
          JOIN ci_commands c ON c.command_hash = tr.to_command_hash
          WHERE tr.from_command_hash = ?1
@@ -150,9 +150,8 @@ pub fn suggest_next(conn: &Connection, last_command: &str) -> Vec<Suggestion> {
     };
 
     let rows = match stmt.query_map([&last_hash], |row| {
-        let _hash: String = row.get(0)?;
-        let frequency: u32 = row.get(1)?;
-        let command: String = row.get(2)?;
+        let frequency: u32 = row.get(0)?;
+        let command: String = row.get(1)?;
         Ok((command, frequency))
     }) {
         Ok(rows) => rows,

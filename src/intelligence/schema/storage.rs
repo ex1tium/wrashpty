@@ -1,44 +1,13 @@
 //! Schema storage and retrieval from SQLite database.
 
 use rusqlite::{Connection, OptionalExtension};
-use tracing::{debug, info};
+use tracing::info;
 
-use super::types::{CommandSchema, SchemaSource, SubcommandSchema};
+use super::{CommandSchema, SchemaSource, SubcommandSchema};
 use crate::intelligence::error::CIError;
 
-/// Creates the schema storage tables.
-pub fn create_schema_tables(conn: &Connection) -> Result<(), CIError> {
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS ci_command_schemas (
-            id INTEGER PRIMARY KEY,
-            command TEXT NOT NULL,
-            subcommand TEXT,
-            schema_json TEXT NOT NULL,
-            source TEXT NOT NULL,
-            confidence REAL DEFAULT 1.0,
-            extracted_at INTEGER NOT NULL,
-            last_validated INTEGER,
-            UNIQUE(command, subcommand)
-        )",
-        [],
-    )?;
-
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_schema_command ON ci_command_schemas(command)",
-        [],
-    )?;
-
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_schema_source ON ci_command_schemas(source)",
-        [],
-    )?;
-
-    debug!("Created schema storage tables");
-    Ok(())
-}
-
 /// Schema storage operations.
-pub struct SchemaStore<'a> {
+pub(crate) struct SchemaStore<'a> {
     conn: &'a Connection,
 }
 
@@ -288,29 +257,14 @@ pub struct SchemaStats {
     pub source: String,
 }
 
-/// Convenience function to store a schema.
-pub fn store_schema(conn: &Connection, schema: &CommandSchema) -> Result<(), CIError> {
-    SchemaStore::new(conn).store(schema)
-}
-
-/// Convenience function to get a schema.
-pub fn get_schema(conn: &Connection, command: &str) -> Result<Option<CommandSchema>, CIError> {
-    SchemaStore::new(conn).get(command)
-}
-
-/// Convenience function to get all stored command names.
-pub fn get_all_schemas(conn: &Connection) -> Result<Vec<String>, CIError> {
-    SchemaStore::new(conn).list_commands()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::intelligence::schema::types::{FlagSchema, ValueType};
+    use crate::intelligence::schema::{FlagSchema, ValueType};
 
     fn setup_test_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
-        create_schema_tables(&conn).unwrap();
+        crate::intelligence::db_schema::create_schema(&conn).unwrap();
         conn
     }
 

@@ -1,28 +1,36 @@
 //! Command Intelligence Engine for wrashpty.
 //!
-//! This module provides intelligent command suggestions based on learned
-//! patterns from command history. It integrates with reedline's SQLite
-//! database using the `ci_*` table prefix for all intelligence data.
+//! This module provides intelligent command suggestions using a schema-first
+//! architecture with learned ranking signals from command history. It
+//! integrates with reedline's SQLite database using the `ci_*` table prefix
+//! for all intelligence data.
 //!
 //! # Architecture
 //!
-//! The engine uses a **hierarchy-first** approach for suggestions:
+//! The engine combines two sources of intelligence:
 //!
-//! - **Primary Source**: `ci_command_hierarchy` table provides position-aware
-//!   token suggestions. This is the main source for all command completions.
-//! - **Supplementary Sources**: Flag values, pipe chains, and user patterns
-//!   augment suggestions for specific contexts.
+//! - **Structural Truth**: Curated command schemas are embedded at build time
+//!   and loaded into `SchemaIndex`. These provide command tree structure,
+//!   flags, and value candidates.
+//! - **Learned Ranking Signals**: Runtime tables (`ci_command_hierarchy`,
+//!   `ci_sequences`, `ci_pipe_chains`, variant success rates, etc.) influence
+//!   ordering and personalization from observed usage.
+//!
+//! Runtime schema overlays are explicit and limited to uncurated commands so
+//! embedded curated schemas remain authoritative.
 //!
 //! # Features
 //!
-//! - **Hierarchy Learning**: Position-aware token relationships (primary suggestion source)
+//! - **Embedded Schemas**: Build-time curated command structures
+//! - **Schema Overlays**: Learned overlays for uncurated commands only
+//! - **Hierarchy Learning**: Position-aware token relationships
 //! - **Pattern Learning**: Token sequences, pipe chains, and flag values
 //! - **Session Tracking**: Tracks command sequences within terminal sessions
 //! - **Template Recognition**: Identifies command templates with placeholders
 //! - **Failure Learning**: Prefers successful command variants
 //! - **Fuzzy Search**: FTS5-powered typo tolerance
 //! - **User Patterns**: Custom aliases and suggestion rules
-//! - **Export/Import**: Share patterns across machines
+//! - **Export/Import**: Pattern export/import plus curated schema-pack export/import
 //!
 //! # Example
 //!
@@ -44,6 +52,7 @@ pub mod bootstrap;
 pub mod db_schema;
 pub mod error;
 pub mod schema;
+pub mod schema_index;
 pub mod sync;
 pub mod tokenizer;
 pub mod types;
@@ -86,6 +95,9 @@ pub struct CommandIntelligence {
     /// Current session context.
     current_session: Option<SessionContext>,
 
+    /// In-memory curated schema index loaded from embedded bundle.
+    schema_index: schema_index::SchemaIndex,
+
     /// Whether the intelligence system is enabled.
     enabled: bool,
 }
@@ -98,19 +110,29 @@ impl CommandIntelligence {
         // Create schema if needed
         db_schema::create_schema(&conn)?;
 
+        // Load embedded schema index
+        let mut schema_index = schema_index::SchemaIndex::from_embedded()?;
+
         // Bootstrap command hierarchy if empty (first run)
-        bootstrap::bootstrap_if_empty(&conn)?;
+        bootstrap::bootstrap_if_empty(&conn, &schema_index)?;
+
+        // Load learned overlays for uncurated commands.
+        let overlays_loaded = schema_index.load_runtime_overlays(&conn)?;
 
         // Load last sync ID
         let last_sync_id = sync::get_last_sync_id(&conn)?;
 
-        info!(last_sync_id, "Command Intelligence initialized");
+        info!(
+            last_sync_id,
+            overlays_loaded, "Command Intelligence initialized"
+        );
 
         Ok(Self {
             conn,
             token_cache: HashMap::new(),
             last_sync_id,
             current_session: None,
+            schema_index,
             enabled: true,
         })
     }
@@ -141,7 +163,8 @@ impl CommandIntelligence {
             return Err(CIError::Disabled);
         }
 
-        let (stats, new_last_id) = sync::sync_from_reedline(&self.conn, self.last_sync_id)?;
+        let (stats, new_last_id) =
+            sync::sync_from_reedline(&self.conn, self.last_sync_id, &self.schema_index)?;
         self.last_sync_id = new_last_id;
 
         Ok(stats)
@@ -194,6 +217,7 @@ impl CommandIntelligence {
             command,
             exit_status,
             session_db_id,
+            &self.schema_index,
         )?;
 
         // Track session command if active
@@ -223,7 +247,7 @@ impl CommandIntelligence {
             return Vec::new();
         }
 
-        suggest::suggest(&self.conn, context, limit)
+        suggest::suggest(&self.conn, &self.schema_index, context, limit)
     }
 
     /// Starts a new session.
@@ -357,6 +381,19 @@ impl CommandIntelligence {
         export::import(&self.conn, json, options)
     }
 
+    /// Exports curated schemas as a schema-pack JSON document.
+    pub fn export_schema_pack(&self) -> Result<String, CIError> {
+        export::export_schema_pack(&self.schema_index)
+    }
+
+    /// Imports schemas as runtime overlays for uncurated commands.
+    pub fn import_schema_pack(
+        &mut self,
+        json: &str,
+    ) -> Result<export::SchemaPackImportStats, CIError> {
+        export::import_schema_pack(&self.conn, &mut self.schema_index, json)
+    }
+
     // ========================================================================
     // Utility Methods
     // ========================================================================
@@ -376,12 +413,15 @@ impl CommandIntelligence {
     /// Resets the intelligence database, deleting all learned patterns.
     ///
     /// This drops and recreates all `ci_*` tables, giving a clean slate.
-    /// The schema is re-bootstrapped with default commands after reset.
+    /// Embedded schemas are then reloaded and hierarchy is re-seeded.
     pub fn reset(&mut self) -> Result<(), CIError> {
         db_schema::reset_database(&self.conn)?;
 
-        // Re-bootstrap with default commands
-        bootstrap::bootstrap_if_empty(&self.conn)?;
+        // Reset schema index to embedded-only view after DB reset.
+        self.schema_index = schema_index::SchemaIndex::from_embedded()?;
+
+        // Re-bootstrap hierarchy from embedded schema index.
+        bootstrap::bootstrap_if_empty(&self.conn, &self.schema_index)?;
 
         // Clear in-memory state
         self.token_cache.clear();
