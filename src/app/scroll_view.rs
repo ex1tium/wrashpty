@@ -1816,7 +1816,51 @@ impl App {
                     }
                 }
                 Event::Key(KeyEvent {
-                    code: KeyCode::Char('Z'),
+                    code: KeyCode::Char('x'),
+                    ..
+                }) => {
+                    let total = self.scrollback_buffer.len();
+                    let offset = self.scroll_state.offset();
+                    let viewport = self.viewport_height().max(1);
+                    let mut changed = false;
+                    if let Some(first_visible) = resolve_fold_target_line(
+                        self.viewer_state.last_first_visible_line_idx,
+                        total,
+                        offset,
+                        viewport,
+                    ) {
+                        if let Some(record_idx) = resolve_fold_target_record_index(
+                            &self.viewer_state.boundaries,
+                            first_visible,
+                            total,
+                        ) {
+                            if let Some(record) =
+                                self.viewer_state.boundaries.records.get_mut(record_idx)
+                            {
+                                if record.folded {
+                                    record.folded = false;
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                    if changed {
+                        let folded = self
+                            .viewer_state
+                            .boundaries
+                            .folded_line_count_in_range(0, total);
+                        let visible_total = total.saturating_sub(folded);
+                        let max_offset =
+                            crate::scrollback::ScrollViewer::max_offset(visible_total, viewport);
+                        self.scroll_state =
+                            crate::types::ScrollState::scrolled_at(offset.min(max_offset));
+                    }
+                    if self.try_render() {
+                        break;
+                    }
+                }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Char('X'),
                     ..
                 }) => {
                     let total = self.scrollback_buffer.len();
