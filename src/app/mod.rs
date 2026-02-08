@@ -1261,8 +1261,7 @@ impl App {
         }));
 
         // Get current terminal size (may have changed during panel mode due to resize)
-        let (current_cols, current_rows) =
-            TerminalGuard::get_size().unwrap_or((cols, rows));
+        let (current_cols, current_rows) = TerminalGuard::get_size().unwrap_or((cols, rows));
 
         // Collapse panel - always runs after panel_input_loop completes or panics
         self.chrome
@@ -1461,7 +1460,11 @@ impl App {
                                     out.flush()?;
                                 }
 
-                                debug!(fullscreen, panel_height = *panel_height, "Toggled fullscreen");
+                                debug!(
+                                    fullscreen,
+                                    panel_height = *panel_height,
+                                    "Toggled fullscreen"
+                                );
                                 needs_redraw = true;
                                 continue;
                             }
@@ -1601,8 +1604,7 @@ impl App {
             // Position cursor, reset attributes
             let _ = write!(out, "\x1b[{};1H\x1b[0m", row);
             // Write sanitized line content (strip dangerous CSI, preserve colors)
-            let sanitized =
-                crate::scrollback::sanitize_for_display(line.content());
+            let sanitized = crate::scrollback::sanitize_for_display(line.content());
             let _ = out.write_all(&sanitized);
             // Clear rest of line
             let _ = write!(out, "\x1b[K");
@@ -1710,6 +1712,12 @@ impl App {
 
         // Store command for context bar display
         self.last_command = Some(command.clone());
+        self.viewer_state.boundaries.seed_record(
+            self.scrollback_buffer.len(),
+            Some(command.clone()),
+            Some(self.current_cwd.clone()),
+            Some(chrono::Local::now().naive_local()),
+        );
 
         // Transition to Injecting mode first (syncs PTY size, records start time)
         self.transition_to_injecting()?;

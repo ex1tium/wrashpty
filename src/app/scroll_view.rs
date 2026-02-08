@@ -44,6 +44,73 @@ fn filter_offset_for_line_with_viewport(
     }
 }
 
+fn resolve_fold_target_line(
+    cached_first_visible_line_idx: Option<usize>,
+    total_lines: usize,
+    offset: usize,
+    viewport_height: usize,
+) -> Option<usize> {
+    if total_lines == 0 {
+        return None;
+    }
+
+    if let Some(line_idx) = cached_first_visible_line_idx {
+        if line_idx < total_lines {
+            return Some(line_idx);
+        }
+    }
+
+    let fallback = total_lines
+        .saturating_sub(offset)
+        .saturating_sub(viewport_height.max(1))
+        .min(total_lines.saturating_sub(1));
+    Some(fallback)
+}
+
+fn hidden_line_count_for_record(
+    record: &crate::scrollback::CommandRecord,
+    total_lines: usize,
+) -> usize {
+    record
+        .prompt_line
+        .unwrap_or(total_lines)
+        .saturating_sub(record.output_start.saturating_add(1))
+}
+
+fn resolve_fold_target_record_index(
+    boundaries: &crate::scrollback::CommandBoundaries,
+    line_idx: usize,
+    total_lines: usize,
+) -> Option<usize> {
+    if let Some((record_idx, record)) = boundaries.record_for_line(line_idx) {
+        if hidden_line_count_for_record(record, total_lines) > 0 {
+            return Some(record_idx);
+        }
+    }
+
+    if let Some((record_idx, _)) = boundaries
+        .records
+        .iter()
+        .enumerate()
+        .filter(|(_, record)| {
+            hidden_line_count_for_record(record, total_lines) > 0 && record.output_start >= line_idx
+        })
+        .min_by_key(|(_, record)| record.output_start)
+    {
+        return Some(record_idx);
+    }
+
+    boundaries
+        .records
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, record)| {
+            hidden_line_count_for_record(record, total_lines) > 0 && record.output_start < line_idx
+        })
+        .map(|(record_idx, _)| record_idx)
+}
+
 fn try_scroll_action_prefix_bytes(bytes: &[u8]) -> Option<(ScrollAction, usize)> {
     if bytes.starts_with(b"\x1b[5~") {
         return Some((ScrollAction::PageUp, 4));
@@ -143,10 +210,14 @@ impl App {
             return;
         }
 
-        let max_offset = crate::scrollback::ScrollViewer::max_offset(
-            self.scrollback_buffer.len(),
-            self.viewport_height(),
-        );
+        let total = self.scrollback_buffer.len();
+        let folded = self
+            .viewer_state
+            .boundaries
+            .folded_line_count_in_range(0, total);
+        let visible_total = total.saturating_sub(folded);
+        let max_offset =
+            crate::scrollback::ScrollViewer::max_offset(visible_total, self.viewport_height());
 
         let current = self.scroll_state.offset();
         let new_offset = (current + lines).min(max_offset);
@@ -175,10 +246,14 @@ impl App {
             return;
         }
 
-        let max_offset = crate::scrollback::ScrollViewer::max_offset(
-            self.scrollback_buffer.len(),
-            self.viewport_height(),
-        );
+        let total = self.scrollback_buffer.len();
+        let folded = self
+            .viewer_state
+            .boundaries
+            .folded_line_count_in_range(0, total);
+        let visible_total = total.saturating_sub(folded);
+        let max_offset =
+            crate::scrollback::ScrollViewer::max_offset(visible_total, self.viewport_height());
         // Use scrolled_at to stay in scroll mode
         self.scroll_state = crate::types::ScrollState::scrolled_at(max_offset);
 
@@ -197,9 +272,41 @@ impl App {
     /// The boundary is recorded at the current buffer length.
     pub(super) fn record_command_boundary(&mut self, event: &crate::types::MarkerEvent) {
         let line_index = self.scrollback_buffer.len();
-        self.viewer_state
-            .boundaries
-            .record_marker(event, line_index);
+        match event {
+            crate::types::MarkerEvent::Preexec => {
+                self.viewer_state.boundaries.start_record(
+                    line_index,
+                    self.last_command.clone(),
+                    Some(self.current_cwd.clone()),
+                    Some(chrono::Local::now().naive_local()),
+                );
+            }
+            crate::types::MarkerEvent::Precmd { exit_code } => {
+                let duration = self.command_start_time.map(|start| start.elapsed());
+                self.viewer_state
+                    .boundaries
+                    .complete_record(line_index, *exit_code, duration);
+            }
+            crate::types::MarkerEvent::Prompt => {
+                // PRECMD should complete the same boundary first. Fallback:
+                // complete any pending record if marker ordering is unexpected.
+                if self.viewer_state.boundaries.has_pending_record() {
+                    let duration = self.command_start_time.map(|start| start.elapsed());
+                    self.viewer_state.boundaries.complete_record(
+                        line_index,
+                        self.last_exit_code,
+                        duration,
+                    );
+                } else if self
+                    .viewer_state
+                    .boundaries
+                    .record_for_prompt_line(line_index)
+                    .is_none()
+                {
+                    self.viewer_state.boundaries.record_prompt_line(line_index);
+                }
+            }
+        }
     }
 
     /// Jumps to the previous command boundary (Ctrl+P in scroll view).
@@ -321,6 +428,7 @@ impl App {
                 Some(&label_ansi),
                 Some(&text_ansi),
             )?;
+            self.render_legend_for_context(crate::scrollback::HelpContext::GoToLine)?;
 
             // Wait for input
             if event::poll(std::time::Duration::from_millis(100))? {
@@ -393,6 +501,7 @@ impl App {
                 Some(&label_ansi),
                 Some(&text_ansi),
             )?;
+            self.render_legend_for_context(crate::scrollback::HelpContext::Search)?;
 
             // Wait for input
             if event::poll(std::time::Duration::from_millis(100))? {
@@ -505,7 +614,7 @@ impl App {
 
     /// Renders scrollback view with search highlights.
     pub(super) fn render_scrollback_with_search(
-        &self,
+        &mut self,
         search: &crate::scrollback::features::SearchState,
     ) -> Result<()> {
         use std::io::Write;
@@ -513,29 +622,54 @@ impl App {
         let (cols, rows) = TerminalGuard::get_size()?;
         let offset = self.scroll_state.offset();
         let mut out = std::io::stdout();
+        let content_rows = if self.viewer_state.is_help_bar_shown() {
+            rows.saturating_sub(2)
+        } else {
+            rows.saturating_sub(1)
+        };
 
         let boundary_lines = if self.viewer_state.is_command_separators_shown() {
-            &self.viewer_state.boundaries.prompt_lines
+            &self.viewer_state.boundaries.command_starts
         } else {
             &[] as &[usize]
         };
-        crate::scrollback::ScrollViewer::render(
+        let stats = crate::scrollback::ScrollViewer::render(
             &mut out,
             &self.scrollback_buffer,
             offset,
             cols,
-            rows.saturating_sub(1),
+            content_rows,
             &crate::scrollback::RenderConfig {
                 start_row: 2,
                 show_line_numbers: self.viewer_state.is_line_numbers_shown(),
                 show_timestamps: self.viewer_state.is_timestamps_shown(),
                 boundary_markers: true,
                 boundary_lines,
+                records: &self.viewer_state.boundaries.records,
                 search: Some(search),
+                separator_registry: Some(&self.viewer_state.separator_registry),
+                symbols: Some(self.chrome.symbols()),
+                collapsed_commands: Some(&self.viewer_state.collapsed_commands),
+                sticky_header: self.viewer_state.display.sticky_headers
+                    && self.viewer_state.is_command_separators_shown(),
                 theme: Some(self.chrome.theme()),
                 ..Default::default()
             },
         )?;
+        let first_visible_idx = stats.first_visible_line.saturating_sub(1);
+        self.viewer_state.last_first_visible_line_idx =
+            (first_visible_idx < self.scrollback_buffer.len()).then_some(first_visible_idx);
+
+        if self.viewer_state.is_help_bar_shown() {
+            crate::scrollback::features::LegendBar::render(
+                &mut out,
+                crate::scrollback::HelpContext::Search,
+                &self.viewer_state.display,
+                cols,
+                rows,
+                self.chrome.theme(),
+            )?;
+        }
 
         out.flush()?;
         Ok(())
@@ -599,6 +733,7 @@ impl App {
                 Some(&label_ansi),
                 Some(&text_ansi),
             )?;
+            self.render_legend_for_context(crate::scrollback::HelpContext::Filter)?;
 
             // Wait for input
             if event::poll(std::time::Duration::from_millis(100))? {
@@ -744,7 +879,7 @@ impl App {
 
     /// Renders scrollback view with filter active (only matching lines).
     pub(super) fn render_scrollback_with_filter(
-        &self,
+        &mut self,
         filter: &crate::scrollback::features::FilterState,
         filter_offset: usize,
     ) -> Result<()> {
@@ -752,22 +887,46 @@ impl App {
 
         let (cols, rows) = TerminalGuard::get_size()?;
         let mut out = std::io::stdout();
+        let content_rows = if self.viewer_state.is_help_bar_shown() {
+            rows.saturating_sub(2)
+        } else {
+            rows.saturating_sub(1)
+        };
 
-        crate::scrollback::ScrollViewer::render(
+        let stats = crate::scrollback::ScrollViewer::render(
             &mut out,
             &self.scrollback_buffer,
             0,
             cols,
-            rows.saturating_sub(1),
+            content_rows,
             &crate::scrollback::RenderConfig {
                 start_row: 2,
                 show_line_numbers: self.viewer_state.is_line_numbers_shown(),
                 show_timestamps: self.viewer_state.is_timestamps_shown(),
+                records: &self.viewer_state.boundaries.records,
                 filter: Some(filter),
                 filter_offset,
+                separator_registry: Some(&self.viewer_state.separator_registry),
+                symbols: Some(self.chrome.symbols()),
+                collapsed_commands: Some(&self.viewer_state.collapsed_commands),
+                sticky_header: false,
                 ..Default::default()
             },
         )?;
+        let first_visible_idx = stats.first_visible_line.saturating_sub(1);
+        self.viewer_state.last_first_visible_line_idx =
+            (first_visible_idx < self.scrollback_buffer.len()).then_some(first_visible_idx);
+
+        if self.viewer_state.is_help_bar_shown() {
+            crate::scrollback::features::LegendBar::render(
+                &mut out,
+                crate::scrollback::HelpContext::Filter,
+                &self.viewer_state.display,
+                cols,
+                rows,
+                self.chrome.theme(),
+            )?;
+        }
 
         out.flush()?;
         Ok(())
@@ -815,6 +974,7 @@ impl App {
                 Some(&label_ansi),
                 Some(&text_ansi),
             )?;
+            self.render_legend_for_context(crate::scrollback::HelpContext::Search)?;
 
             // Wait for input
             if event::poll(std::time::Duration::from_millis(100))? {
@@ -919,7 +1079,7 @@ impl App {
 
     /// Renders scrollback with filter AND search active.
     pub(super) fn render_scrollback_with_filter_and_search(
-        &self,
+        &mut self,
         filter: &crate::scrollback::features::FilterState,
         filter_offset: usize,
         search: &crate::scrollback::features::SearchState,
@@ -928,24 +1088,48 @@ impl App {
 
         let (cols, rows) = TerminalGuard::get_size()?;
         let mut out = std::io::stdout();
+        let content_rows = if self.viewer_state.is_help_bar_shown() {
+            rows.saturating_sub(2)
+        } else {
+            rows.saturating_sub(1)
+        };
 
-        crate::scrollback::ScrollViewer::render(
+        let stats = crate::scrollback::ScrollViewer::render(
             &mut out,
             &self.scrollback_buffer,
             0,
             cols,
-            rows.saturating_sub(1),
+            content_rows,
             &crate::scrollback::RenderConfig {
                 start_row: 2,
                 show_line_numbers: self.viewer_state.is_line_numbers_shown(),
                 show_timestamps: self.viewer_state.is_timestamps_shown(),
+                records: &self.viewer_state.boundaries.records,
                 filter: Some(filter),
                 filter_offset,
                 search: Some(search),
+                separator_registry: Some(&self.viewer_state.separator_registry),
+                symbols: Some(self.chrome.symbols()),
+                collapsed_commands: Some(&self.viewer_state.collapsed_commands),
+                sticky_header: false,
                 theme: Some(self.chrome.theme()),
                 ..Default::default()
             },
         )?;
+        let first_visible_idx = stats.first_visible_line.saturating_sub(1);
+        self.viewer_state.last_first_visible_line_idx =
+            (first_visible_idx < self.scrollback_buffer.len()).then_some(first_visible_idx);
+
+        if self.viewer_state.is_help_bar_shown() {
+            crate::scrollback::features::LegendBar::render(
+                &mut out,
+                crate::scrollback::HelpContext::Search,
+                &self.viewer_state.display,
+                cols,
+                rows,
+                self.chrome.theme(),
+            )?;
+        }
 
         out.flush()?;
         Ok(())
@@ -1199,11 +1383,11 @@ impl App {
         // Render scrollback content (starting at row 2 to preserve topbar)
         // Show boundary markers (BEGIN/END) at buffer boundaries
         let boundary_lines = if self.viewer_state.is_command_separators_shown() {
-            &self.viewer_state.boundaries.prompt_lines
+            &self.viewer_state.boundaries.command_starts
         } else {
             &[] as &[usize]
         };
-        crate::scrollback::ScrollViewer::render(
+        let stats = crate::scrollback::ScrollViewer::render(
             &mut stdout,
             &self.scrollback_buffer,
             offset,
@@ -1215,16 +1399,26 @@ impl App {
                 show_timestamps: self.viewer_state.is_timestamps_shown(),
                 boundary_markers: true,
                 boundary_lines,
+                records: &self.viewer_state.boundaries.records,
+                separator_registry: Some(&self.viewer_state.separator_registry),
+                symbols: Some(self.chrome.symbols()),
+                collapsed_commands: Some(&self.viewer_state.collapsed_commands),
+                sticky_header: self.viewer_state.display.sticky_headers
+                    && self.viewer_state.is_command_separators_shown(),
                 theme: Some(self.chrome.theme()),
                 ..Default::default()
             },
         )?;
+        let first_visible_idx = stats.first_visible_line.saturating_sub(1);
+        self.viewer_state.last_first_visible_line_idx =
+            (first_visible_idx < self.scrollback_buffer.len()).then_some(first_visible_idx);
 
         // Render help bar if enabled
         if self.viewer_state.is_help_bar_shown() {
-            crate::scrollback::features::HelpBar::render(
+            crate::scrollback::features::LegendBar::render(
                 &mut stdout,
                 crate::scrollback::HelpContext::Normal,
+                &self.viewer_state.display,
                 cols,
                 rows,
                 self.chrome.theme(),
@@ -1362,6 +1556,28 @@ impl App {
         }
     }
 
+    /// Renders the bottom legend for a modal scrollback context when enabled.
+    fn render_legend_for_context(&self, ctx: crate::scrollback::HelpContext) -> Result<()> {
+        use std::io::Write;
+
+        if !self.viewer_state.is_help_bar_shown() {
+            return Ok(());
+        }
+
+        let (cols, rows) = TerminalGuard::get_size()?;
+        let mut out = std::io::stdout();
+        crate::scrollback::features::LegendBar::render(
+            &mut out,
+            ctx,
+            &self.viewer_state.display,
+            cols,
+            rows,
+            self.chrome.theme(),
+        )?;
+        out.flush()?;
+        Ok(())
+    }
+
     /// Renders scrollback view, returning true if a render error occurred
     /// and the loop should exit.
     fn try_render(&mut self) -> bool {
@@ -1421,7 +1637,9 @@ impl App {
                             self.viewport_height()
                         };
                         self.scroll_up(lines);
-                        if self.try_render() { break; }
+                        if self.try_render() {
+                            break;
+                        }
                     }
                 }
                 Event::Key(KeyEvent {
@@ -1435,27 +1653,37 @@ impl App {
                         self.viewport_height()
                     };
                     self.scroll_down(lines);
-                    if self.try_render() { break; }
+                    if self.try_render() {
+                        break;
+                    }
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::Up, ..
                 }) => {
                     if self.is_scroll_allowed() {
                         self.scroll_up(1);
-                        if self.try_render() { break; }
+                        if self.try_render() {
+                            break;
+                        }
                     }
                 }
                 Event::Key(KeyEvent {
-                    code: KeyCode::Down, ..
+                    code: KeyCode::Down,
+                    ..
                 }) => {
                     self.scroll_down(1);
-                    if self.try_render() { break; }
+                    if self.try_render() {
+                        break;
+                    }
                 }
                 Event::Key(KeyEvent {
-                    code: KeyCode::Home, ..
+                    code: KeyCode::Home,
+                    ..
                 }) => {
                     self.scroll_to_top();
-                    if self.try_render() { break; }
+                    if self.try_render() {
+                        break;
+                    }
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::End, ..
@@ -1469,8 +1697,13 @@ impl App {
                     ..
                 }) if modifiers.contains(KeyModifiers::CONTROL) => {
                     self.viewer_state.toggle_line_numbers();
-                    debug!(show_line_numbers = self.viewer_state.is_line_numbers_shown(), "Toggled line numbers");
-                    if self.try_render() { break; }
+                    debug!(
+                        show_line_numbers = self.viewer_state.is_line_numbers_shown(),
+                        "Toggled line numbers"
+                    );
+                    if self.try_render() {
+                        break;
+                    }
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::Char('u'),
@@ -1480,7 +1713,9 @@ impl App {
                     if self.is_scroll_allowed() {
                         let half_page = self.viewport_height() / 2;
                         self.scroll_up(half_page.max(1));
-                        if self.try_render() { break; }
+                        if self.try_render() {
+                            break;
+                        }
                     }
                 }
                 Event::Key(KeyEvent {
@@ -1490,7 +1725,9 @@ impl App {
                 }) if modifiers.contains(KeyModifiers::CONTROL) => {
                     let half_page = self.viewport_height() / 2;
                     self.scroll_down(half_page.max(1));
-                    if self.try_render() { break; }
+                    if self.try_render() {
+                        break;
+                    }
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::Char('t'),
@@ -1498,8 +1735,13 @@ impl App {
                     ..
                 }) if modifiers.contains(KeyModifiers::CONTROL) => {
                     self.viewer_state.toggle_timestamps();
-                    debug!(show_timestamps = self.viewer_state.is_timestamps_shown(), "Toggled timestamps");
-                    if self.try_render() { break; }
+                    debug!(
+                        show_timestamps = self.viewer_state.is_timestamps_shown(),
+                        "Toggled timestamps"
+                    );
+                    if self.try_render() {
+                        break;
+                    }
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::Char('b'),
@@ -1507,8 +1749,13 @@ impl App {
                     ..
                 }) if modifiers.contains(KeyModifiers::CONTROL) => {
                     self.viewer_state.toggle_command_separators();
-                    debug!(show_separators = self.viewer_state.is_command_separators_shown(), "Toggled command separators");
-                    if self.try_render() { break; }
+                    debug!(
+                        show_separators = self.viewer_state.is_command_separators_shown(),
+                        "Toggled command separators"
+                    );
+                    if self.try_render() {
+                        break;
+                    }
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::Char('p'),
@@ -1516,7 +1763,9 @@ impl App {
                     ..
                 }) if modifiers.contains(KeyModifiers::CONTROL) => {
                     self.jump_to_prev_command();
-                    if self.try_render() { break; }
+                    if self.try_render() {
+                        break;
+                    }
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::Char('n'),
@@ -1524,7 +1773,71 @@ impl App {
                     ..
                 }) if modifiers.contains(KeyModifiers::CONTROL) => {
                     self.jump_to_next_command();
-                    if self.try_render() { break; }
+                    if self.try_render() {
+                        break;
+                    }
+                }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Char('z'),
+                    ..
+                }) => {
+                    let total = self.scrollback_buffer.len();
+                    let offset = self.scroll_state.offset();
+                    let viewport = self.viewport_height().max(1);
+                    if let Some(first_visible) = resolve_fold_target_line(
+                        self.viewer_state.last_first_visible_line_idx,
+                        total,
+                        offset,
+                        viewport,
+                    ) {
+                        if let Some(record_idx) = resolve_fold_target_record_index(
+                            &self.viewer_state.boundaries,
+                            first_visible,
+                            total,
+                        ) {
+                            let _ = self.viewer_state.boundaries.toggle_fold(record_idx);
+
+                            let folded = self
+                                .viewer_state
+                                .boundaries
+                                .folded_line_count_in_range(0, total);
+                            let visible_total = total.saturating_sub(folded);
+                            let max_offset = crate::scrollback::ScrollViewer::max_offset(
+                                visible_total,
+                                viewport,
+                            );
+                            let clamped_offset = offset.min(max_offset);
+                            self.scroll_state =
+                                crate::types::ScrollState::scrolled_at(clamped_offset);
+                        }
+                    }
+                    if self.try_render() {
+                        break;
+                    }
+                }
+                Event::Key(KeyEvent {
+                    code: KeyCode::Char('Z'),
+                    ..
+                }) => {
+                    let total = self.scrollback_buffer.len();
+                    let offset = self.scroll_state.offset();
+                    let viewport = self.viewport_height().max(1);
+                    let mut changed = false;
+                    for record in &mut self.viewer_state.boundaries.records {
+                        if record.folded {
+                            record.folded = false;
+                            changed = true;
+                        }
+                    }
+                    if changed {
+                        let max_offset =
+                            crate::scrollback::ScrollViewer::max_offset(total, viewport);
+                        self.scroll_state =
+                            crate::types::ScrollState::scrolled_at(offset.min(max_offset));
+                    }
+                    if self.try_render() {
+                        break;
+                    }
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::Char('s'),
@@ -1534,7 +1847,9 @@ impl App {
                     if let Err(e) = self.run_search_mode() {
                         warn!("Search mode error: {}", e);
                     }
-                    if self.try_render() { break; }
+                    if self.try_render() {
+                        break;
+                    }
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::Char('f'),
@@ -1544,7 +1859,9 @@ impl App {
                     if let Err(e) = self.run_filter_mode() {
                         warn!("Filter mode error: {}", e);
                     }
-                    if self.try_render() { break; }
+                    if self.try_render() {
+                        break;
+                    }
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::Char('g'),
@@ -1554,17 +1871,26 @@ impl App {
                     if let Err(e) = self.run_goto_line_mode() {
                         warn!("Go-to-line mode error: {}", e);
                     }
-                    if self.try_render() { break; }
+                    if self.try_render() {
+                        break;
+                    }
                 }
                 Event::Key(KeyEvent {
-                    code: KeyCode::Char('?'), ..
+                    code: KeyCode::Char('?'),
+                    ..
                 })
                 | Event::Key(KeyEvent {
-                    code: KeyCode::F(1), ..
+                    code: KeyCode::F(1),
+                    ..
                 }) => {
                     self.viewer_state.toggle_help_bar();
-                    debug!(show_help = self.viewer_state.is_help_bar_shown(), "Toggled help bar");
-                    if self.try_render() { break; }
+                    debug!(
+                        show_help = self.viewer_state.is_help_bar_shown(),
+                        "Toggled help bar"
+                    );
+                    if self.try_render() {
+                        break;
+                    }
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::Esc, ..
@@ -1582,7 +1908,9 @@ impl App {
                         break;
                     }
                     self.capture_state.set_terminal_width(cols);
-                    if self.try_render() { break; }
+                    if self.try_render() {
+                        break;
+                    }
                 }
                 _ => {}
             }
@@ -1597,9 +1925,11 @@ impl App {
 #[allow(dead_code)]
 mod tests {
     use super::{
-        ScrollAction, filter_offset_for_line_with_viewport, try_scroll_action_prefix_bytes,
+        ScrollAction, filter_offset_for_line_with_viewport, resolve_fold_target_line,
+        resolve_fold_target_record_index, try_scroll_action_prefix_bytes,
     };
     use crate::scrollback::features::FilterState;
+    use crate::scrollback::{CommandBoundaries, CommandRecord};
 
     #[test]
     fn test_filter_offset_for_line_with_viewport_centered_returns_5() {
@@ -1680,5 +2010,67 @@ mod tests {
         assert_eq!(try_scroll_action_prefix_bytes(b"abc"), None);
         assert_eq!(try_scroll_action_prefix_bytes(b"\x1b[9~"), None);
         assert_eq!(try_scroll_action_prefix_bytes(b"\x1b["), None);
+    }
+
+    #[test]
+    fn test_resolve_fold_target_line_with_valid_cached_line_returns_cached_line() {
+        let line = resolve_fold_target_line(Some(12), 40, 3, 20);
+        assert_eq!(line, Some(12));
+    }
+
+    #[test]
+    fn test_resolve_fold_target_line_with_invalid_cached_line_returns_fallback_line() {
+        let line = resolve_fold_target_line(Some(99), 10, 0, 5);
+        assert_eq!(line, Some(5));
+    }
+
+    #[test]
+    fn test_resolve_fold_target_line_with_empty_buffer_returns_none() {
+        let line = resolve_fold_target_line(None, 0, 0, 10);
+        assert_eq!(line, None);
+    }
+
+    #[test]
+    fn test_resolve_fold_target_record_index_with_non_command_top_chooses_next_foldable() {
+        let mut boundaries = CommandBoundaries::new();
+        boundaries.records = vec![
+            CommandRecord {
+                output_start: 10,
+                prompt_line: Some(15),
+                folded: true,
+                ..Default::default()
+            },
+            CommandRecord {
+                output_start: 20,
+                prompt_line: Some(30),
+                folded: false,
+                ..Default::default()
+            },
+        ];
+
+        let target = resolve_fold_target_record_index(&boundaries, 2, 40);
+        assert_eq!(target, Some(0));
+    }
+
+    #[test]
+    fn test_resolve_fold_target_record_index_with_no_next_foldable_chooses_previous_foldable() {
+        let mut boundaries = CommandBoundaries::new();
+        boundaries.records = vec![
+            CommandRecord {
+                output_start: 10,
+                prompt_line: Some(15),
+                folded: true,
+                ..Default::default()
+            },
+            CommandRecord {
+                output_start: 20,
+                prompt_line: Some(21),
+                folded: false,
+                ..Default::default()
+            },
+        ];
+
+        let target = resolve_fold_target_record_index(&boundaries, 39, 40);
+        assert_eq!(target, Some(0));
     }
 }

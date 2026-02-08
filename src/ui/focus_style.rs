@@ -13,11 +13,7 @@ pub fn dim_style(style: Style) -> Style {
 
 /// Returns the style unchanged if `focused`, or dimmed if not.
 pub fn apply_focus(style: Style, focused: bool) -> Style {
-    if focused {
-        style
-    } else {
-        dim_style(style)
-    }
+    if focused { style } else { dim_style(style) }
 }
 
 #[cfg(test)]

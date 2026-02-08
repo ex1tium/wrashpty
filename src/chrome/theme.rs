@@ -173,12 +173,12 @@ pub static AMBER_THEME: Theme = Theme {
     semantic_info: Color::Rgb(255, 176, 0),  // #ffb000 - amber
 
     // Git File Status
-    git_modified_fg: Color::Rgb(255, 140, 0),  // #ff8c00 - dark orange
-    git_added_fg: Color::Rgb(0, 170, 0),       // #00aa00 - green (same as semantic_success)
-    git_deleted_fg: Color::Rgb(255, 68, 0),    // #ff4400 - red-orange (same as semantic_error)
+    git_modified_fg: Color::Rgb(255, 140, 0), // #ff8c00 - dark orange
+    git_added_fg: Color::Rgb(0, 170, 0),      // #00aa00 - green (same as semantic_success)
+    git_deleted_fg: Color::Rgb(255, 68, 0),   // #ff4400 - red-orange (same as semantic_error)
     git_untracked_fg: Color::Rgb(153, 102, 0), // #996600 - dim amber (same as text_secondary)
-    git_conflict_fg: Color::Rgb(255, 34, 0),   // #ff2200 - bright red
-    git_renamed_fg: Color::Rgb(204, 136, 0),   // #cc8800 - medium amber
+    git_conflict_fg: Color::Rgb(255, 34, 0),  // #ff2200 - bright red
+    git_renamed_fg: Color::Rgb(204, 136, 0),  // #cc8800 - medium amber
 
     // File Browser
     dir_color: Color::Rgb(255, 215, 0),  // #ffd700 - bright amber
@@ -244,12 +244,12 @@ pub static TERMINAL_THEME: Theme = Theme {
     semantic_info: Color::Cyan,      // ANSI color 6
 
     // Git File Status
-    git_modified_fg: Color::Yellow,     // ANSI color 3
-    git_added_fg: Color::Green,         // ANSI color 2
-    git_deleted_fg: Color::Red,         // ANSI color 1
-    git_untracked_fg: Color::DarkGray,  // ANSI color 8
-    git_conflict_fg: Color::LightRed,   // ANSI color 9
-    git_renamed_fg: Color::Magenta,     // ANSI color 5
+    git_modified_fg: Color::Yellow,    // ANSI color 3
+    git_added_fg: Color::Green,        // ANSI color 2
+    git_deleted_fg: Color::Red,        // ANSI color 1
+    git_untracked_fg: Color::DarkGray, // ANSI color 8
+    git_conflict_fg: Color::LightRed,  // ANSI color 9
+    git_renamed_fg: Color::Magenta,    // ANSI color 5
 
     // File Browser
     dir_color: Color::Blue,            // ANSI color 4

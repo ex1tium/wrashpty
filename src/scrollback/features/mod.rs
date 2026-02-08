@@ -11,6 +11,6 @@ mod yank;
 
 pub use filter::FilterState;
 pub use goto::GoToLineState;
-pub use help::HelpBar;
+pub use help::LegendBar;
 pub use search::{SearchDirection, SearchMatch, SearchState};
 pub use yank::{SelectionMode, YankState};

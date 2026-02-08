@@ -448,8 +448,7 @@ mod tests {
 
     #[test]
     fn test_parse_porcelain_v2_renamed() {
-        let output =
-            "2 R. N... 100644 100644 100644 abc123 def456 R100 new_name.rs\told_name.rs\n";
+        let output = "2 R. N... 100644 100644 100644 abc123 def456 R100 new_name.rs\told_name.rs\n";
         let files = parse_porcelain_v2(output);
         assert_eq!(
             files.get(Path::new("new_name.rs")),

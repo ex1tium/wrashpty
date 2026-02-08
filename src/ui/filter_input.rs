@@ -100,10 +100,7 @@ impl FilterInput {
         ];
 
         if self.active {
-            spans.push(Span::styled(
-                "█",
-                Style::default().fg(theme.text_highlight),
-            ));
+            spans.push(Span::styled("█", Style::default().fg(theme.text_highlight)));
         }
 
         spans

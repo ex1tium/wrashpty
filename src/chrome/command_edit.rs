@@ -1267,10 +1267,7 @@ pub fn render_edit_mode_shared(
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled("█", Style::default().fg(theme.header_fg)),
-        Span::styled(
-            cycling_indicator,
-            Style::default().fg(theme.text_secondary),
-        ),
+        Span::styled(cycling_indicator, Style::default().fg(theme.text_secondary)),
     ]);
     Paragraph::new(edit_line).render(layout.edit_input, buffer);
 
