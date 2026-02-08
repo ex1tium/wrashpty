@@ -19,6 +19,6 @@ pub use boundaries::CommandBoundaries;
 pub use buffer::{ScrollLine, ScrollbackBuffer};
 pub use capture::{CaptureState, CapturedLine};
 pub use mini_input::{MiniInput, MiniInputResult};
-pub use mode::ScrollViewMode;
+pub use mode::HelpContext;
 pub use state::{DisplaySettings, ViewerState};
-pub use viewer::{RenderOptions, RenderStats, ScrollViewer};
+pub use viewer::{RenderConfig, RenderStats, ScrollViewer};

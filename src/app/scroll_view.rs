@@ -111,33 +111,9 @@ impl App {
 
         // Parse bytes into lines and add to buffer
         if self.scrollback_buffer.is_capture_active() {
-            for captured in self.capture_state.feed(bytes) {
-                match captured {
-                    crate::scrollback::CapturedLine::Append(content) => {
-                        let dropped = self.scrollback_buffer.push_line(content);
-                        if dropped > 0 {
-                            self.viewer_state
-                                .boundaries
-                                .adjust_for_dropped_lines(dropped);
-                        }
-                    }
-                    crate::scrollback::CapturedLine::Overwrite {
-                        lines_back,
-                        content,
-                    } => {
-                        let len = self.scrollback_buffer.len();
-                        if lines_back > 0 && lines_back <= len {
-                            self.scrollback_buffer
-                                .replace_line(len - lines_back, content);
-                        }
-                    }
-                    crate::scrollback::CapturedLine::EraseBelow { lines_back } => {
-                        let len = self.scrollback_buffer.len();
-                        if lines_back > 0 && lines_back <= len {
-                            self.scrollback_buffer.erase_from(len - lines_back);
-                        }
-                    }
-                }
+            let captured_lines: Vec<_> = self.capture_state.feed(bytes).collect();
+            for captured in captured_lines {
+                self.apply_captured_line(captured);
             }
         }
 
@@ -538,24 +514,27 @@ impl App {
         let offset = self.scroll_state.offset();
         let mut out = std::io::stdout();
 
-        // Render using the search-aware viewer
         let boundary_lines = if self.viewer_state.is_command_separators_shown() {
             &self.viewer_state.boundaries.prompt_lines
         } else {
             &[] as &[usize]
         };
-        crate::scrollback::ScrollViewer::render_with_search(
+        crate::scrollback::ScrollViewer::render(
             &mut out,
             &self.scrollback_buffer,
             offset,
             cols,
-            rows,
-            self.viewer_state.is_line_numbers_shown(),
-            self.viewer_state.is_timestamps_shown(),
-            true, // show boundary markers
-            search,
-            self.chrome.theme(),
-            boundary_lines,
+            rows.saturating_sub(1),
+            &crate::scrollback::RenderConfig {
+                start_row: 2,
+                show_line_numbers: self.viewer_state.is_line_numbers_shown(),
+                show_timestamps: self.viewer_state.is_timestamps_shown(),
+                boundary_markers: true,
+                boundary_lines,
+                search: Some(search),
+                theme: Some(self.chrome.theme()),
+                ..Default::default()
+            },
         )?;
 
         out.flush()?;
@@ -774,16 +753,20 @@ impl App {
         let (cols, rows) = TerminalGuard::get_size()?;
         let mut out = std::io::stdout();
 
-        // Render using the filter-aware viewer
-        crate::scrollback::ScrollViewer::render_with_filter(
+        crate::scrollback::ScrollViewer::render(
             &mut out,
             &self.scrollback_buffer,
-            filter,
-            filter_offset,
+            0,
             cols,
-            rows,
-            self.viewer_state.is_line_numbers_shown(),
-            self.viewer_state.is_timestamps_shown(),
+            rows.saturating_sub(1),
+            &crate::scrollback::RenderConfig {
+                start_row: 2,
+                show_line_numbers: self.viewer_state.is_line_numbers_shown(),
+                show_timestamps: self.viewer_state.is_timestamps_shown(),
+                filter: Some(filter),
+                filter_offset,
+                ..Default::default()
+            },
         )?;
 
         out.flush()?;
@@ -946,18 +929,22 @@ impl App {
         let (cols, rows) = TerminalGuard::get_size()?;
         let mut out = std::io::stdout();
 
-        // Render using the combined filter+search viewer
-        crate::scrollback::ScrollViewer::render_with_filter_and_search(
+        crate::scrollback::ScrollViewer::render(
             &mut out,
             &self.scrollback_buffer,
-            filter,
-            filter_offset,
+            0,
             cols,
-            rows,
-            self.viewer_state.is_line_numbers_shown(),
-            self.viewer_state.is_timestamps_shown(),
-            search,
-            self.chrome.theme(),
+            rows.saturating_sub(1),
+            &crate::scrollback::RenderConfig {
+                start_row: 2,
+                show_line_numbers: self.viewer_state.is_line_numbers_shown(),
+                show_timestamps: self.viewer_state.is_timestamps_shown(),
+                filter: Some(filter),
+                filter_offset,
+                search: Some(search),
+                theme: Some(self.chrome.theme()),
+                ..Default::default()
+            },
         )?;
 
         out.flush()?;
@@ -1028,14 +1015,8 @@ impl App {
                 percentage,
                 total_lines: total,
                 current_line,
-                search_active: matches!(
-                    self.viewer_state.mode,
-                    crate::scrollback::ScrollViewMode::Search(_)
-                ),
-                filter_active: matches!(
-                    self.viewer_state.mode,
-                    crate::scrollback::ScrollViewMode::Filter(_)
-                ),
+                search_active: false,
+                filter_active: false,
                 timestamps_on: self.viewer_state.is_timestamps_shown(),
                 line_numbers_on: self.viewer_state.is_line_numbers_shown(),
             })
@@ -1222,24 +1203,28 @@ impl App {
         } else {
             &[] as &[usize]
         };
-        crate::scrollback::ScrollViewer::render_with_chrome(
+        crate::scrollback::ScrollViewer::render(
             &mut stdout,
             &self.scrollback_buffer,
             offset,
             cols,
-            content_rows,
-            self.viewer_state.is_line_numbers_shown(),
-            self.viewer_state.is_timestamps_shown(),
-            true, // show_boundary_markers
-            Some(self.chrome.theme()),
-            boundary_lines,
+            content_rows.saturating_sub(1),
+            &crate::scrollback::RenderConfig {
+                start_row: 2,
+                show_line_numbers: self.viewer_state.is_line_numbers_shown(),
+                show_timestamps: self.viewer_state.is_timestamps_shown(),
+                boundary_markers: true,
+                boundary_lines,
+                theme: Some(self.chrome.theme()),
+                ..Default::default()
+            },
         )?;
 
         // Render help bar if enabled
         if self.viewer_state.is_help_bar_shown() {
             crate::scrollback::features::HelpBar::render(
                 &mut stdout,
-                &self.viewer_state.mode,
+                crate::scrollback::HelpContext::Normal,
                 cols,
                 rows,
                 self.chrome.theme(),
@@ -1310,55 +1295,96 @@ impl App {
     /// Runs the scroll view mode, handling scroll keys until user exits.
     ///
     /// This is called from HostCommand handlers when user presses PageUp/PageDown
-    /// in Edit mode. Renders scrollback content and handles scroll navigation
-    /// until user presses Esc or any non-scroll key.
+    /// in Edit mode. Enters the alternate screen buffer so the main screen
+    /// (prompt, previous output) is preserved and restored on exit.
     pub(super) fn run_scroll_view(&mut self) -> Result<()> {
+        use std::io::Write;
+
         // Ensure raw mode is active - reedline may have toggled terminal modes
         self.terminal_guard
             .ensure_raw_mode()
             .context("Failed to ensure raw mode for scroll view")?;
 
-        self.run_scroll_view_inner()
+        // Enter alternate screen — saves main screen atomically
+        write!(std::io::stdout(), "\x1b[?1049h")?;
+        std::io::stdout().flush()?;
+        let mut alt_guard = super::AltScreenGuard::new();
+        alt_guard.active = true;
+
+        let result = self.run_scroll_view_inner();
+
+        // Guard drops → \x1b[?1049l restores main screen
+        drop(alt_guard);
+
+        // Re-establish chrome after main screen restore
+        if self.chrome.is_active() {
+            if let Ok((cols, rows)) = TerminalGuard::get_size() {
+                let _ = self.chrome.setup_scroll_region_preserve_cursor(rows);
+                let ts = chrono::Local::now().format("%H:%M").to_string();
+                let state = self.topbar_state(&ts);
+                let _ = self.chrome.render_context_bar(cols, &state);
+            }
+        }
+
+        result
     }
 
-    /// Inner scroll view loop (separated for RAII cleanup).
+    /// Applies a single captured line to the scrollback buffer.
+    ///
+    /// Handles all three variants: Append, Overwrite, and EraseBelow.
+    /// Adjusts command boundaries when lines are dropped from the ring buffer.
+    fn apply_captured_line(&mut self, captured: crate::scrollback::CapturedLine) {
+        match captured {
+            crate::scrollback::CapturedLine::Append(content) => {
+                let dropped = self.scrollback_buffer.push_line(content);
+                if dropped > 0 {
+                    self.viewer_state
+                        .boundaries
+                        .adjust_for_dropped_lines(dropped);
+                }
+            }
+            crate::scrollback::CapturedLine::Overwrite {
+                lines_back,
+                content,
+            } => {
+                let len = self.scrollback_buffer.len();
+                if lines_back > 0 && lines_back <= len {
+                    self.scrollback_buffer
+                        .replace_line(len - lines_back, content);
+                }
+            }
+            crate::scrollback::CapturedLine::EraseBelow { lines_back } => {
+                let len = self.scrollback_buffer.len();
+                if lines_back > 0 && lines_back <= len {
+                    self.scrollback_buffer.erase_from(len - lines_back);
+                }
+            }
+        }
+    }
+
+    /// Renders scrollback view, returning true if a render error occurred
+    /// and the loop should exit.
+    fn try_render(&mut self) -> bool {
+        if let Err(e) = self.render_scrollback_view() {
+            warn!("Failed to render scrollback: {}", e);
+            self.scroll_to_bottom();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Inner scroll view loop (separated for RAII alt-screen cleanup).
     pub(super) fn run_scroll_view_inner(&mut self) -> Result<()> {
         use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 
         // Flush any partial line from capture so it appears in scrollback
         if let Some(captured) = self.capture_state.flush() {
-            match captured {
-                crate::scrollback::CapturedLine::Append(content) => {
-                    let dropped = self.scrollback_buffer.push_line(content);
-                    if dropped > 0 {
-                        self.viewer_state
-                            .boundaries
-                            .adjust_for_dropped_lines(dropped);
-                    }
-                }
-                crate::scrollback::CapturedLine::Overwrite {
-                    lines_back,
-                    content,
-                } => {
-                    let len = self.scrollback_buffer.len();
-                    if lines_back > 0 && lines_back <= len {
-                        self.scrollback_buffer
-                            .replace_line(len - lines_back, content);
-                    }
-                }
-                crate::scrollback::CapturedLine::EraseBelow { lines_back } => {
-                    let len = self.scrollback_buffer.len();
-                    if lines_back > 0 && lines_back <= len {
-                        self.scrollback_buffer.erase_from(len - lines_back);
-                    }
-                }
-            }
+            self.apply_captured_line(captured);
         }
 
         // Initial render
-        if let Err(e) = self.render_scrollback_view() {
-            warn!("Failed to render scrollback: {}", e);
-            self.scroll_to_bottom();
+        if self.try_render() {
             return Ok(());
         }
 
@@ -1369,7 +1395,6 @@ impl App {
                 break;
             }
 
-            // Wait for input (with periodic checks for signals)
             let has_event = event::poll(std::time::Duration::from_millis(100))
                 .context("Failed to poll for events")?;
 
@@ -1391,16 +1416,12 @@ impl App {
                 }) => {
                     if self.is_scroll_allowed() {
                         let lines = if modifiers.contains(KeyModifiers::SHIFT) {
-                            1 // Shift+PgUp: one line
+                            1
                         } else {
-                            self.viewport_height() // PgUp: one page
+                            self.viewport_height()
                         };
                         self.scroll_up(lines);
-                        if let Err(e) = self.render_scrollback_view() {
-                            warn!("Failed to render scrollback: {}", e);
-                            self.scroll_to_bottom();
-                            break;
-                        }
+                        if self.try_render() { break; }
                     }
                 }
                 Event::Key(KeyEvent {
@@ -1409,59 +1430,36 @@ impl App {
                     ..
                 }) => {
                     let lines = if modifiers.contains(KeyModifiers::SHIFT) {
-                        1 // Shift+PgDown: one line
+                        1
                     } else {
-                        self.viewport_height() // PgDown: one page
+                        self.viewport_height()
                     };
                     self.scroll_down(lines);
-                    // Always render - we stay at offset=0 instead of auto-exiting
-                    if let Err(e) = self.render_scrollback_view() {
-                        warn!("Failed to render scrollback: {}", e);
-                        self.scroll_to_bottom();
-                        break;
-                    }
+                    if self.try_render() { break; }
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::Up, ..
                 }) => {
-                    // Up arrow: scroll up one line
                     if self.is_scroll_allowed() {
                         self.scroll_up(1);
-                        if let Err(e) = self.render_scrollback_view() {
-                            warn!("Failed to render scrollback: {}", e);
-                            self.scroll_to_bottom();
-                            break;
-                        }
+                        if self.try_render() { break; }
                     }
                 }
                 Event::Key(KeyEvent {
-                    code: KeyCode::Down,
-                    ..
+                    code: KeyCode::Down, ..
                 }) => {
-                    // Down arrow: scroll down one line (stays at offset=0 at bottom)
                     self.scroll_down(1);
-                    if let Err(e) = self.render_scrollback_view() {
-                        warn!("Failed to render scrollback: {}", e);
-                        self.scroll_to_bottom();
-                        break;
-                    }
+                    if self.try_render() { break; }
                 }
                 Event::Key(KeyEvent {
-                    code: KeyCode::Home,
-                    ..
+                    code: KeyCode::Home, ..
                 }) => {
-                    // Home: jump to top (oldest content)
                     self.scroll_to_top();
-                    if let Err(e) = self.render_scrollback_view() {
-                        warn!("Failed to render scrollback: {}", e);
-                        self.scroll_to_bottom();
-                        break;
-                    }
+                    if self.try_render() { break; }
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::End, ..
                 }) => {
-                    // End: jump to bottom (live view)
                     self.scroll_to_bottom();
                     break;
                 }
@@ -1470,32 +1468,19 @@ impl App {
                     modifiers,
                     ..
                 }) if modifiers.contains(KeyModifiers::CONTROL) => {
-                    // Ctrl+L: toggle line numbers
                     self.viewer_state.toggle_line_numbers();
-                    debug!(
-                        show_line_numbers = self.viewer_state.is_line_numbers_shown(),
-                        "Toggled line numbers"
-                    );
-                    if let Err(e) = self.render_scrollback_view() {
-                        warn!("Failed to render scrollback: {}", e);
-                        self.scroll_to_bottom();
-                        break;
-                    }
+                    debug!(show_line_numbers = self.viewer_state.is_line_numbers_shown(), "Toggled line numbers");
+                    if self.try_render() { break; }
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::Char('u'),
                     modifiers,
                     ..
                 }) if modifiers.contains(KeyModifiers::CONTROL) => {
-                    // Ctrl+U: half-page up
                     if self.is_scroll_allowed() {
                         let half_page = self.viewport_height() / 2;
                         self.scroll_up(half_page.max(1));
-                        if let Err(e) = self.render_scrollback_view() {
-                            warn!("Failed to render scrollback: {}", e);
-                            self.scroll_to_bottom();
-                            break;
-                        }
+                        if self.try_render() { break; }
                     }
                 }
                 Event::Key(KeyEvent {
@@ -1503,187 +1488,91 @@ impl App {
                     modifiers,
                     ..
                 }) if modifiers.contains(KeyModifiers::CONTROL) => {
-                    // Ctrl+D: half-page down
                     let half_page = self.viewport_height() / 2;
                     self.scroll_down(half_page.max(1));
-                    if let Err(e) = self.render_scrollback_view() {
-                        warn!("Failed to render scrollback: {}", e);
-                        self.scroll_to_bottom();
-                        break;
-                    }
+                    if self.try_render() { break; }
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::Char('t'),
                     modifiers,
                     ..
                 }) if modifiers.contains(KeyModifiers::CONTROL) => {
-                    // Ctrl+T: toggle timestamp gutter
                     self.viewer_state.toggle_timestamps();
-                    debug!(
-                        show_timestamps = self.viewer_state.is_timestamps_shown(),
-                        "Toggled timestamps"
-                    );
-                    if let Err(e) = self.render_scrollback_view() {
-                        warn!("Failed to render scrollback: {}", e);
-                        self.scroll_to_bottom();
-                        break;
-                    }
+                    debug!(show_timestamps = self.viewer_state.is_timestamps_shown(), "Toggled timestamps");
+                    if self.try_render() { break; }
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::Char('b'),
                     modifiers,
                     ..
                 }) if modifiers.contains(KeyModifiers::CONTROL) => {
-                    // Ctrl+B: toggle command boundary separators
                     self.viewer_state.toggle_command_separators();
-                    debug!(
-                        show_separators = self.viewer_state.is_command_separators_shown(),
-                        "Toggled command separators"
-                    );
-                    if let Err(e) = self.render_scrollback_view() {
-                        warn!("Failed to render scrollback: {}", e);
-                        self.scroll_to_bottom();
-                        break;
-                    }
+                    debug!(show_separators = self.viewer_state.is_command_separators_shown(), "Toggled command separators");
+                    if self.try_render() { break; }
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::Char('p'),
                     modifiers,
                     ..
                 }) if modifiers.contains(KeyModifiers::CONTROL) => {
-                    // Ctrl+P: jump to previous command boundary
                     self.jump_to_prev_command();
-                    if let Err(e) = self.render_scrollback_view() {
-                        warn!("Failed to render scrollback: {}", e);
-                        self.scroll_to_bottom();
-                        break;
-                    }
+                    if self.try_render() { break; }
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::Char('n'),
                     modifiers,
                     ..
                 }) if modifiers.contains(KeyModifiers::CONTROL) => {
-                    // Ctrl+N: jump to next command boundary
                     self.jump_to_next_command();
-                    if let Err(e) = self.render_scrollback_view() {
-                        warn!("Failed to render scrollback: {}", e);
-                        self.scroll_to_bottom();
-                        break;
-                    }
+                    if self.try_render() { break; }
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::Char('s'),
                     modifiers,
                     ..
                 }) if modifiers.contains(KeyModifiers::CONTROL) => {
-                    // Ctrl+S: incremental search
-                    match self.run_search_mode() {
-                        Ok(_) => {
-                            // Re-render without search highlights
-                            if let Err(e) = self.render_scrollback_view() {
-                                warn!("Failed to render scrollback: {}", e);
-                                self.scroll_to_bottom();
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Search mode error: {}", e);
-                            if let Err(e) = self.render_scrollback_view() {
-                                warn!("Failed to render scrollback: {}", e);
-                                self.scroll_to_bottom();
-                                break;
-                            }
-                        }
+                    if let Err(e) = self.run_search_mode() {
+                        warn!("Search mode error: {}", e);
                     }
+                    if self.try_render() { break; }
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::Char('f'),
                     modifiers,
                     ..
                 }) if modifiers.contains(KeyModifiers::CONTROL) => {
-                    // Ctrl+F: filter mode
-                    match self.run_filter_mode() {
-                        Ok(_) => {
-                            // Re-render full view
-                            if let Err(e) = self.render_scrollback_view() {
-                                warn!("Failed to render scrollback: {}", e);
-                                self.scroll_to_bottom();
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Filter mode error: {}", e);
-                            if let Err(e) = self.render_scrollback_view() {
-                                warn!("Failed to render scrollback: {}", e);
-                                self.scroll_to_bottom();
-                                break;
-                            }
-                        }
+                    if let Err(e) = self.run_filter_mode() {
+                        warn!("Filter mode error: {}", e);
                     }
+                    if self.try_render() { break; }
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::Char('g'),
                     modifiers,
                     ..
                 }) if modifiers.contains(KeyModifiers::CONTROL) => {
-                    // Ctrl+G: go to line
-                    match self.run_goto_line_mode() {
-                        Ok(true) => {
-                            // User submitted a line number, re-render
-                            if let Err(e) = self.render_scrollback_view() {
-                                warn!("Failed to render scrollback: {}", e);
-                                self.scroll_to_bottom();
-                                break;
-                            }
-                        }
-                        Ok(false) => {
-                            // User cancelled, just re-render
-                            if let Err(e) = self.render_scrollback_view() {
-                                warn!("Failed to render scrollback: {}", e);
-                                self.scroll_to_bottom();
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Go-to-line mode error: {}", e);
-                            if let Err(e) = self.render_scrollback_view() {
-                                warn!("Failed to render scrollback: {}", e);
-                                self.scroll_to_bottom();
-                                break;
-                            }
-                        }
+                    if let Err(e) = self.run_goto_line_mode() {
+                        warn!("Go-to-line mode error: {}", e);
                     }
+                    if self.try_render() { break; }
                 }
                 Event::Key(KeyEvent {
-                    code: KeyCode::Char('?'),
-                    ..
+                    code: KeyCode::Char('?'), ..
                 })
                 | Event::Key(KeyEvent {
-                    code: KeyCode::F(1),
-                    ..
+                    code: KeyCode::F(1), ..
                 }) => {
-                    // Toggle help bar
                     self.viewer_state.toggle_help_bar();
-                    debug!(
-                        show_help = self.viewer_state.is_help_bar_shown(),
-                        "Toggled help bar"
-                    );
-                    if let Err(e) = self.render_scrollback_view() {
-                        warn!("Failed to render scrollback: {}", e);
-                        self.scroll_to_bottom();
-                        break;
-                    }
+                    debug!(show_help = self.viewer_state.is_help_bar_shown(), "Toggled help bar");
+                    if self.try_render() { break; }
                 }
                 Event::Key(KeyEvent {
                     code: KeyCode::Esc, ..
                 }) => {
-                    // Exit scroll view
                     self.scroll_to_bottom();
                     break;
                 }
                 Event::Key(_) => {
-                    // Any other key exits scroll view
                     self.scroll_to_bottom();
                     break;
                 }
@@ -1692,25 +1581,14 @@ impl App {
                         self.scroll_to_bottom();
                         break;
                     }
-                    // Handle resize while in scroll view
                     self.capture_state.set_terminal_width(cols);
-                    if let Err(e) = self.render_scrollback_view() {
-                        warn!("Failed to re-render after resize: {}", e);
-                        self.scroll_to_bottom();
-                        break;
-                    }
+                    if self.try_render() { break; }
                 }
-                _ => {
-                    // Ignore other events (mouse, focus, etc.)
-                }
+                _ => {}
             }
         }
 
-        // Clear scroll view and restore normal terminal
-        if let Err(e) = self.clear_scrollback_view() {
-            warn!("Failed to clear scrollback view: {}", e);
-        }
-
+        // Alt screen exit in run_scroll_view() handles restoration.
         Ok(())
     }
 }

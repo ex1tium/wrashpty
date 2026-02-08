@@ -5,48 +5,39 @@
 use std::io::{self, Write};
 
 use crate::chrome::theme::Theme;
-use crate::scrollback::mode::ScrollViewMode;
+use crate::scrollback::mode::HelpContext;
 
-/// Help bar content for different modes.
+/// Help bar content for different contexts.
 pub struct HelpBar;
 
 impl HelpBar {
-    /// Returns help text for the given mode.
-    pub fn text_for_mode(mode: &ScrollViewMode) -> &'static str {
-        match mode {
-            ScrollViewMode::Normal => {
+    /// Returns help text for the given context.
+    pub fn text_for_context(ctx: HelpContext) -> &'static str {
+        match ctx {
+            HelpContext::Normal => {
                 "PgUp/Dn:scroll  Home/End:top/bot  Ctrl+S:search  Ctrl+F:filter  Ctrl+G:goto  Ctrl+L:lines  Ctrl+T:time  ?:hide"
             }
-            ScrollViewMode::Search(_) => {
+            HelpContext::Search => {
                 "Enter:confirm  Esc:cancel  Up/Down:prev/next match  Ctrl+F:filter"
             }
-            ScrollViewMode::Filter(_) => {
+            HelpContext::Filter => {
                 "Enter:confirm  Esc:cancel  Ctrl+S:search  PgUp/Dn:scroll  Home/End:top/bot"
             }
-            ScrollViewMode::Yank(_) => "v:toggle line  y/Enter:copy  Esc:cancel  Arrows:move",
-            ScrollViewMode::GoToLine(_) => "Enter:go  Esc:cancel",
+            HelpContext::GoToLine => "Enter:go  Esc:cancel",
         }
     }
 
     /// Renders the help bar at the bottom row of the terminal.
-    ///
-    /// # Arguments
-    ///
-    /// * `out` - Writer to render to
-    /// * `mode` - Current scroll viewer mode
-    /// * `cols` - Terminal width
-    /// * `rows` - Terminal height
-    /// * `theme` - Theme for colors
     pub fn render<W: Write>(
         out: &mut W,
-        mode: &ScrollViewMode,
+        ctx: HelpContext,
         cols: u16,
         rows: u16,
         theme: &Theme,
     ) -> io::Result<()> {
         use crate::chrome::segments::{color_to_bg_ansi, color_to_fg_ansi};
 
-        let text = Self::text_for_mode(mode);
+        let text = Self::text_for_context(ctx);
         let bg = color_to_bg_ansi(theme.help_bar_bg);
         let fg = color_to_fg_ansi(theme.help_bar_fg);
         let key_fg = color_to_fg_ansi(theme.help_bar_key);
@@ -88,15 +79,14 @@ impl HelpBar {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scrollback::features::SearchState;
 
     #[test]
-    fn test_help_text_for_modes() {
-        let normal_help = HelpBar::text_for_mode(&ScrollViewMode::Normal);
+    fn test_help_text_for_contexts() {
+        let normal_help = HelpBar::text_for_context(HelpContext::Normal);
         assert!(normal_help.contains("PgUp"));
         assert!(normal_help.contains("Ctrl+S"));
 
-        let search_help = HelpBar::text_for_mode(&ScrollViewMode::Search(SearchState::default()));
+        let search_help = HelpBar::text_for_context(HelpContext::Search);
         assert!(search_help.contains("Up/Down"));
         assert!(search_help.contains("Esc"));
     }
