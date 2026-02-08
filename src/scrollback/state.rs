@@ -1,7 +1,10 @@
 //! Unified scroll view state centered on [`ViewerState`].
 //! Keeps display toggles and command boundary metadata together.
 
+use std::collections::HashSet;
+
 use super::boundaries::CommandBoundaries;
+use super::separator::SeparatorRegistry;
 
 /// Display settings that persist across mode changes.
 #[derive(Debug, Clone, Default)]
@@ -14,6 +17,8 @@ pub struct DisplaySettings {
     pub help_bar: bool,
     /// Show horizontal rule separators at command boundaries (Ctrl+B toggle).
     pub command_separators: bool,
+    /// Show sticky command headers when scrolling through command output.
+    pub sticky_headers: bool,
 }
 
 impl DisplaySettings {
@@ -21,6 +26,7 @@ impl DisplaySettings {
     pub fn new() -> Self {
         Self {
             command_separators: true, // On by default
+            sticky_headers: true,
             ..Default::default()
         }
     }
@@ -40,6 +46,12 @@ pub struct ViewerState {
     /// Cached search result line indices from last search.
     /// Used by filter mode to show only search result lines.
     pub last_search_lines: Option<Vec<usize>>,
+    /// Registry for rich command separator rendering.
+    pub separator_registry: SeparatorRegistry,
+    /// Collapsed command indices (reserved for future external fold controls).
+    pub collapsed_commands: HashSet<usize>,
+    /// Last rendered first visible buffer line index (0-based) in normal mode.
+    pub last_first_visible_line_idx: Option<usize>,
 }
 
 impl ViewerState {
@@ -47,6 +59,7 @@ impl ViewerState {
     pub fn new() -> Self {
         Self {
             display: DisplaySettings::new(),
+            separator_registry: SeparatorRegistry::with_defaults(),
             ..Default::default()
         }
     }
@@ -103,6 +116,7 @@ mod tests {
         assert!(!settings.timestamps);
         assert!(!settings.help_bar);
         assert!(settings.command_separators); // On by default
+        assert!(settings.sticky_headers);
     }
 
     #[test]

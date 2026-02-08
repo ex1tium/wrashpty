@@ -1,11 +1,14 @@
 //! Stateless scrollback rendering utilities for display output.
 //! Scroll offset ownership stays in `App`; this module only renders views.
 
+use std::collections::HashSet;
 use std::io::{self, Write};
 
+use super::boundaries::CommandRecord;
 use super::buffer::ScrollbackBuffer;
 use super::features::{FilterState, SearchState};
-use crate::chrome::theme::Theme;
+use super::separator::SeparatorRegistry;
+use crate::chrome::{symbols::Symbols, theme::Theme};
 
 /// Truncates raw byte content (potentially containing ANSI escape sequences)
 /// to fit within `max_display_cols` terminal columns.
@@ -137,12 +140,22 @@ pub struct RenderConfig<'a> {
     pub boundary_markers: bool,
     /// Sorted prompt line indices for command separator rendering.
     pub boundary_lines: &'a [usize],
+    /// Rich command metadata keyed by prompt boundaries.
+    pub records: &'a [CommandRecord],
     /// Search state for match highlighting. `None` = no highlighting.
     pub search: Option<&'a SearchState>,
     /// Filter state for showing only matching lines. `None` = show all.
     pub filter: Option<&'a FilterState>,
     /// Scroll offset within filtered view (only used when `filter` is `Some`).
     pub filter_offset: usize,
+    /// Separator segment registry for rich command metadata display.
+    pub separator_registry: Option<&'a SeparatorRegistry>,
+    /// UI symbols for status/failure indicators in separator segments.
+    pub symbols: Option<&'a Symbols>,
+    /// Optional external collapsed command set (reserved for future use).
+    pub collapsed_commands: Option<&'a HashSet<usize>>,
+    /// Whether sticky command headers are enabled in normal mode.
+    pub sticky_header: bool,
     /// Theme for styled rendering. `None` = dim ANSI fallback.
     pub theme: Option<&'a Theme>,
 }
@@ -155,9 +168,14 @@ impl Default for RenderConfig<'_> {
             show_timestamps: false,
             boundary_markers: false,
             boundary_lines: &[],
+            records: &[],
             search: None,
             filter: None,
             filter_offset: 0,
+            separator_registry: None,
+            symbols: None,
+            collapsed_commands: None,
+            sticky_header: false,
             theme: None,
         }
     }
@@ -288,47 +306,77 @@ impl ScrollViewer {
             })
         } else {
             // ─── Normal mode: full buffer with markers and separators ─
-            let max_offset = Self::max_offset(total, content_rows);
-            let is_at_bottom = offset == 0;
-            let is_at_top = offset >= max_offset && total > 0;
-
-            let show_end = config.boundary_markers && is_at_bottom && total > 0;
-            let show_begin = config.boundary_markers && is_at_top && total > 0;
-
-            let buffer_fills_viewport = total >= content_rows;
-            let end_cost = if show_end && buffer_fills_viewport {
-                1
-            } else {
-                0
-            };
-            let begin_cost = if show_begin && buffer_fills_viewport {
-                1
-            } else {
-                0
-            };
-            let available_rows = content_rows
-                .saturating_sub(end_cost)
-                .saturating_sub(begin_cost);
-            let available_rows = Self::adjusted_visible_line_count_for_separators(
+            let visible_line_indices = Self::collect_visible_line_indices(
                 total,
+                config.records,
+                config.collapsed_commands,
+            );
+            let visible_total = visible_line_indices.len();
+            let max_offset = Self::max_offset(visible_total, content_rows);
+            let is_at_bottom = offset == 0;
+            let is_at_top = offset >= max_offset && visible_total > 0;
+
+            let show_end = config.boundary_markers && is_at_bottom && visible_total > 0;
+            let show_begin = config.boundary_markers && is_at_top && visible_total > 0;
+
+            let mut available_rows = content_rows
+                .saturating_sub(show_begin as usize)
+                .saturating_sub(show_end as usize);
+
+            let mut line_positions = Self::visible_line_positions(
+                &visible_line_indices,
                 offset,
                 available_rows,
                 show_begin,
                 config.boundary_lines,
             );
+            let mut first_visible_idx = line_positions
+                .first()
+                .and_then(|pos| visible_line_indices.get(*pos))
+                .copied()
+                .unwrap_or(0);
+            let mut sticky_record = None;
 
-            let (first_visible_line, lines): (usize, Vec<_>) = if show_begin {
-                (1, buffer.get_range(0, available_rows).collect())
+            if config.sticky_header && available_rows > 0 {
+                if let Some(record) = Self::record_for_line(config.records, first_visible_idx) {
+                    let separator_visible = line_positions.iter().any(|pos| {
+                        visible_line_indices.get(*pos).copied() == Some(record.output_start)
+                    });
+                    if first_visible_idx > record.output_start && !separator_visible {
+                        sticky_record = Some(record);
+                    }
+                }
+            }
+
+            if sticky_record.is_some() && available_rows > 0 {
+                available_rows = available_rows.saturating_sub(1);
+                line_positions = Self::visible_line_positions(
+                    &visible_line_indices,
+                    offset,
+                    available_rows,
+                    show_begin,
+                    config.boundary_lines,
+                );
+                first_visible_idx = line_positions
+                    .first()
+                    .and_then(|pos| visible_line_indices.get(*pos))
+                    .copied()
+                    .unwrap_or(0);
+
+                if let Some(record) = sticky_record {
+                    let separator_visible = line_positions.iter().any(|pos| {
+                        visible_line_indices.get(*pos).copied() == Some(record.output_start)
+                    });
+                    if separator_visible || first_visible_idx <= record.output_start {
+                        sticky_record = None;
+                    }
+                }
+            }
+
+            let first_visible_line = if visible_total == 0 {
+                1
             } else {
-                let first = total
-                    .saturating_sub(offset)
-                    .saturating_sub(available_rows)
-                    .saturating_add(1)
-                    .max(1);
-                (
-                    first,
-                    buffer.get_from_bottom(offset, available_rows).collect(),
-                )
+                first_visible_idx.saturating_add(1)
             };
 
             // Get search state for optional highlighting
@@ -347,15 +395,27 @@ impl ScrollViewer {
                 current_row += 1;
             }
 
-            for (i, line) in lines.iter().enumerate() {
-                let line_index = first_visible_line + i - 1; // 0-indexed buffer position
-                let line_number = first_visible_line + i;
+            if let Some(record) = sticky_record {
+                if current_row < max_row {
+                    write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
+                    Self::render_command_separator(
+                        out,
+                        cols as usize,
+                        gutter_width,
+                        config.theme,
+                        Some(record),
+                        config.separator_registry,
+                        config.symbols,
+                    )?;
+                    current_row += 1;
+                }
+            }
 
-                // Command separator
-                if !config.boundary_lines.is_empty()
-                    && config.boundary_lines.binary_search(&line_index).is_ok()
-                    && line_index > 0
-                {
+            for line_pos in line_positions {
+                let line_index = visible_line_indices[line_pos];
+                let line_number = line_index + 1;
+
+                if config.boundary_lines.binary_search(&line_index).is_ok() {
                     if current_row >= max_row {
                         break;
                     }
@@ -365,6 +425,9 @@ impl ScrollViewer {
                         cols as usize,
                         gutter_width,
                         config.theme,
+                        Self::record_for_line(config.records, line_index),
+                        config.separator_registry,
+                        config.symbols,
                     )?;
                     current_row += 1;
                 }
@@ -372,6 +435,10 @@ impl ScrollViewer {
                 if current_row >= max_row {
                     break;
                 }
+
+                let Some(line) = buffer.get(line_index) else {
+                    continue;
+                };
 
                 write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
 
@@ -463,7 +530,11 @@ impl ScrollViewer {
             0
         };
         let timestamp_width = if show_timestamps { 7 } else { 0 };
-        (line_num_width, timestamp_width, line_num_width + timestamp_width)
+        (
+            line_num_width,
+            timestamp_width,
+            line_num_width + timestamp_width,
+        )
     }
 
     /// Renders the gutter (timestamp + line number) for a single row.
@@ -560,7 +631,16 @@ impl ScrollViewer {
         cols: usize,
         gutter_width: usize,
         theme: Option<&Theme>,
+        record: Option<&CommandRecord>,
+        separator_registry: Option<&SeparatorRegistry>,
+        symbols: Option<&Symbols>,
     ) -> io::Result<()> {
+        if let (Some(theme), Some(registry), Some(symbols)) = (theme, separator_registry, symbols) {
+            let separator = registry.render(record, cols, gutter_width, theme, symbols);
+            write!(out, "{}", separator)?;
+            return Ok(());
+        }
+
         use crate::chrome::segments::color_to_fg_ansi;
 
         let content_cols = cols.saturating_sub(gutter_width);
@@ -577,7 +657,7 @@ impl ScrollViewer {
         }
 
         for _ in 0..content_cols {
-            write!(out, "─")?;
+            write!(out, "╌")?;
         }
 
         if theme.is_some() {
@@ -589,67 +669,110 @@ impl ScrollViewer {
         Ok(())
     }
 
-    fn count_command_separators_in_range(
-        boundary_lines: &[usize],
-        start_idx: usize,
-        line_count: usize,
-    ) -> usize {
-        if boundary_lines.is_empty() || line_count == 0 {
-            return 0;
-        }
-
-        let end_idx = start_idx.saturating_add(line_count);
-        let start_pos = boundary_lines.partition_point(|&idx| idx < start_idx);
-        let end_pos = boundary_lines.partition_point(|&idx| idx < end_idx);
-
-        boundary_lines[start_pos..end_pos]
-            .iter()
-            .filter(|&&idx| idx > 0)
-            .count()
+    fn record_for_line(records: &[CommandRecord], line_idx: usize) -> Option<&CommandRecord> {
+        Self::record_for_line_with_index(records, line_idx).map(|(_, record)| record)
     }
 
-    fn adjusted_visible_line_count_for_separators(
+    fn record_for_line_with_index(
+        records: &[CommandRecord],
+        line_idx: usize,
+    ) -> Option<(usize, &CommandRecord)> {
+        let pos = records.partition_point(|record| record.output_start <= line_idx);
+        if pos == 0 {
+            return None;
+        }
+        let idx = pos - 1;
+        let record = records.get(idx)?;
+        let end = record.prompt_line.unwrap_or(usize::MAX);
+        if line_idx < end {
+            Some((idx, record))
+        } else {
+            None
+        }
+    }
+
+    fn is_line_folded(
+        line_idx: usize,
+        records: &[CommandRecord],
+        collapsed_commands: Option<&HashSet<usize>>,
+    ) -> bool {
+        let Some((record_idx, record)) = Self::record_for_line_with_index(records, line_idx) else {
+            return false;
+        };
+        let externally_folded = collapsed_commands
+            .map(|set| set.contains(&record_idx))
+            .unwrap_or(false);
+        if !(record.folded || externally_folded) {
+            return false;
+        }
+
+        let prompt_line = record.prompt_line.unwrap_or(usize::MAX);
+        line_idx > record.output_start && line_idx < prompt_line
+    }
+
+    fn collect_visible_line_indices(
         total: usize,
+        records: &[CommandRecord],
+        collapsed_commands: Option<&HashSet<usize>>,
+    ) -> Vec<usize> {
+        let mut indices = Vec::with_capacity(total);
+        for line_idx in 0..total {
+            if !Self::is_line_folded(line_idx, records, collapsed_commands) {
+                indices.push(line_idx);
+            }
+        }
+        indices
+    }
+
+    fn visible_line_positions(
+        visible_indices: &[usize],
         offset: usize,
         requested_rows: usize,
         show_begin: bool,
         boundary_lines: &[usize],
-    ) -> usize {
-        if requested_rows == 0 || total == 0 {
-            return 0;
+    ) -> Vec<usize> {
+        if visible_indices.is_empty() || requested_rows == 0 {
+            return Vec::new();
         }
 
-        let visible_limit = if show_begin {
-            total
-        } else {
-            total.saturating_sub(offset)
-        };
-        let mut line_count = requested_rows.min(visible_limit);
+        if show_begin {
+            let mut rows = 0usize;
+            let mut positions = Vec::new();
+            for (pos, line_idx) in visible_indices.iter().enumerate() {
+                let separator_rows =
+                    usize::from(*line_idx > 0 && boundary_lines.binary_search(line_idx).is_ok());
+                let needed = 1 + separator_rows;
+                if rows + needed > requested_rows {
+                    break;
+                }
+                rows += needed;
+                positions.push(pos);
+            }
+            return positions;
+        }
 
-        for _ in 0..=requested_rows {
-            let first_visible_line = if show_begin {
-                1
-            } else {
-                total
-                    .saturating_sub(offset)
-                    .saturating_sub(line_count)
-                    .saturating_add(1)
-                    .max(1)
-            };
-            let start_idx = first_visible_line.saturating_sub(1);
+        let end_pos = visible_indices
+            .len()
+            .saturating_sub(offset.min(visible_indices.len()));
+        if end_pos == 0 {
+            return Vec::new();
+        }
+
+        let mut start_pos = end_pos;
+        let mut rows = 0usize;
+        while start_pos > 0 {
+            let line_idx = visible_indices[start_pos - 1];
             let separator_rows =
-                Self::count_command_separators_in_range(boundary_lines, start_idx, line_count);
-            let next_line_count = requested_rows
-                .saturating_sub(separator_rows)
-                .min(visible_limit);
-
-            if next_line_count == line_count {
+                usize::from(line_idx > 0 && boundary_lines.binary_search(&line_idx).is_ok());
+            let needed = 1 + separator_rows;
+            if rows + needed > requested_rows {
                 break;
             }
-            line_count = next_line_count;
+            rows += needed;
+            start_pos -= 1;
         }
 
-        line_count
+        (start_pos..end_pos).collect()
     }
 
     /// Renders a line with search match highlighting.
@@ -736,6 +859,10 @@ impl ScrollViewer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{SymbolSet, ThemePreset};
+    use crate::scrollback::{CommandRecord, SeparatorRegistry};
+    use std::path::PathBuf;
+    use std::time::Duration;
 
     fn create_test_buffer(lines: &[&str]) -> ScrollbackBuffer {
         let mut buffer = ScrollbackBuffer::with_capacity(100, 1000);
@@ -773,8 +900,7 @@ mod tests {
         let mut output = Vec::new();
 
         let stats =
-            ScrollViewer::render(&mut output, &buffer, 0, 80, 3, &RenderConfig::default())
-                .unwrap();
+            ScrollViewer::render(&mut output, &buffer, 0, 80, 3, &RenderConfig::default()).unwrap();
         assert_eq!(stats.lines_rendered, 3);
 
         let output_str = String::from_utf8_lossy(&output);
@@ -789,8 +915,7 @@ mod tests {
         let mut output = Vec::new();
 
         let stats =
-            ScrollViewer::render(&mut output, &buffer, 2, 80, 2, &RenderConfig::default())
-                .unwrap();
+            ScrollViewer::render(&mut output, &buffer, 2, 80, 2, &RenderConfig::default()).unwrap();
         assert_eq!(stats.lines_rendered, 2);
 
         let output_str = String::from_utf8_lossy(&output);
@@ -1034,8 +1159,7 @@ mod tests {
         let mut output = Vec::new();
 
         let stats =
-            ScrollViewer::render(&mut output, &buffer, 0, 10, 3, &RenderConfig::default())
-                .unwrap();
+            ScrollViewer::render(&mut output, &buffer, 0, 10, 3, &RenderConfig::default()).unwrap();
         assert_eq!(stats.lines_rendered, 3);
     }
 
@@ -1061,5 +1185,175 @@ mod tests {
         assert!(ln > 0);
         assert_eq!(ts, 7);
         assert_eq!(total, ln + ts);
+    }
+
+    #[test]
+    fn test_render_sticky_header_when_separator_offscreen_renders_separator_once() {
+        let buffer = create_test_buffer(&[
+            "l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8", "l9", "l10", "l11", "l12",
+        ]);
+        let mut output = Vec::new();
+        let theme = crate::chrome::theme::Theme::for_preset(ThemePreset::Amber);
+        let symbols = crate::chrome::symbols::Symbols::for_set(SymbolSet::Fallback);
+        let registry = SeparatorRegistry::with_defaults();
+        let records = vec![CommandRecord {
+            output_start: 2,
+            prompt_line: Some(10),
+            command_text: Some("build".to_string()),
+            exit_code: Some(0),
+            duration: Some(Duration::from_secs(2)),
+            cwd: Some(PathBuf::from("/tmp")),
+            ..Default::default()
+        }];
+
+        let stats = ScrollViewer::render(
+            &mut output,
+            &buffer,
+            2,
+            80,
+            4,
+            &RenderConfig {
+                boundary_lines: &[2],
+                records: &records,
+                sticky_header: true,
+                separator_registry: Some(&registry),
+                symbols: Some(symbols),
+                theme: Some(theme),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let rendered = String::from_utf8_lossy(&output);
+        assert_eq!(rendered.matches("build").count(), 1);
+        assert!(rendered.contains('╌'));
+        assert!(stats.first_visible_line > 2 && stats.first_visible_line < 10);
+    }
+
+    #[test]
+    fn test_render_sticky_header_when_separator_visible_avoids_duplication() {
+        let buffer = create_test_buffer(&[
+            "l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8", "l9", "l10", "l11", "l12",
+        ]);
+        let mut output = Vec::new();
+        let theme = crate::chrome::theme::Theme::for_preset(ThemePreset::Amber);
+        let symbols = crate::chrome::symbols::Symbols::for_set(SymbolSet::Fallback);
+        let registry = SeparatorRegistry::with_defaults();
+        let records = vec![CommandRecord {
+            output_start: 2,
+            prompt_line: Some(10),
+            command_text: Some("build".to_string()),
+            exit_code: Some(0),
+            ..Default::default()
+        }];
+
+        ScrollViewer::render(
+            &mut output,
+            &buffer,
+            1,
+            80,
+            4,
+            &RenderConfig {
+                boundary_lines: &[2],
+                records: &records,
+                sticky_header: true,
+                separator_registry: Some(&registry),
+                symbols: Some(symbols),
+                theme: Some(theme),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let rendered = String::from_utf8_lossy(&output);
+        assert_eq!(rendered.matches("build").count(), 1);
+    }
+
+    #[test]
+    fn test_render_folded_viewport_when_offset_clamped_keeps_lines_visible() {
+        let buffer = create_test_buffer(&[
+            "l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8", "l9", "l10", "l11", "l12",
+        ]);
+        let mut output = Vec::new();
+        let records = vec![CommandRecord {
+            output_start: 2,
+            prompt_line: Some(10),
+            folded: true,
+            ..Default::default()
+        }];
+
+        let total = buffer.len();
+        let folded_count = records[0]
+            .prompt_line
+            .unwrap_or(0)
+            .saturating_sub(records[0].output_start.saturating_add(1));
+        let visible_total = total.saturating_sub(folded_count);
+        let clamped_offset = ScrollViewer::clamp_offset(8, visible_total, 4);
+
+        let stats = ScrollViewer::render(
+            &mut output,
+            &buffer,
+            clamped_offset,
+            80,
+            4,
+            &RenderConfig {
+                records: &records,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let rendered = String::from_utf8_lossy(&output);
+        assert!(rendered.contains("l1"));
+        assert!(rendered.contains("l2"));
+        assert!(!rendered.contains("l4"));
+        assert!(stats.lines_rendered > 0);
+        assert_eq!(stats.first_visible_line, 1);
+    }
+
+    #[test]
+    fn test_render_separator_when_duplicate_output_start_prefers_active_record_for_line() {
+        let buffer = create_test_buffer(&["l1", "l2", "l3", "l4", "l5", "l6"]);
+        let mut output = Vec::new();
+        let theme = crate::chrome::theme::Theme::for_preset(ThemePreset::Amber);
+        let symbols = crate::chrome::symbols::Symbols::for_set(SymbolSet::Fallback);
+        let registry = SeparatorRegistry::with_defaults();
+        let records = vec![
+            CommandRecord {
+                output_start: 2,
+                prompt_line: Some(4),
+                command_text: Some("older".to_string()),
+                exit_code: Some(0),
+                ..Default::default()
+            },
+            CommandRecord {
+                output_start: 2,
+                prompt_line: Some(6),
+                command_text: Some("newer".to_string()),
+                exit_code: Some(0),
+                ..Default::default()
+            },
+        ];
+
+        ScrollViewer::render(
+            &mut output,
+            &buffer,
+            0,
+            120,
+            6,
+            &RenderConfig {
+                boundary_lines: &[2],
+                records: &records,
+                separator_registry: Some(&registry),
+                symbols: Some(symbols),
+                theme: Some(theme),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let rendered = String::from_utf8_lossy(&output);
+        assert!(rendered.contains("newer"));
+        assert!(!rendered.contains("older"));
     }
 }

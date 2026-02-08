@@ -163,7 +163,8 @@ impl FileBrowserPanel {
                     edit_state.set_history_store(store.clone());
                 }
                 edit_state.set_cwd(self.tree.root().to_path_buf());
-                edit_state.set_file_context(FileContext::new(&entry.entry.name, entry.entry.is_dir));
+                edit_state
+                    .set_file_context(FileContext::new(&entry.entry.name, entry.entry.is_dir));
                 edit_state.update_suggestions();
 
                 self.edit_filename = Some(entry.entry.name.clone());
@@ -275,23 +276,22 @@ impl FileBrowserPanel {
         let git_width = crate::ui::text_width::display_width(&git_summary);
         let path_budget = max_path_width.saturating_sub(git_width + 2);
 
-        let truncated_path =
-            if crate::ui::text_width::display_width(&path_str) > path_budget {
-                let target_width = path_budget.saturating_sub(3);
-                let mut width = 0;
-                let mut start_idx = path_str.len();
-                for (idx, ch) in path_str.char_indices().rev() {
-                    let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-                    if width + ch_w > target_width {
-                        break;
-                    }
-                    width += ch_w;
-                    start_idx = idx;
+        let truncated_path = if crate::ui::text_width::display_width(&path_str) > path_budget {
+            let target_width = path_budget.saturating_sub(3);
+            let mut width = 0;
+            let mut start_idx = path_str.len();
+            for (idx, ch) in path_str.char_indices().rev() {
+                let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                if width + ch_w > target_width {
+                    break;
                 }
-                format!("...{}", &path_str[start_idx..])
-            } else {
-                path_str.to_string()
-            };
+                width += ch_w;
+                start_idx = idx;
+            }
+            format!("...{}", &path_str[start_idx..])
+        } else {
+            path_str.to_string()
+        };
 
         let show_hidden = self.tree.show_hidden();
         let truncated_path_width = crate::ui::text_width::display_width(&truncated_path);
@@ -315,8 +315,7 @@ impl FileBrowserPanel {
         // Add git summary at right side
         if !git_summary.is_empty() {
             // Calculate padding to right-align git info
-            let used_width = 1 + truncated_path_width
-                + if show_hidden { 4 } else { 0 };
+            let used_width = 1 + truncated_path_width + if show_hidden { 4 } else { 0 };
             let padding = (area.width as usize).saturating_sub(used_width + git_width + 1);
             if padding > 0 {
                 spans.push(Span::raw(" ".repeat(padding)));
@@ -475,7 +474,8 @@ impl FileBrowserPanel {
         let fixed_width = prefix_width + git_marker_width + icon_width + metadata_width;
         let available_for_name = (area_width as usize).saturating_sub(fixed_width);
 
-        let display_name = if crate::ui::text_width::display_width(&name_display) > available_for_name
+        let display_name = if crate::ui::text_width::display_width(&name_display)
+            > available_for_name
             && available_for_name > 0
         {
             crate::ui::text_width::truncate_with_ellipsis(&name_display, available_for_name)
@@ -505,12 +505,18 @@ impl FileBrowserPanel {
         let line = Line::from(vec![
             Span::styled(prefix, apply_focus(prefix_style, is_focused)),
             Span::styled(git_marker, Style::default().fg(git_color)),
-            Span::styled(format!("{} ", icon), apply_focus(Style::default().fg(icon_color), is_focused)),
+            Span::styled(
+                format!("{} ", icon),
+                apply_focus(Style::default().fg(icon_color), is_focused),
+            ),
             Span::styled(display_name, name_style),
             Span::styled(" ".repeat(name_padding), Style::default()),
             Span::styled(
                 format!(" {} ", perms_str),
-                apply_focus(Style::default().fg(self.theme.permissions_color), is_focused),
+                apply_focus(
+                    Style::default().fg(self.theme.permissions_color),
+                    is_focused,
+                ),
             ),
             Span::styled(
                 format!("{:>5} ", date_str),
@@ -756,9 +762,7 @@ impl FileBrowserPanel {
                 } else if let Some(parent_idx) = self.tree.parent_index(tree_idx) {
                     // Jump to parent entry
                     let display_idx = if self.filter.has_filter() {
-                        self.filtered_indices
-                            .iter()
-                            .position(|&i| i == parent_idx)
+                        self.filtered_indices.iter().position(|&i| i == parent_idx)
                     } else {
                         Some(parent_idx)
                     };
@@ -783,11 +787,7 @@ impl FileBrowserPanel {
 
 impl Panel for FileBrowserPanel {
     fn preferred_height(&self) -> u16 {
-        if self.edit_mode.is_some() {
-            13
-        } else {
-            14
-        }
+        if self.edit_mode.is_some() { 13 } else { 14 }
     }
 
     fn title(&self) -> &str {
@@ -901,7 +901,10 @@ impl Panel for FileBrowserPanel {
             d => d.to_string(),
         };
         let spotlight_indicator = if self.tree.spotlight() { " ◉" } else { "" };
-        let info = format!(" sort:{} depth:{}{} ", sort_label, depth_label, spotlight_indicator);
+        let info = format!(
+            " sort:{} depth:{}{} ",
+            sort_label, depth_label, spotlight_indicator
+        );
         let info_width = crate::ui::text_width::display_width(&info) as u16;
         let info_start = border_area.x + border_area.width.saturating_sub(info_width + 1);
         for (i, ch) in info.chars().enumerate() {

@@ -84,11 +84,7 @@ pub fn tree_prefix(line: &TreeLine, chars: &TreeChars) -> String {
     if line.depth > 0 {
         // Guide rails for ancestor depths 0..(depth-1)
         for d in 0..line.depth - 1 {
-            let is_last_at_depth = line
-                .ancestor_is_last
-                .get(d)
-                .copied()
-                .unwrap_or(false);
+            let is_last_at_depth = line.ancestor_is_last.get(d).copied().unwrap_or(false);
             if is_last_at_depth {
                 result.push_str("   ");
             } else {
@@ -127,11 +123,7 @@ pub fn tree_prefix(line: &TreeLine, chars: &TreeChars) -> String {
 /// Depth > 0: `depth * 3` columns — each level adds 3 columns
 /// (guide rail or connector + horizontal + indicator/space).
 pub fn tree_prefix_width(depth: usize) -> usize {
-    if depth == 0 {
-        1
-    } else {
-        depth * 3
-    }
+    if depth == 0 { 1 } else { depth * 3 }
 }
 
 #[cfg(test)]
@@ -256,13 +248,7 @@ mod tests {
         use unicode_width::UnicodeWidthStr;
 
         for depth in 0..=4 {
-            let line = make_line(
-                depth,
-                false,
-                vec![false; depth],
-                true,
-                false,
-            );
+            let line = make_line(depth, false, vec![false; depth], true, false);
             let prefix = tree_prefix(&line, &UNICODE_TREE_CHARS);
             let actual_width = UnicodeWidthStr::width(prefix.as_str());
             let expected_width = tree_prefix_width(depth);

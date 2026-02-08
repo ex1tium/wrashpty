@@ -693,9 +693,7 @@ impl Chrome {
             PanelState::Collapsed => return self.expand_panel(new_height, new_total_rows),
         };
 
-        self.panel_state = PanelState::Expanded {
-            height: new_height,
-        };
+        self.panel_state = PanelState::Expanded { height: new_height };
 
         let stdout = io::stdout();
         let mut out = stdout.lock();
@@ -724,12 +722,7 @@ impl Chrome {
 
         out.flush()?;
 
-        debug!(
-            old_height,
-            new_height,
-            new_total_rows,
-            "Panel resized"
-        );
+        debug!(old_height, new_height, new_total_rows, "Panel resized");
 
         Ok(())
     }

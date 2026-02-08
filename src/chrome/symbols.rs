@@ -148,12 +148,12 @@ pub static NERD_FONT_SYMBOLS: Symbols = Symbols {
     notif_warning: "\u{f071}", //  (fa-exclamation-triangle)
 
     // Git file status markers
-    git_status_modified: "\u{25cf}",  // ● (black circle)
-    git_status_added: "\u{271a}",     // ✚ (heavy greek cross)
-    git_status_deleted: "\u{2716}",   // ✖ (heavy multiplication x)
+    git_status_modified: "\u{25cf}", // ● (black circle)
+    git_status_added: "\u{271a}",    // ✚ (heavy greek cross)
+    git_status_deleted: "\u{2716}",  // ✖ (heavy multiplication x)
     git_status_untracked: "?",
     git_status_conflict: "!",
-    git_status_renamed: "\u{2192}",   // → (rightwards arrow)
+    git_status_renamed: "\u{2192}", // → (rightwards arrow)
 };
 
 /// Fallback symbol set using basic Unicode.

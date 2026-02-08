@@ -20,6 +20,7 @@ mod status;
 pub use clock::ClockSegment;
 pub use cwd::CwdSegment;
 pub use duration::DurationSegment;
+pub(crate) use duration::format_duration;
 pub use git::GitSegment;
 pub use scroll::ScrollSegment;
 pub use status::StatusSegment;
@@ -92,7 +93,7 @@ impl RenderedSegment {
 /// contain cursor or erase codes), consider using a full ANSI-stripping
 /// library like `strip-ansi-escapes`, or extending this parser to consume
 /// all CSI sequences (those matching `\x1b\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]`).
-fn strip_ansi_width(s: &str) -> usize {
+pub(crate) fn strip_ansi_width(s: &str) -> usize {
     let mut width = 0;
     let mut in_escape = false;
 
@@ -117,7 +118,7 @@ fn strip_ansi_width(s: &str) -> usize {
 /// and stops emitting visible characters once `target_width` columns are
 /// reached. Any open SGR sequence at the truncation point is closed with a
 /// reset so downstream rendering is not corrupted.
-fn truncate_ansi_content(s: &str, target_width: usize) -> String {
+pub(crate) fn truncate_ansi_content(s: &str, target_width: usize) -> String {
     let mut result = String::new();
     let mut width = 0;
     let mut in_escape = false;
@@ -499,7 +500,10 @@ mod tests {
         ];
         // 5 + 5 + 2 = 12, max_width = 8 → should drop right segment with priority 5
         let mut right_segments = right;
-        let mut total_width: usize = 5 + right_segments.iter().map(|s| s.display_width).sum::<usize>();
+        let mut total_width: usize = 5 + right_segments
+            .iter()
+            .map(|s| s.display_width)
+            .sum::<usize>();
         let max_width = 8;
 
         while total_width > max_width && right_segments.len() > 1 {

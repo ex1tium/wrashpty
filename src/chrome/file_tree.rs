@@ -480,13 +480,7 @@ impl FileTreeState {
 
                     for (i, child) in children.into_iter().enumerate() {
                         let child_is_last = i == child_len - 1;
-                        self.flatten_entry(
-                            child,
-                            depth + 1,
-                            child_is_last,
-                            &new_ancestor,
-                            result,
-                        );
+                        self.flatten_entry(child, depth + 1, child_is_last, &new_ancestor, result);
                     }
                 }
             }
@@ -754,8 +748,10 @@ mod tests {
 
         tree.dir_cache
             .insert(PathBuf::from("/test/a"), vec![dir_entry("b", "/test/a")]);
-        tree.dir_cache
-            .insert(PathBuf::from("/test/a/b"), vec![file_entry("c.rs", "/test/a/b")]);
+        tree.dir_cache.insert(
+            PathBuf::from("/test/a/b"),
+            vec![file_entry("c.rs", "/test/a/b")],
+        );
 
         tree.max_depth = 1; // Only allow depth 0
         tree.expanded.insert(PathBuf::from("/test/a"));
