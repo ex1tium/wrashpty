@@ -18,11 +18,14 @@
 
 use std::collections::HashMap;
 
+use command_schema_core::{CommandSchema, FlagSchema, SchemaSource, SubcommandSchema, ValueType};
 use rusqlite::Connection;
 use tracing::{debug, info, warn};
 
 use super::error::CIError;
 use super::patterns::{self, flags, hierarchy, pipes, sequences};
+use super::schema::storage::SchemaStore;
+use super::schema_index::SchemaIndex;
 use super::templates;
 use super::tokenizer::{analyze_command, compute_command_hash};
 use super::types::SyncStats;
@@ -41,6 +44,7 @@ use super::variants;
 pub fn sync_from_reedline(
     conn: &Connection,
     last_sync_id: i64,
+    schema_index: &SchemaIndex,
 ) -> Result<(SyncStats, i64), CIError> {
     let start = std::time::Instant::now();
     let mut stats = SyncStats::default();
@@ -101,7 +105,7 @@ pub fn sync_from_reedline(
 
     let transaction_result = (|| -> Result<(), CIError> {
         for entry in &entries {
-            match process_entry(conn, &mut token_cache, entry, &mut stats) {
+            match process_entry(conn, &mut token_cache, entry, &mut stats, schema_index) {
                 Ok(()) => {
                     stats.commands_processed += 1;
                     // Only advance to this ID if all previous entries succeeded
@@ -190,6 +194,7 @@ fn process_entry(
     token_cache: &mut HashMap<String, i64>,
     entry: &HistoryEntry,
     stats: &mut SyncStats,
+    schema_index: &SchemaIndex,
 ) -> Result<(), CIError> {
     let command = entry.command_line.trim();
     if command.is_empty() {
@@ -259,6 +264,15 @@ fn process_entry(
     hierarchy::learn_hierarchy(conn, &tokens, &token_ids, is_success, now)?;
     stats.hierarchy_learned += tokens.len();
 
+    // Keep schema store in sync with learned command structure.
+    if let Err(e) = upsert_schema_from_tokens(conn, &tokens, schema_index) {
+        debug!(
+            command = %command,
+            error = %e,
+            "Schema learning skipped for history entry"
+        );
+    }
+
     // Extract templates from the command
     if let Err(e) = templates::extract_template(conn, command) {
         debug!("Template extraction skipped for '{}': {}", command, e);
@@ -325,8 +339,211 @@ fn count_flag_value_pairs(tokens: &[super::types::AnalyzedToken]) -> usize {
     count
 }
 
+/// Upserts schema information learned from tokenized command history.
+///
+/// This function keeps `ci_command_schemas` populated from real usage data so
+/// schema-backed suggestions are available without a separate subsystem.
+pub(crate) fn upsert_schema_from_tokens(
+    conn: &Connection,
+    tokens: &[super::types::AnalyzedToken],
+    schema_index: &SchemaIndex,
+) -> Result<(), CIError> {
+    use crate::chrome::command_edit::TokenType;
+
+    let Some(base_command) = tokens.first().map(|t| t.text.as_str()) else {
+        return Ok(());
+    };
+
+    // Embedded curated schemas are authoritative for structure.
+    if schema_index.is_curated(base_command) {
+        return Ok(());
+    }
+
+    let store = SchemaStore::new(conn);
+    let mut schema = store
+        .get(base_command)?
+        .unwrap_or_else(|| CommandSchema::new(base_command, SchemaSource::Learned));
+
+    // Track observed subcommand chains from usage.
+    let subcommand_path = extract_subcommand_path(base_command, tokens);
+    if !subcommand_path.is_empty() {
+        ensure_subcommand_path_mut(&mut schema.subcommands, &subcommand_path);
+    }
+
+    // Learn observed flags at command or subcommand scope.
+    let target_flags: &mut Vec<FlagSchema> = if subcommand_path.is_empty() {
+        &mut schema.global_flags
+    } else {
+        &mut ensure_subcommand_path_mut(&mut schema.subcommands, &subcommand_path).flags
+    };
+
+    let mut idx = 0;
+    while idx < tokens.len() {
+        let token = &tokens[idx];
+        if token.token_type != TokenType::Flag {
+            idx += 1;
+            continue;
+        }
+
+        let (flag_name, inline_value) = if let Some((name, value)) = token.text.split_once('=') {
+            (name.to_string(), Some(value.to_string()))
+        } else {
+            (token.text.clone(), None)
+        };
+
+        let mut takes_value = inline_value.is_some();
+        let mut value_type = inline_value
+            .as_deref()
+            .map(map_value_type)
+            .unwrap_or(ValueType::Bool);
+
+        if inline_value.is_none() {
+            if let Some(next) = tokens.get(idx + 1) {
+                if next.token_type != TokenType::Flag
+                    && next.text != "|"
+                    && next.text != ">"
+                    && next.text != ">>"
+                    && next.text != "<"
+                    && !next.text.ends_with('|')
+                {
+                    takes_value = true;
+                    value_type = map_value_type(&next.text);
+                }
+            }
+        }
+
+        let (short, long) = if flag_name.starts_with("--") {
+            (None, Some(flag_name))
+        } else {
+            (Some(flag_name), None)
+        };
+
+        upsert_flag(
+            target_flags,
+            FlagSchema {
+                short,
+                long,
+                value_type,
+                takes_value,
+                description: None,
+                multiple: false,
+                conflicts_with: Vec::new(),
+                requires: Vec::new(),
+            },
+        );
+
+        idx += 1;
+    }
+
+    if schema.source == SchemaSource::Learned {
+        schema.confidence = (schema.confidence + 0.02).min(1.0);
+    }
+
+    store.store(&schema)
+}
+fn extract_subcommand_path(
+    base_command: &str,
+    tokens: &[super::types::AnalyzedToken],
+) -> Vec<String> {
+    use crate::chrome::command_edit::TokenType;
+
+    let allow_argument_path = !super::tokenizer::is_compound_command(base_command);
+    let mut path = Vec::new();
+
+    for token in tokens.iter().skip(1) {
+        if token.text == "|" || token.text == ">" || token.text == ">>" || token.text == "<" {
+            break;
+        }
+
+        if token.token_type == TokenType::Flag {
+            break;
+        }
+
+        let is_subcommand_token = token.token_type == TokenType::Subcommand
+            || (allow_argument_path
+                && token.token_type == TokenType::Argument
+                && is_subcommand_candidate(&token.text));
+
+        if is_subcommand_token {
+            path.push(token.text.clone());
+            if allow_argument_path && path.len() >= 3 {
+                break;
+            }
+        } else if !path.is_empty() {
+            break;
+        }
+    }
+    path
+}
+
+fn is_subcommand_candidate(text: &str) -> bool {
+    !text.is_empty()
+        && !text.starts_with('-')
+        && !text.contains('/')
+        && !text.contains('.')
+        && !text.contains('=')
+        && text
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+}
+
+fn ensure_subcommand_path_mut<'a>(
+    subcommands: &'a mut Vec<SubcommandSchema>,
+    path: &[String],
+) -> &'a mut SubcommandSchema {
+    let name = &path[0];
+    let idx = if let Some(existing) = subcommands.iter().position(|sub| sub.name == *name) {
+        existing
+    } else {
+        subcommands.push(SubcommandSchema::new(name));
+        subcommands.len() - 1
+    };
+
+    if path.len() == 1 {
+        return &mut subcommands[idx];
+    }
+
+    ensure_subcommand_path_mut(&mut subcommands[idx].subcommands, &path[1..])
+}
+
+fn map_value_type(value: &str) -> ValueType {
+    match super::tokenizer::detect_value_type(value) {
+        Some("url") | Some("git_url") => ValueType::Url,
+        Some("path") => ValueType::File,
+        Some("port") | Some("number") | Some("port_mapping") => ValueType::Number,
+        Some("branch") => ValueType::Branch,
+        Some("remote") => ValueType::Remote,
+        _ => ValueType::Any,
+    }
+}
+
+fn upsert_flag(flags: &mut Vec<FlagSchema>, incoming: FlagSchema) {
+    let existing_idx = flags.iter().position(|flag| {
+        incoming
+            .short
+            .as_ref()
+            .is_some_and(|short| flag.matches(short))
+            || incoming
+                .long
+                .as_ref()
+                .is_some_and(|long| flag.matches(long))
+    });
+
+    if let Some(idx) = existing_idx {
+        let existing = &mut flags[idx];
+        existing.takes_value |= incoming.takes_value;
+        if existing.value_type == ValueType::Bool && incoming.value_type != ValueType::Bool {
+            existing.value_type = incoming.value_type;
+        }
+    } else {
+        flags.push(incoming);
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use command_schema_core::{CommandSchema, SchemaSource};
+
     use super::*;
 
     fn setup_test_db() -> Connection {
@@ -351,10 +568,15 @@ mod tests {
         conn
     }
 
+    fn empty_schema_index() -> crate::intelligence::schema_index::SchemaIndex {
+        crate::intelligence::schema_index::SchemaIndex::from_schemas(Vec::new())
+    }
+
     #[test]
     fn test_sync_empty_history() {
         let conn = setup_test_db();
-        let (stats, last_id) = sync_from_reedline(&conn, 0).unwrap();
+        let schema_index = empty_schema_index();
+        let (stats, last_id) = sync_from_reedline(&conn, 0, &schema_index).unwrap();
         assert_eq!(stats.commands_processed, 0);
         assert_eq!(last_id, 0);
     }
@@ -362,6 +584,7 @@ mod tests {
     #[test]
     fn test_sync_processes_entries() {
         let conn = setup_test_db();
+        let schema_index = empty_schema_index();
 
         // Insert test history
         conn.execute(
@@ -371,7 +594,7 @@ mod tests {
         )
         .unwrap();
 
-        let (stats, _) = sync_from_reedline(&conn, 0).unwrap();
+        let (stats, _) = sync_from_reedline(&conn, 0, &schema_index).unwrap();
         assert_eq!(stats.commands_processed, 1);
         assert!(stats.tokens_extracted > 0);
     }
@@ -415,6 +638,7 @@ mod tests {
     #[test]
     fn test_sync_incremental_id_tracking() {
         let conn = setup_test_db();
+        let schema_index = empty_schema_index();
 
         // Insert multiple history entries
         conn.execute(
@@ -437,7 +661,7 @@ mod tests {
         .unwrap();
 
         // First sync should process all entries
-        let (stats, last_id) = sync_from_reedline(&conn, 0).unwrap();
+        let (stats, last_id) = sync_from_reedline(&conn, 0, &schema_index).unwrap();
         assert_eq!(stats.commands_processed, 3);
         assert_eq!(last_id, 3);
 
@@ -454,7 +678,7 @@ mod tests {
         .unwrap();
 
         // Second sync should only process the new entry
-        let (stats, last_id) = sync_from_reedline(&conn, 3).unwrap();
+        let (stats, last_id) = sync_from_reedline(&conn, 3, &schema_index).unwrap();
         assert_eq!(stats.commands_processed, 1);
         assert_eq!(last_id, 4);
     }
@@ -462,6 +686,7 @@ mod tests {
     #[test]
     fn test_sync_skipped_entries_counted() {
         let conn = setup_test_db();
+        let schema_index = empty_schema_index();
 
         // Insert a valid entry
         conn.execute(
@@ -488,7 +713,7 @@ mod tests {
         .unwrap();
 
         // Sync should process 2 entries (empty command is silently skipped)
-        let (_stats, last_id) = sync_from_reedline(&conn, 0).unwrap();
+        let (_stats, last_id) = sync_from_reedline(&conn, 0, &schema_index).unwrap();
         // Empty commands are silently handled, so they count as processed
         // but produce no tokens
         assert_eq!(last_id, 3);
@@ -502,8 +727,107 @@ mod tests {
     }
 
     #[test]
+    fn test_sync_populates_schema_rows_for_seen_commands() {
+        let conn = setup_test_db();
+        let schema_index = empty_schema_index();
+        conn.execute(
+            "INSERT INTO history (id, command_line, start_timestamp, exit_status, cwd)
+             VALUES (1, 'cargo build --target wasm32-unknown-unknown', 1700000000000, 0, '/tmp')",
+            [],
+        )
+        .unwrap();
+
+        let (_stats, _last_id) = sync_from_reedline(&conn, 0, &schema_index).unwrap();
+
+        let has_command_schema: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM ci_command_schemas
+                    WHERE command = 'cargo' AND subcommand IS NULL
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(has_command_schema);
+
+        let has_subcommand_schema: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM ci_command_schemas
+                    WHERE command = 'cargo' AND subcommand = 'build'
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(has_subcommand_schema);
+    }
+
+    #[test]
+    fn test_sync_skips_schema_rows_for_curated_commands() {
+        let conn = setup_test_db();
+        let schema_index =
+            crate::intelligence::schema_index::SchemaIndex::from_schemas(vec![CommandSchema::new(
+                "cargo",
+                SchemaSource::Bootstrap,
+            )]);
+
+        conn.execute(
+            "INSERT INTO history (id, command_line, start_timestamp, exit_status, cwd)
+             VALUES (1, 'cargo build --release', 1700000000000, 0, '/tmp')",
+            [],
+        )
+        .unwrap();
+
+        let (_stats, _last_id) = sync_from_reedline(&conn, 0, &schema_index).unwrap();
+
+        let has_command_schema: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM ci_command_schemas
+                    WHERE command = 'cargo' AND subcommand IS NULL
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            !has_command_schema,
+            "curated commands should not be backfilled into ci_command_schemas"
+        );
+    }
+
+    #[test]
+    fn test_sync_learns_subcommand_path_for_unknown_base_command() {
+        let conn = setup_test_db();
+        let schema_index = empty_schema_index();
+        conn.execute(
+            "INSERT INTO history (id, command_line, start_timestamp, exit_status, cwd)
+             VALUES (1, 'tool build --format json', 1700000000000, 0, '/tmp')",
+            [],
+        )
+        .unwrap();
+
+        let (_stats, _last_id) = sync_from_reedline(&conn, 0, &schema_index).unwrap();
+
+        let has_subcommand_schema: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM ci_command_schemas
+                    WHERE command = 'tool' AND subcommand = 'build'
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(has_subcommand_schema);
+    }
+
+    #[test]
     fn test_sync_populates_hierarchy_table() {
         let conn = setup_test_db();
+        let schema_index = empty_schema_index();
 
         // Insert test history with a multi-token command
         conn.execute(
@@ -512,7 +836,7 @@ mod tests {
             [],
         ).unwrap();
 
-        let (stats, _) = sync_from_reedline(&conn, 0).unwrap();
+        let (stats, _) = sync_from_reedline(&conn, 0, &schema_index).unwrap();
         assert_eq!(stats.commands_processed, 1);
         assert!(stats.hierarchy_learned > 0, "Hierarchy should be populated");
 

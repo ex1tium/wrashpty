@@ -1,0 +1,11 @@
+Usage: node [options] [script.js] [arguments]
+
+Options:
+  -v, --version                          print Node.js version
+  -e, --eval script                      evaluate script
+      --trace-warnings                   show stack traces on process warnings
+      --max-old-space-size=SIZE         set V8's old memory section size in MiB
+
+Environment variables:
+  NODE_PATH                              ':'-separated list of directories prefixed to the module search path
+  NODE_OPTIONS                           set CLI options for launched processes

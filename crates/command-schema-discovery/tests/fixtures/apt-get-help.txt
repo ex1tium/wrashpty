@@ -1,0 +1,12 @@
+apt 2.8.3 (amd64)
+Usage: apt-get [options] command
+       apt-get [options] install|remove pkg1 [pkg2 ...]
+       apt-get [options] source pkg1 [pkg2 ...]
+
+Most used commands:
+  update - Retrieve new lists of packages
+  install - Install new packages
+  remove - Remove packages
+  source - Download source archives
+
+See apt-get(8) for more information about the available commands.

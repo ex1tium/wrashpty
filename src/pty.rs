@@ -108,8 +108,7 @@ impl Pty {
                 .as_raw_fd()
                 .context("PTY master fd not available for O_NONBLOCK")?;
             let flags = OFlag::from_bits_truncate(
-                fcntl(master_fd, FcntlArg::F_GETFL)
-                    .context("Failed to get PTY master flags")?,
+                fcntl(master_fd, FcntlArg::F_GETFL).context("Failed to get PTY master flags")?,
             );
             fcntl(master_fd, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK))
                 .context("Failed to set O_NONBLOCK on PTY master")?;

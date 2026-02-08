@@ -1,0 +1,21 @@
+usage: git [-v | --version] [-h | --help] [-C <path>] [-c <name>=<value>]
+           [--exec-path[=<path>]] [--html-path] [--man-path] [--info-path]
+           [-p | --paginate | -P | --no-pager] [--no-replace-objects] [--bare]
+           [--git-dir=<path>] [--work-tree=<path>] [--namespace=<name>]
+           [--super-prefix=<path>] [--config-env=<name>=<envvar>]
+           <command> [<args>]
+
+Available Commands:
+   clone     Clone a repository into a new directory
+   init      Create an empty Git repository or reinitialize an existing one
+   add       Add file contents to the index
+   mv        Move or rename a file, a directory, or a symlink
+   restore   Restore working tree files
+   rm        Remove files from the working tree and from the index
+   diff      Show changes between commits, commit and working tree, etc
+   show      Show various types of objects
+   status    Show the working tree status
+
+flags:
+  -h, --help     show this help message
+  -v, --version  show version info

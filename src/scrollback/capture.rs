@@ -8,10 +8,7 @@ pub enum CapturedLine {
     Append(Vec<u8>),
     /// Overwrite an existing line in the buffer.
     /// `lines_back` is the distance from the end of the buffer (1 = last line, 2 = second-to-last).
-    Overwrite {
-        lines_back: usize,
-        content: Vec<u8>,
-    },
+    Overwrite { lines_back: usize, content: Vec<u8> },
     /// Erase lines from `lines_back` to the end of the buffer.
     /// Used when ESC[J (erase below) is encountered during overwrite mode.
     EraseBelow { lines_back: usize },
@@ -517,10 +514,7 @@ mod tests {
 
     /// Collects feed output as content bytes only (unwraps Append variants).
     fn feed_content(state: &mut CaptureState, data: &[u8]) -> Vec<Vec<u8>> {
-        state
-            .feed(data)
-            .map(|cl| cl.unwrap_append())
-            .collect()
+        state.feed(data).map(|cl| cl.unwrap_append()).collect()
     }
 
     #[test]
@@ -913,9 +907,7 @@ mod tests {
         state.feed(b"line1\nline2\nline3\n").for_each(drop);
 
         // Three ESC M = cursor up 3 lines
-        let lines: Vec<_> = state
-            .feed(b"\x1bM\x1bM\x1bMnewA\nnewB\nnewC\n")
-            .collect();
+        let lines: Vec<_> = state.feed(b"\x1bM\x1bM\x1bMnewA\nnewB\nnewC\n").collect();
         assert_eq!(lines.len(), 3);
         assert_eq!(
             lines[0],
@@ -946,9 +938,7 @@ mod tests {
         state.feed(b"line1\nline2\nline3\n").for_each(drop);
 
         // Cursor up 3, then cursor down 1 = net up 2
-        let lines: Vec<_> = state
-            .feed(b"\x1b[3A\x1b[1BnewA\nnewB\n")
-            .collect();
+        let lines: Vec<_> = state.feed(b"\x1b[3A\x1b[1BnewA\nnewB\n").collect();
         assert_eq!(lines.len(), 2);
         assert_eq!(
             lines[0],
@@ -999,9 +989,7 @@ mod tests {
         state.feed(b"a\nb\nc\nd\n").for_each(drop);
 
         // ESC[2A (up 2) + ESC M (up 1) = total up 3
-        let lines: Vec<_> = state
-            .feed(b"\x1b[2A\x1bMnew1\nnew2\nnew3\n")
-            .collect();
+        let lines: Vec<_> = state.feed(b"\x1b[2A\x1bMnew1\nnew2\nnew3\n").collect();
         assert_eq!(lines.len(), 3);
         assert_eq!(
             lines[0],
@@ -1199,16 +1187,15 @@ mod tests {
             b"\x1b[33m\r0% [Working]\x1b[0m\r              \rGet:1 https://example.com stable InRelease [3917 B]\r\n",
         ));
         // "Fetched" summary with download progress cleared
-        all_lines.extend(state.feed(
-            b"\x1b[33m\r100% [Working]\x1b[0m\r              \rFetched 3917 B in 1s\r\n",
-        ));
+        all_lines
+            .extend(state.feed(
+                b"\x1b[33m\r100% [Working]\x1b[0m\r              \rFetched 3917 B in 1s\r\n",
+            ));
         // Progress phase: CR-CR-LF terminated
-        all_lines.extend(state.feed(
-            b"\rReading package lists... 0%\r\rReading package lists... Done\r\r\n",
-        ));
-        all_lines.extend(state.feed(
-            b"\rBuilding dependency tree... Done\r\r\n",
-        ));
+        all_lines.extend(
+            state.feed(b"\rReading package lists... 0%\r\rReading package lists... Done\r\r\n"),
+        );
+        all_lines.extend(state.feed(b"\rBuilding dependency tree... Done\r\r\n"));
 
         // Should have 4 lines
         assert_eq!(all_lines.len(), 4);
@@ -1217,13 +1204,7 @@ mod tests {
             b"Get:1 https://example.com stable InRelease [3917 B]"
         );
         assert_eq!(all_lines[1].content(), b"Fetched 3917 B in 1s");
-        assert_eq!(
-            all_lines[2].content(),
-            b"Reading package lists... Done"
-        );
-        assert_eq!(
-            all_lines[3].content(),
-            b"Building dependency tree... Done"
-        );
+        assert_eq!(all_lines[2].content(), b"Reading package lists... Done");
+        assert_eq!(all_lines[3].content(), b"Building dependency tree... Done");
     }
 }

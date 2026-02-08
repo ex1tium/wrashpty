@@ -1,0 +1,6 @@
+SUMMARY OF LESS COMMANDS
+  h                 Display this help.
+  q                 Exit.
+  e                 Forward one line.
+  ESC-SPACE         Forward one window, but don't stop at end-of-file.
+  ctrl-LeftArrow    Move cursor left one word.

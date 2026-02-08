@@ -6,7 +6,6 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::chrome::command_edit::TokenType;
-use crate::intelligence::tokenizer;
 
 // ============================================================================
 // Suggestion Types
@@ -52,6 +51,9 @@ pub enum SuggestionSource {
     /// From learned command hierarchy (primary source).
     LearnedHierarchy,
 
+    /// From curated command schemas.
+    Schema,
+
     /// From learned token sequences.
     LearnedSequence,
 
@@ -86,6 +88,7 @@ impl SuggestionSource {
         match self {
             Self::UserPattern | Self::UserAlias => 2.0,
             Self::SessionTransition => 1.5,
+            Self::Schema => 1.1,
             Self::LearnedHierarchy
             | Self::LearnedSequence
             | Self::LearnedPipe
@@ -98,6 +101,7 @@ impl SuggestionSource {
     pub fn label(&self) -> &'static str {
         match self {
             Self::LearnedHierarchy => "learned",
+            Self::Schema => "schema",
             Self::LearnedSequence => "seq",
             Self::LearnedPipe => "pipe",
             Self::LearnedFlagValue => "flag",
@@ -765,8 +769,9 @@ pub fn build_context(
         })
         .collect();
 
-    // Determine position type
-    let position = determine_position_type(tokens, partial);
+    let base_command = preceding_tokens.first().map(|t| t.text.as_str());
+    let position =
+        crate::intelligence::tokenizer::determine_position_type(&preceding_tokens, base_command);
 
     SuggestionContext {
         preceding_tokens,
@@ -777,48 +782,4 @@ pub fn build_context(
         session,
         last_command,
     }
-}
-
-/// Determines the position type based on preceding tokens.
-fn determine_position_type(tokens: &[CommandToken], _partial: &str) -> PositionType {
-    if tokens.is_empty() {
-        return PositionType::Command;
-    }
-
-    let last_token = &tokens[tokens.len() - 1];
-
-    // After pipe
-    if last_token.text == "|" || last_token.text.ends_with('|') {
-        return PositionType::AfterPipe;
-    }
-
-    // After redirect
-    if last_token.text == ">" || last_token.text == ">>" || last_token.text == "<" {
-        return PositionType::AfterRedirect;
-    }
-
-    // Get base command for context-aware flag checking
-    let base_command = tokens.first().map(|t| t.text.as_str());
-
-    // After flag (potential flag value)
-    if last_token.token_type == TokenType::Flag {
-        // Check if this flag typically takes a value (use canonical implementation)
-        // Allow non-empty partials so flag-value suggestions continue while typing
-        if tokenizer::flag_expects_value(&last_token.text, base_command) {
-            return PositionType::FlagValue {
-                flag: last_token.text.clone(),
-            };
-        }
-    }
-
-    // First position after command (subcommand)
-    if tokens.len() == 1 {
-        let cmd = &tokens[0].text;
-        // Use canonical implementation from tokenizer
-        if tokenizer::is_compound_command(cmd) {
-            return PositionType::Subcommand;
-        }
-    }
-
-    PositionType::Argument
 }

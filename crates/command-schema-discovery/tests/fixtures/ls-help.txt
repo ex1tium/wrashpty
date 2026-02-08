@@ -1,0 +1,9 @@
+Usage: ls [OPTION]... [FILE]...
+List information about the FILEs.
+
+  -a, --all                  do not ignore entries starting with .
+  -l                         use a long listing format
+  -h, --human-readable       with -l, print sizes in human readable format
+      --color[=WHEN]         colorize the output; WHEN can be always, auto, or never
+      --help                 display this help and exit
+      --version              output version information and exit

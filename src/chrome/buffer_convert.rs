@@ -268,12 +268,18 @@ mod tests {
         let ansi = buffer_to_ansi(&buffer, area);
 
         // Should contain "你" exactly once and "a" once, no spurious space between them
-        assert!(ansi.contains("你a"), "Wide char followed by ASCII: got {ansi:?}");
+        assert!(
+            ansi.contains("你a"),
+            "Wide char followed by ASCII: got {ansi:?}"
+        );
         // The continuation space should NOT appear
         let after_cursor = ansi.split("\x1b[1;1H").nth(1).unwrap_or("");
         // Strip style codes to get visible content
         let visible: String = strip_ansi_for_test(after_cursor);
-        assert_eq!(visible, "你a ", "Expected 'you' + 'a' + trailing space, got: {visible:?}");
+        assert_eq!(
+            visible, "你a ",
+            "Expected 'you' + 'a' + trailing space, got: {visible:?}"
+        );
     }
 
     #[test]
