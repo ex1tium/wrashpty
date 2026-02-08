@@ -145,7 +145,7 @@ All test functions **must** follow the pattern `test_<fn>_<scenario>_<expected>`
 | `<expected>` | Observable outcome | `returns_none`, `shows_branch`, `preserves_count` |
 
 **Good names**:
-```
+```text
 test_shell_quote_path_with_spaces_returns_single_quoted
 test_render_when_dirty_shows_branch_and_dirty_symbol
 test_undo_after_delete_restores_token_count
@@ -154,7 +154,7 @@ test_check_dangerous_command_detects_rm_rf
 ```
 
 **Bad names** (too vague—don't use):
-```
+```text
 test_shell_quote          # missing scenario + expected
 test_undo                 # what scenario? what result?
 test_format_duration      # which case?

@@ -20,6 +20,7 @@ pub mod theme;
 pub use core::{Chrome, NotificationStyle, SizeCheckResult};
 pub use segments::{GitInfo, ScrollInfo, TopbarState};
 
+/// Test utilities for normalizing strings in assertions (e.g., ANSI stripping).
 #[cfg(test)]
 pub(crate) mod test_utils {
     /// Strip ANSI escape sequences for test assertions.

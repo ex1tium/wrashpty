@@ -328,7 +328,11 @@ impl TopbarRegistry {
         if total_width > max_width {
             if let Some(seg) = right_segments.first_mut() {
                 let overflow = total_width - max_width;
-                if seg.display_width > overflow {
+                if overflow >= seg.display_width {
+                    total_width -= seg.display_width;
+                    seg.display_width = 0;
+                    seg.content = truncate_ansi_content(&seg.content, 0);
+                } else {
                     seg.display_width -= overflow;
                     seg.content = truncate_ansi_content(&seg.content, seg.display_width);
                     total_width -= overflow;
@@ -337,9 +341,14 @@ impl TopbarRegistry {
             if total_width > max_width {
                 if let Some(seg) = left_segments.first_mut() {
                     let overflow = total_width - max_width;
-                    if seg.display_width > overflow {
+                    if overflow >= seg.display_width {
+                        total_width -= seg.display_width;
+                        seg.display_width = 0;
+                        seg.content = truncate_ansi_content(&seg.content, 0);
+                    } else {
                         seg.display_width -= overflow;
                         seg.content = truncate_ansi_content(&seg.content, seg.display_width);
+                        total_width -= overflow;
                     }
                 }
             }
