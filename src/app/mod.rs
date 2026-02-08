@@ -55,7 +55,7 @@ use crate::config::Config;
 use crate::editor::{Editor, EditorResult};
 use crate::history_store::HistoryStore;
 use crate::prompt::WrashPrompt;
-use crate::pty::Pty;
+use crate::pty::{EchoGuard, Pty};
 use crate::pump::{Pump, PumpResult};
 use crate::signals::SignalHandler;
 use crate::terminal::TerminalGuard;
@@ -233,6 +233,9 @@ pub struct App {
 
     /// Timestamp when injection started (for timeout).
     injection_start: Option<Instant>,
+    /// Echo suppression guard held during Injecting mode to prevent duplicated
+    /// command echos from being captured into scrollback.
+    injection_echo_guard: Option<EchoGuard>,
 
     // Command execution metadata for context bar
     /// Current working directory (of the shell, not the parent process).
@@ -379,6 +382,7 @@ impl App {
             pending_dedupe_confirmation: false,
             pending_wipe_ci_confirmation: false,
             injection_start: None,
+            injection_echo_guard: None,
             current_cwd,
             git_branch: None,
             git_dirty: false,
@@ -1702,7 +1706,7 @@ impl App {
     /// Injects the pending command into the PTY.
     ///
     /// Creates an EchoGuard to suppress echo, writes the command,
-    /// and transitions to Injecting mode.
+    /// and keeps suppression active until execution starts.
     fn inject_pending_command(&mut self) -> Result<()> {
         let command = self.pending_command.take().ok_or_else(|| {
             anyhow::anyhow!("inject_pending_command called without pending command")
@@ -1722,8 +1726,12 @@ impl App {
         // Transition to Injecting mode first (syncs PTY size, records start time)
         self.transition_to_injecting()?;
 
-        // Create echo guard to suppress command echo
-        let _guard = self
+        // Ensure no stale guard remains from a previous injection path.
+        self.injection_echo_guard = None;
+
+        // Create echo guard to suppress command echo and keep it alive until
+        // we leave Injecting mode.
+        let guard = self
             .pty
             .create_echo_guard()
             .context("Failed to create echo guard")?;
@@ -1733,7 +1741,8 @@ impl App {
             .write_command(&command)
             .context("Failed to write command to PTY")?;
 
-        // Guard drops here, restoring echo
+        // Keep guard alive across Injecting so late PTY echo doesn't leak.
+        self.injection_echo_guard = Some(guard);
 
         Ok(())
     }
