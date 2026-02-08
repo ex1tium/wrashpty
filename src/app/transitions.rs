@@ -31,6 +31,7 @@ impl App {
     pub(super) fn transition_to_edit(&mut self) {
         let from_mode = self.mode;
         info!(from = ?from_mode, to = ?Mode::Edit, "Mode transition");
+        self.injection_echo_guard = None;
 
         // Calculate command duration if coming from command execution
         if let Some(start) = self.command_start_time.take() {
@@ -163,6 +164,7 @@ impl App {
     /// are forwarded as bytes to the PTY rather than generating signals.
     pub(super) fn transition_to_passthrough(&mut self) -> Result<()> {
         info!(from = ?self.mode, to = ?Mode::Passthrough, "Mode transition");
+        self.injection_echo_guard = None;
 
         // Ensure raw mode is active - reedline may have toggled terminal modes.
         // This is critical for control character passthrough (Ctrl+C -> 0x03, not SIGINT).
@@ -275,6 +277,7 @@ impl App {
     /// Transitions to Terminating mode.
     pub(super) fn transition_to_terminating(&mut self) {
         info!(from = ?self.mode, to = ?Mode::Terminating, "Mode transition");
+        self.injection_echo_guard = None;
 
         // End intelligence session
         if let Ok(mut store) = self.history_store.lock() {
