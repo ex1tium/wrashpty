@@ -186,7 +186,7 @@ mod tests {
     }
 
     #[test]
-    fn test_learn_pipe_chains() {
+    fn test_learn_pipe_chains_two_transitions_inserted() {
         let conn = setup_test_db();
         let mut cache = HashMap::new();
         let now = chrono::Utc::now().timestamp();
@@ -208,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn test_query_pipe_chains() {
+    fn test_query_pipe_chains_returns_sorted_by_frequency() {
         let conn = setup_test_db();
         let mut cache = HashMap::new();
         let now = chrono::Utc::now().timestamp();

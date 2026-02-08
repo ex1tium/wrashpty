@@ -1,7 +1,7 @@
 //! Export and import functionality for pattern sharing.
 
 use rusqlite::Connection;
-use tracing::info;
+use tracing::{debug, info};
 
 use super::error::CIError;
 use super::schema::storage::SchemaStore;
@@ -412,7 +412,8 @@ fn import_within_transaction(
                     stats.skipped += 1;
                 }
             }
-            Err(_) => {
+            Err(e) => {
+                debug!("Skipped sequence import: {}", e);
                 stats.skipped += 1;
             }
         }
@@ -428,7 +429,8 @@ fn import_within_transaction(
                     stats.skipped += 1;
                 }
             }
-            Err(_) => {
+            Err(e) => {
+                debug!("Skipped pipe chain import: {}", e);
                 stats.skipped += 1;
             }
         }
@@ -444,7 +446,8 @@ fn import_within_transaction(
                     stats.skipped += 1;
                 }
             }
-            Err(_) => {
+            Err(e) => {
+                debug!("Skipped template import: {}", e);
                 stats.skipped += 1;
             }
         }
@@ -460,7 +463,8 @@ fn import_within_transaction(
                     stats.skipped += 1;
                 }
             }
-            Err(_) => {
+            Err(e) => {
+                debug!("Skipped user pattern import: {}", e);
                 stats.skipped += 1;
             }
         }
@@ -476,7 +480,8 @@ fn import_within_transaction(
                     stats.skipped += 1;
                 }
             }
-            Err(_) => {
+            Err(e) => {
+                debug!("Skipped alias import: {}", e);
                 stats.skipped += 1;
             }
         }

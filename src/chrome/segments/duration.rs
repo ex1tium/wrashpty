@@ -95,12 +95,12 @@ mod tests {
     }
 
     #[test]
-    fn test_duration_segment_id() {
+    fn test_duration_id_returns_expected() {
         assert_eq!(DurationSegment.id(), "duration");
     }
 
     #[test]
-    fn test_duration_segment_hidden_when_fast() {
+    fn test_duration_render_when_fast_returns_none() {
         let theme = Theme::for_preset(ThemePreset::Amber);
         let symbols = Symbols::for_set(SymbolSet::Fallback);
         let mut state = test_state();
@@ -111,7 +111,7 @@ mod tests {
     }
 
     #[test]
-    fn test_duration_segment_shown_when_slow() {
+    fn test_duration_render_when_slow_shows_segment() {
         let theme = Theme::for_preset(ThemePreset::Amber);
         let symbols = Symbols::for_set(SymbolSet::Fallback);
         let mut state = test_state();
@@ -126,7 +126,7 @@ mod tests {
     }
 
     #[test]
-    fn test_duration_segment_hidden_when_none() {
+    fn test_duration_render_when_none_returns_none() {
         let theme = Theme::for_preset(ThemePreset::Amber);
         let symbols = Symbols::for_set(SymbolSet::Fallback);
         let state = test_state();
@@ -136,13 +136,13 @@ mod tests {
     }
 
     #[test]
-    fn test_format_duration_seconds() {
+    fn test_format_duration_with_seconds_formats_decimal() {
         assert_eq!(format_duration(Duration::from_millis(500)), "0.5s");
         assert_eq!(format_duration(Duration::from_secs(5)), "5.0s");
     }
 
     #[test]
-    fn test_format_duration_minutes() {
+    fn test_format_duration_with_minutes_formats_min_sec() {
         assert_eq!(format_duration(Duration::from_secs(90)), "1m30s");
         assert_eq!(format_duration(Duration::from_secs(120)), "2m0s");
     }

@@ -4,7 +4,9 @@
 
 use unicode_width::UnicodeWidthStr;
 
-use super::{RenderedSegment, TopbarSegment, TopbarState, color_to_bg_ansi, color_to_fg_ansi};
+use super::{
+    RenderedSegment, SegmentAlign, TopbarSegment, TopbarState, color_to_bg_ansi, color_to_fg_ansi,
+};
 use crate::chrome::symbols::Symbols;
 use crate::chrome::theme::Theme;
 
@@ -43,7 +45,7 @@ impl TopbarSegment for StatusSegment {
             content,
             display_width,
             priority: 0, // Always show
-            align: super::SegmentAlign::Left,
+            align: SegmentAlign::Left,
         })
     }
 }
