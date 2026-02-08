@@ -603,12 +603,16 @@ impl Chrome {
         let stdout = io::stdout();
         let mut out = stdout.lock();
 
-        // Set scroll region from panel_height + 1 to total_rows
-        // Panels occupy rows 1 through height, content is height+1 to total_rows
+        // Set scroll region: panels occupy rows 1..height, PTY content is height+1..total_rows
         let top_row = height + 1;
-        write!(out, "\x1b[{};{}r", top_row, total_rows)?;
+        if top_row > total_rows {
+            // Fullscreen: panel covers entire terminal, reset scroll region
+            write!(out, "\x1b[r")?;
+        } else {
+            write!(out, "\x1b[{};{}r", top_row, total_rows)?;
+        }
 
-        // Position cursor at bottom of scroll region
+        // Position cursor at bottom of terminal
         write!(out, "\x1b[{};1H", total_rows)?;
 
         out.flush()?;
@@ -708,9 +712,14 @@ impl Chrome {
 
         // Update scroll region
         let top_row = new_height + 1;
-        write!(out, "\x1b[{};{}r", top_row, new_total_rows)?;
+        if top_row > new_total_rows {
+            // Fullscreen: panel covers entire terminal, reset scroll region
+            write!(out, "\x1b[r")?;
+        } else {
+            write!(out, "\x1b[{};{}r", top_row, new_total_rows)?;
+        }
 
-        // Position cursor at bottom of scroll region
+        // Position cursor at bottom of terminal
         write!(out, "\x1b[{};1H", new_total_rows)?;
 
         out.flush()?;
