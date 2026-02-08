@@ -25,21 +25,21 @@ schema-extract-all:
 	cargo run -p command-schema-discovery -- extract --commands "$$commands" --output "$(SCHEMA_OUTPUT)"
 
 schema-extract-superuser-installed:
-	@commands="$$(tr ',' '\n' < "$(SUPERUSER_CSV)" | sed 's/\r//g' | sed '/^\s*$$/d' | while read -r c; do command -v "$$c" >/dev/null 2>&1 && printf '%s\n' "$$c"; done | awk '!seen[$$0]++' | paste -sd, -)"; \
-	cargo run -p command-schema-discovery -- extract --commands "$$commands" --output "$(SCHEMA_OUTPUT)"
+	@commands="$$(tr -d '\r\n' < "$(SUPERUSER_CSV)")"; \
+	cargo run -p command-schema-discovery -- extract --commands "$$commands" --installed-only --output "$(SCHEMA_OUTPUT)"
 
 schema-extract-devops-installed:
-	@commands="$$(tr ',' '\n' < "$(DEVOPS_CSV)" | sed 's/\r//g' | sed '/^\s*$$/d' | while read -r c; do command -v "$$c" >/dev/null 2>&1 && printf '%s\n' "$$c"; done | awk '!seen[$$0]++' | paste -sd, -)"; \
-	cargo run -p command-schema-discovery -- extract --commands "$$commands" --output "$(SCHEMA_OUTPUT)"
+	@commands="$$(tr -d '\r\n' < "$(DEVOPS_CSV)")"; \
+	cargo run -p command-schema-discovery -- extract --commands "$$commands" --installed-only --output "$(SCHEMA_OUTPUT)"
 
 schema-extract-custom-installed:
-	@commands="$$(tr ',' '\n' < "$(CUSTOM_CSV)" | sed 's/\r//g' | sed '/^\s*$$/d' | while read -r c; do command -v "$$c" >/dev/null 2>&1 && printf '%s\n' "$$c"; done | awk '!seen[$$0]++' | paste -sd, -)"; \
-	if [ -z "$$commands" ]; then echo "No installed commands found from custom-tools.csv"; exit 1; fi; \
-	cargo run -p command-schema-discovery -- extract --commands "$$commands" --output "$(SCHEMA_OUTPUT)"
+	@commands="$$(tr -d '\r\n' < "$(CUSTOM_CSV)")"; \
+	if [ -z "$$commands" ]; then echo "custom-tools.csv is empty"; exit 1; fi; \
+	cargo run -p command-schema-discovery -- extract --commands "$$commands" --installed-only --output "$(SCHEMA_OUTPUT)"
 
 schema-extract-all-installed:
-	@commands="$$(cat "$(SUPERUSER_CSV)" "$(DEVOPS_CSV)" "$(CUSTOM_CSV)" | tr ',' '\n' | sed 's/\r//g' | sed '/^\s*$$/d' | awk '!seen[$$0]++' | while read -r c; do command -v "$$c" >/dev/null 2>&1 && printf '%s\n' "$$c"; done | paste -sd, -)"; \
-	cargo run -p command-schema-discovery -- extract --commands "$$commands" --output "$(SCHEMA_OUTPUT)"
+	@commands="$$(cat "$(SUPERUSER_CSV)" "$(DEVOPS_CSV)" "$(CUSTOM_CSV)" | tr ',' '\n' | sed 's/\r//g' | sed '/^\s*$$/d' | awk '!seen[$$0]++' | paste -sd, -)"; \
+	cargo run -p command-schema-discovery -- extract --commands "$$commands" --installed-only --output "$(SCHEMA_OUTPUT)"
 
 schema-validate:
 	cargo run -p command-schema-discovery -- validate "$(SCHEMA_OUTPUT)"

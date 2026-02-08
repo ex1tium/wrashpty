@@ -2,6 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Version of the schema contract (semver).
+pub const SCHEMA_CONTRACT_VERSION: &str = "1.0.0";
+
 /// Source of schema information.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SchemaSource {
@@ -211,6 +214,12 @@ impl SubcommandSchema {
 /// Complete schema for a command.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CommandSchema {
+    /// Schema contract version (populated from [`SCHEMA_CONTRACT_VERSION`]).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub schema_version: Option<String>,
     /// The base command name (e.g., "git", "docker")
     pub command: String,
     /// Short description of the command

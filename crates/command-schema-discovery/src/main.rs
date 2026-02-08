@@ -1,10 +1,11 @@
 use std::fs;
+use std::io::Read;
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 use command_schema_discovery::discover::{
     DiscoverConfig, build_report_bundle, bundle_schema_files, collect_schema_paths,
-    discover_and_extract, load_and_validate_schemas,
+    discover_and_extract, failure_code_summary, load_and_validate_schemas,
 };
 use command_schema_discovery::extractor::{
     DEFAULT_MIN_CONFIDENCE, DEFAULT_MIN_COVERAGE, ExtractionQualityPolicy,
@@ -28,6 +29,10 @@ enum Command {
     Validate(ValidateArgs),
     /// Bundle schema JSON files into a SchemaPackage file.
     Bundle(BundleArgs),
+    /// Parse help text from stdin without executing commands.
+    ParseStdin(ParseStdinArgs),
+    /// Parse help text from a file without executing commands.
+    ParseFile(ParseFileArgs),
 }
 
 #[derive(Debug, Args)]
@@ -56,6 +61,21 @@ struct ExtractArgs {
     /// Keep low-quality schemas instead of rejecting them.
     #[arg(long)]
     allow_low_quality: bool,
+    /// Only extract schemas for commands installed on the system.
+    #[arg(long)]
+    installed_only: bool,
+    /// Number of parallel extraction jobs (default: number of CPUs).
+    #[arg(long)]
+    jobs: Option<usize>,
+    /// Directory for caching extraction results.
+    #[arg(long)]
+    cache_dir: Option<PathBuf>,
+    /// Disable caching entirely.
+    #[arg(long)]
+    no_cache: bool,
+    /// Output format for schema and report files (default: json).
+    #[arg(long, default_value = "json")]
+    format: command_schema_discovery::output::OutputFormat,
 }
 
 #[derive(Debug, Args)]
@@ -81,6 +101,35 @@ struct BundleArgs {
     description: Option<String>,
 }
 
+#[derive(Debug, Args)]
+struct ParseStdinArgs {
+    /// Command name for the help text being parsed.
+    #[arg(long)]
+    command: String,
+    /// Output both schema and extraction report.
+    #[arg(long)]
+    with_report: bool,
+    /// Output format.
+    #[arg(long, default_value = "json")]
+    format: command_schema_discovery::output::OutputFormat,
+}
+
+#[derive(Debug, Args)]
+struct ParseFileArgs {
+    /// Command name for the help text being parsed.
+    #[arg(long)]
+    command: String,
+    /// Path to file containing help text.
+    #[arg(long)]
+    input: PathBuf,
+    /// Output both schema and extraction report.
+    #[arg(long)]
+    with_report: bool,
+    /// Output format.
+    #[arg(long, default_value = "json")]
+    format: command_schema_discovery::output::OutputFormat,
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -88,6 +137,8 @@ fn main() {
         Command::Extract(args) => run_extract(args),
         Command::Validate(args) => run_validate(args),
         Command::Bundle(args) => run_bundle(args),
+        Command::ParseStdin(args) => run_parse_stdin(args),
+        Command::ParseFile(args) => run_parse_file(args),
     };
 
     if let Err(err) = result {
@@ -130,15 +181,27 @@ fn run_extract(args: ExtractArgs) -> Result<(), String> {
             min_coverage: args.min_coverage,
             allow_low_quality: args.allow_low_quality,
         },
+        installed_only: args.installed_only,
+        jobs: args.jobs,
+        cache_dir: if args.no_cache {
+            None
+        } else {
+            Some(
+                args.cache_dir
+                    .unwrap_or_else(command_schema_discovery::cache::SchemaCache::default_dir),
+            )
+        },
     };
 
+    let format = args.format;
     let outcome = discover_and_extract(&config, PACKAGE_VERSION);
+
+    let ext = format_extension(format);
 
     let mut written = 0usize;
     for schema in &outcome.package.schemas {
-        let path = args.output.join(format!("{}.json", schema.command));
-        let raw = serde_json::to_string_pretty(schema)
-            .map_err(|err| format!("Failed to serialize schema '{}': {err}", schema.command))?;
+        let path = args.output.join(format!("{}.{ext}", schema.command));
+        let raw = command_schema_discovery::output::format_schema(schema, format)?;
         fs::write(&path, raw)
             .map_err(|err| format!("Failed to write '{}': {err}", path.display()))?;
         written += 1;
@@ -151,18 +214,31 @@ fn run_extract(args: ExtractArgs) -> Result<(), String> {
         outcome.reports.clone(),
         outcome.failures.clone(),
     );
-    let report_path = args.output.join("extraction-report.json");
-    let report_json = serde_json::to_string_pretty(&report_bundle)
-        .map_err(|err| format!("Failed to serialize extraction report: {err}"))?;
-    fs::write(&report_path, report_json)
+    let report_path = args.output.join(format!("extraction-report.{ext}"));
+    let report_raw = format_report_bundle(&report_bundle, format)?;
+    fs::write(&report_path, report_raw)
         .map_err(|err| format!("Failed to write '{}': {err}", report_path.display()))?;
 
     if !outcome.failures.is_empty() {
-        eprintln!(
-            "{} extraction failure(s): {}",
-            outcome.failures.len(),
-            outcome.failures.join(", ")
-        );
+        let summary = failure_code_summary(&outcome.reports);
+        if summary.is_empty() {
+            eprintln!(
+                "{} extraction failure(s): {}",
+                outcome.failures.len(),
+                outcome.failures.join(", ")
+            );
+        } else {
+            let breakdown: Vec<String> = summary
+                .iter()
+                .map(|(code, count)| format!("{count} {code}"))
+                .collect();
+            eprintln!(
+                "{} extraction failure(s) ({}): {}",
+                outcome.failures.len(),
+                breakdown.join(", "),
+                outcome.failures.join(", ")
+            );
+        }
     }
 
     if !outcome.warnings.is_empty() {
@@ -213,6 +289,112 @@ fn run_bundle(args: BundleArgs) -> Result<(), String> {
     );
 
     Ok(())
+}
+
+fn run_parse_stdin(args: ParseStdinArgs) -> Result<(), String> {
+    let mut help_text = String::new();
+    std::io::stdin()
+        .read_to_string(&mut help_text)
+        .map_err(|err| format!("Failed to read stdin: {err}"))?;
+    run_parse_help_text(&args.command, &help_text, args.with_report, args.format)
+}
+
+fn run_parse_file(args: ParseFileArgs) -> Result<(), String> {
+    let help_text = fs::read_to_string(&args.input)
+        .map_err(|err| format!("Failed to read '{}': {err}", args.input.display()))?;
+    run_parse_help_text(&args.command, &help_text, args.with_report, args.format)
+}
+
+fn run_parse_help_text(
+    command: &str,
+    help_text: &str,
+    with_report: bool,
+    format: command_schema_discovery::output::OutputFormat,
+) -> Result<(), String> {
+    use command_schema_discovery::output::{OutputFormat, format_report, format_schema};
+
+    if with_report {
+        let run = command_schema_discovery::parse_help_text_with_report(
+            command,
+            help_text,
+            ExtractionQualityPolicy::permissive(),
+        );
+
+        match format {
+            OutputFormat::Json => {
+                #[derive(serde::Serialize)]
+                struct ParseOutput {
+                    #[serde(skip_serializing_if = "Option::is_none")]
+                    schema: Option<command_schema_core::CommandSchema>,
+                    report: command_schema_discovery::report::ExtractionReport,
+                }
+
+                let output = ParseOutput {
+                    schema: run.result.schema,
+                    report: run.report,
+                };
+                let json = serde_json::to_string_pretty(&output)
+                    .map_err(|e| format!("Failed to serialize output: {e}"))?;
+                println!("{json}");
+            }
+            _ => {
+                if let Some(ref schema) = run.result.schema {
+                    print!("{}", format_schema(schema, format)?);
+                }
+                print!("{}", format_report(&run.report, format)?);
+            }
+        }
+    } else {
+        let result = command_schema_discovery::parse_help_text(command, help_text);
+        match result.schema {
+            Some(schema) => {
+                let output = format_schema(&schema, format)?;
+                println!("{output}");
+            }
+            None => {
+                return Err(format!(
+                    "Failed to parse help text for '{}': {}",
+                    command,
+                    result.warnings.join("; ")
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Returns the file extension for the given output format.
+fn format_extension(format: command_schema_discovery::output::OutputFormat) -> &'static str {
+    use command_schema_discovery::output::OutputFormat;
+    match format {
+        OutputFormat::Json => "json",
+        OutputFormat::Yaml => "yaml",
+        OutputFormat::Markdown => "md",
+        OutputFormat::Table => "txt",
+    }
+}
+
+/// Formats an [`ExtractionReportBundle`] in the requested output format.
+fn format_report_bundle(
+    bundle: &command_schema_discovery::report::ExtractionReportBundle,
+    format: command_schema_discovery::output::OutputFormat,
+) -> Result<String, String> {
+    use command_schema_discovery::output::OutputFormat;
+    match format {
+        OutputFormat::Json => serde_json::to_string_pretty(bundle)
+            .map_err(|e| format!("JSON serialization failed: {e}")),
+        OutputFormat::Yaml => serde_yaml::to_string(bundle)
+            .map_err(|e| format!("YAML serialization failed: {e}")),
+        OutputFormat::Markdown | OutputFormat::Table => {
+            let mut out = String::new();
+            for report in &bundle.reports {
+                out.push_str(
+                    &command_schema_discovery::output::format_report(report, format)?,
+                );
+            }
+            Ok(out)
+        }
+    }
 }
 
 fn parse_csv_list(raw: Option<String>) -> Vec<String> {

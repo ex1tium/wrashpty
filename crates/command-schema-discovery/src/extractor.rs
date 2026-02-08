@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 use tracing::{debug, info};
 
 use super::parser::{FormatScore, HelpParser};
-use super::report::{ExtractionReport, FormatScoreReport, ProbeAttemptReport, QualityTier};
+use super::report::{
+    ExtractionReport, FailureCode, FormatScoreReport, ProbeAttemptReport, QualityTier,
+};
 use command_schema_core::{ExtractionResult, HelpFormat, SubcommandSchema, validate_schema};
 
 /// Maximum depth for recursive subcommand probing.
@@ -71,6 +73,7 @@ struct ProbeAttempt {
     timed_out: bool,
     error: Option<String>,
     rejection_reason: Option<String>,
+    failure_code: Option<FailureCode>,
     output_source: Option<String>,
     output_len: usize,
     output_preview: Option<String>,
@@ -86,6 +89,7 @@ impl ProbeAttempt {
             timed_out: false,
             error: None,
             rejection_reason: None,
+            failure_code: None,
             output_source: None,
             output_len: 0,
             output_preview: None,
@@ -314,7 +318,9 @@ fn try_direct_probe(
                         };
                     }
 
-                    attempt.rejection_reason = Some(classify_rejection_reason(&help_text));
+                    let classification = classify_rejection(&help_text);
+                    attempt.rejection_reason = Some(classification.reason);
+                    attempt.failure_code = Some(classification.failure_code);
                     DirectProbeOutcome {
                         attempt,
                         accepted_output: None,
@@ -323,6 +329,7 @@ fn try_direct_probe(
                 }
                 Ok(None) => {
                     attempt.timed_out = true;
+                    attempt.failure_code = Some(FailureCode::Timeout);
                     debug!(
                         command = ?cmd_parts,
                         timeout_ms = HELP_TIMEOUT_MS,
@@ -351,11 +358,15 @@ fn try_direct_probe(
         }
         Err(e) => {
             if e.kind() == ErrorKind::NotFound {
+                attempt.failure_code = Some(FailureCode::NotInstalled);
                 return DirectProbeOutcome {
                     attempt,
                     accepted_output: None,
                     spawn_not_found: true,
                 };
+            }
+            if e.kind() == ErrorKind::PermissionDenied {
+                attempt.failure_code = Some(FailureCode::PermissionBlocked);
             }
             attempt.error = Some(format!("spawn failed: {e}"));
             debug!(command = ?cmd_parts, error = %e, "Failed to spawn help command");
@@ -453,7 +464,9 @@ fn probe_shell_help(
                     accepted_output: Some(help_text),
                 };
             }
-            attempt.rejection_reason = Some(classify_rejection_reason(&help_text));
+            let classification = classify_rejection(&help_text);
+            attempt.rejection_reason = Some(classification.reason);
+            attempt.failure_code = Some(classification.failure_code);
 
             ShellProbeResult {
                 attempt,
@@ -462,6 +475,7 @@ fn probe_shell_help(
         }
         Ok(None) => {
             attempt.timed_out = true;
+            attempt.failure_code = Some(FailureCode::Timeout);
             let _ = child.kill();
             let _ = child.wait();
             ShellProbeResult {
@@ -593,7 +607,12 @@ fn output_preview(text: &str) -> Option<String> {
     Some(format!("{truncated}..."))
 }
 
-fn classify_rejection_reason(help_text: &str) -> String {
+struct RejectionClassification {
+    reason: String,
+    failure_code: FailureCode,
+}
+
+fn classify_rejection(help_text: &str) -> RejectionClassification {
     let lower = help_text.to_ascii_lowercase();
 
     let environment_blocked_markers = [
@@ -607,7 +626,10 @@ fn classify_rejection_reason(help_text: &str) -> String {
         .iter()
         .any(|marker| lower.contains(marker))
     {
-        return "environment-blocked".to_string();
+        return RejectionClassification {
+            reason: "environment-blocked".to_string(),
+            failure_code: FailureCode::PermissionBlocked,
+        };
     }
 
     let option_error_markers = [
@@ -620,10 +642,16 @@ fn classify_rejection_reason(help_text: &str) -> String {
         .iter()
         .any(|marker| lower.contains(marker))
     {
-        return "option-error-output".to_string();
+        return RejectionClassification {
+            reason: "option-error-output".to_string(),
+            failure_code: FailureCode::NotHelpOutput,
+        };
     }
 
-    "not-help-output".to_string()
+    RejectionClassification {
+        reason: "not-help-output".to_string(),
+        failure_code: FailureCode::NotHelpOutput,
+    }
 }
 
 fn schema_has_entities(schema: &command_schema_core::CommandSchema) -> bool {
@@ -733,7 +761,7 @@ fn summarize_probe_failure_reason(probe_attempts: &[ProbeAttemptReport]) -> Opti
     None
 }
 
-fn apply_quality_policy(mut run: ExtractionRun, policy: ExtractionQualityPolicy) -> ExtractionRun {
+pub fn apply_quality_policy(mut run: ExtractionRun, policy: ExtractionQualityPolicy) -> ExtractionRun {
     let assessment = assess_extraction_quality(&run, policy);
     run.report.accepted_for_suggestions = assessment.accepted;
     run.report.quality_tier = assessment.tier;
@@ -748,13 +776,64 @@ fn apply_quality_policy(mut run: ExtractionRun, policy: ExtractionQualityPolicy)
                 std::iter::once(gate_warning.clone()),
             );
             extend_unique_warnings(&mut run.report.warnings, std::iter::once(gate_warning));
+            run.report.failure_code = Some(FailureCode::QualityRejected);
+            run.report.failure_detail = Some(reason);
         }
         run.result.success = false;
         run.result.schema = None;
         run.report.success = false;
+    } else {
+        // Clear any failure codes on success
+        run.report.failure_code = None;
+        run.report.failure_detail = None;
     }
 
     run
+}
+
+/// Derives a structured failure code from probe attempts when no help output was found.
+fn derive_probe_failure(
+    probe_attempts: &[ProbeAttemptReport],
+    _failure_warning: &str,
+) -> (FailureCode, String) {
+    // Check if all attempts indicated not-found (spawn_not_found is encoded as
+    // the error message pattern or missing exit code + no output).
+    let all_not_found = !probe_attempts.is_empty()
+        && probe_attempts.iter().all(|a| {
+            a.error
+                .as_deref()
+                .is_some_and(|e| e.contains("shell spawn failed") || e.contains("spawn failed"))
+                || (a.exit_code.is_none() && a.output_len == 0 && a.error.is_none() && !a.timed_out)
+        });
+    if all_not_found {
+        return (
+            FailureCode::NotInstalled,
+            "Command not found on the system".to_string(),
+        );
+    }
+
+    if probe_attempts.iter().any(|a| a.timed_out) {
+        return (
+            FailureCode::Timeout,
+            "All probe attempts timed out".to_string(),
+        );
+    }
+
+    if probe_attempts.iter().any(|a| {
+        a.rejection_reason
+            .as_deref()
+            .is_some_and(|r| r == "environment-blocked")
+    }) {
+        return (
+            FailureCode::PermissionBlocked,
+            "Help probing was blocked by environment restrictions".to_string(),
+        );
+    }
+
+    (
+        FailureCode::NotHelpOutput,
+        "Probe output did not contain recognizable help text".to_string(),
+    )
 }
 
 /// Extracts a complete command schema including subcommands.
@@ -786,6 +865,8 @@ fn extract_command_schema_with_report_base(command: &str) -> ExtractionRun {
         Some(output) => output,
         None => {
             let failure_warning = format!("Could not get help output for '{}'", command);
+            let (failure_code, failure_detail) =
+                derive_probe_failure(&probe_attempts, &failure_warning);
             return ExtractionRun {
                 result: ExtractionResult {
                     schema: None,
@@ -800,6 +881,8 @@ fn extract_command_schema_with_report_base(command: &str) -> ExtractionRun {
                     accepted_for_suggestions: false,
                     quality_tier: QualityTier::Failed,
                     quality_reasons: Vec::new(),
+                    failure_code: Some(failure_code),
+                    failure_detail: Some(failure_detail),
                     selected_format: None,
                     format_scores: Vec::new(),
                     parsers_used: vec!["probe-failed".to_string()],
@@ -815,6 +898,9 @@ fn extract_command_schema_with_report_base(command: &str) -> ExtractionRun {
             };
         }
     };
+
+    // Extract version from help output if not already set
+    let detected_version = crate::version::extract_version(&raw_output, command);
 
     // Parse the help output
     let mut parser = HelpParser::new(command, &raw_output);
@@ -838,6 +924,8 @@ fn extract_command_schema_with_report_base(command: &str) -> ExtractionRun {
                     accepted_for_suggestions: false,
                     quality_tier: QualityTier::Failed,
                     quality_reasons: Vec::new(),
+                    failure_code: Some(FailureCode::ParseFailed),
+                    failure_detail: Some("Help text was found but parsing produced no schema".to_string()),
                     selected_format: parser.detected_format().map(help_format_label),
                     format_scores: to_format_score_reports(&diagnostics.format_scores),
                     parsers_used: diagnostics.parsers_used,
@@ -853,6 +941,11 @@ fn extract_command_schema_with_report_base(command: &str) -> ExtractionRun {
             };
         }
     };
+
+    // Set version if detected and not already present in schema
+    if schema.version.is_none() {
+        schema.version = detected_version;
+    }
 
     let parser_warnings = parser.warnings().to_vec();
     let mut report_warnings = parser_warnings.clone();
@@ -894,12 +987,28 @@ fn extract_command_schema_with_report_base(command: &str) -> ExtractionRun {
     let success = validation_errors.is_empty() && has_entities;
     extend_unique_warnings(&mut report_warnings, warnings.iter().cloned());
 
+    let (fc, fd) = if success {
+        (None, None)
+    } else if !validation_errors.is_empty() {
+        (
+            Some(FailureCode::ParseFailed),
+            Some(format!("Schema validation failed: {}", validation_errors.join("; "))),
+        )
+    } else {
+        (
+            Some(FailureCode::ParseFailed),
+            Some("Parsed schema contains no entities".to_string()),
+        )
+    };
+
     let report = ExtractionReport {
         command: command.to_string(),
         success,
         accepted_for_suggestions: false,
         quality_tier: QualityTier::Failed,
         quality_reasons: Vec::new(),
+        failure_code: fc,
+        failure_detail: fd,
         selected_format: parser.detected_format().map(help_format_label),
         format_scores: to_format_score_reports(&diagnostics.format_scores),
         parsers_used: diagnostics.parsers_used.clone(),
@@ -1089,7 +1198,7 @@ pub fn extract_multiple_schemas(commands: &[&str]) -> Vec<ExtractionResult> {
         .collect()
 }
 
-fn to_format_score_reports(scores: &[FormatScore]) -> Vec<FormatScoreReport> {
+pub fn to_format_score_reports(scores: &[FormatScore]) -> Vec<FormatScoreReport> {
     scores
         .iter()
         .map(|entry| FormatScoreReport {
@@ -1117,7 +1226,7 @@ fn to_probe_attempt_reports(attempts: &[ProbeAttempt]) -> Vec<ProbeAttemptReport
         .collect()
 }
 
-fn help_format_label(format: HelpFormat) -> String {
+pub fn help_format_label(format: HelpFormat) -> String {
     match format {
         HelpFormat::Clap => "clap",
         HelpFormat::Cobra => "cobra",
@@ -1226,6 +1335,8 @@ mod tests {
                 accepted_for_suggestions: false,
                 quality_tier: QualityTier::Failed,
                 quality_reasons: Vec::new(),
+                failure_code: None,
+                failure_detail: None,
                 selected_format: Some("unknown".to_string()),
                 format_scores: Vec::new(),
                 parsers_used: vec!["test".to_string()],

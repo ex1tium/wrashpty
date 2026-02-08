@@ -81,6 +81,12 @@ pub struct DiscoverConfig {
     pub excluded_commands: Vec<String>,
     /// Quality policy used to decide whether extracted schemas are accepted.
     pub quality_policy: ExtractionQualityPolicy,
+    /// Only include commands that are installed on the system.
+    pub installed_only: bool,
+    /// Number of parallel extraction jobs (`None` = use all CPUs).
+    pub jobs: Option<usize>,
+    /// Directory for caching extraction results. `None` disables caching.
+    pub cache_dir: Option<PathBuf>,
 }
 
 /// Aggregated output from a discovery + extraction run.
@@ -134,24 +140,127 @@ pub fn discover_tools(config: &DiscoverConfig) -> Vec<String> {
         }
     }
 
+    if config.installed_only {
+        commands.retain(|cmd| command_exists(cmd));
+    }
+
     commands.into_iter().collect()
 }
 
 /// Discovers commands and extracts schemas into a package.
 pub fn discover_and_extract(config: &DiscoverConfig, version: &str) -> DiscoverOutcome {
     let commands = discover_tools(config);
+    let policy = config.quality_policy;
+    let cache = config
+        .cache_dir
+        .as_ref()
+        .map(|dir| crate::cache::SchemaCache::new(dir.clone()));
+
+    let extract_one = |command: &str| -> (String, crate::extractor::ExtractionRun) {
+        // Build cache key once (includes policy thresholds) and reuse for
+        // both lookup and store.
+        let cache_key = cache
+            .as_ref()
+            .and_then(|_| crate::cache::build_cache_key(command, &policy));
+
+        // Try cache lookup.  When a cached entry exists, compare its
+        // stored version against a quick `--version` probe so that
+        // binary upgrades that don't change mtime/size still invalidate.
+        if let Some(ref cache) = cache {
+            if let Some(ref key) = cache_key {
+                if let Some(entry) = cache.get(key) {
+                    let current_version = crate::cache::detect_quick_version(command);
+                    let version_matches = match (&entry.detected_version, &current_version) {
+                        (Some(cached), Some(current)) => cached == current,
+                        (None, None) => true,
+                        _ => false,
+                    };
+                    if version_matches {
+                        let run = crate::extractor::ExtractionRun {
+                            result: command_schema_core::ExtractionResult {
+                                schema: entry.schema,
+                                raw_output: String::new(),
+                                detected_format: None,
+                                warnings: Vec::new(),
+                                success: entry.report.success,
+                            },
+                            report: entry.report,
+                        };
+                        return (command.to_string(), run);
+                    }
+                    // Version mismatch → treat as cache miss, fall through
+                    // to re-extract.
+                }
+            }
+        }
+
+        let run = extract_command_schema_with_report_and_policy(command, policy);
+
+        // Store in cache using the same key built above, including the
+        // detected version and probe mode for future invalidation checks.
+        if let Some(ref cache) = cache {
+            if let Some(key) = cache_key {
+                let detected_version = run
+                    .result
+                    .schema
+                    .as_ref()
+                    .and_then(|s| s.version.clone());
+                let probe_mode = run.report.selected_format.clone();
+                cache.put(
+                    key,
+                    run.result.schema.clone(),
+                    run.report.clone(),
+                    detected_version,
+                    probe_mode,
+                );
+            }
+        }
+
+        (command.to_string(), run)
+    };
+
+    // Collect extraction results in parallel (default: all CPUs via rayon
+    // global pool; explicit --jobs uses a scoped pool with that many threads).
+    let results: Vec<(String, crate::extractor::ExtractionRun)> = {
+        use rayon::prelude::*;
+
+        if let Some(jobs) = config.jobs {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(jobs)
+                .build()
+                .expect("failed to build rayon thread pool");
+
+            pool.install(|| {
+                commands
+                    .par_iter()
+                    .map(|command| extract_one(command))
+                    .collect()
+            })
+        } else {
+            commands
+                .par_iter()
+                .map(|command| extract_one(command))
+                .collect()
+        }
+    };
+
+    // Sort by command name for deterministic output.
+    let mut sorted_results = results;
+    sorted_results.sort_by(|(a, _), (b, _)| a.cmp(b));
+
     let mut package = SchemaPackage::new(version, Utc::now().to_rfc3339());
     let mut failures = Vec::new();
     let mut warnings = Vec::new();
     let mut reports = Vec::new();
 
-    for command in commands {
-        let run = extract_command_schema_with_report_and_policy(&command, config.quality_policy);
+    for (command, run) in sorted_results {
         let result = run.result;
         let command_label = command.clone();
 
         if run.report.accepted_for_suggestions {
-            if let Some(schema) = result.schema {
+            if let Some(mut schema) = result.schema {
+                schema.schema_version =
+                    Some(command_schema_core::SCHEMA_CONTRACT_VERSION.to_string());
                 package.schemas.push(schema);
             } else {
                 failures.push(command);
@@ -177,6 +286,24 @@ pub fn discover_and_extract(config: &DiscoverConfig, version: &str) -> DiscoverO
     }
 }
 
+/// Summarizes failure code distribution from extraction reports.
+pub fn failure_code_summary(
+    reports: &[crate::report::ExtractionReport],
+) -> Vec<(crate::report::FailureCode, usize)> {
+    use std::collections::BTreeMap;
+    let mut counts: BTreeMap<String, (crate::report::FailureCode, usize)> = BTreeMap::new();
+    for report in reports {
+        if let Some(code) = report.failure_code {
+            let key = code.to_string();
+            counts
+                .entry(key)
+                .and_modify(|(_, count)| *count += 1)
+                .or_insert((code, 1));
+        }
+    }
+    counts.into_values().collect()
+}
+
 /// Builds a serializable bundle report for a discovery run.
 pub fn build_report_bundle(
     version: &str,
@@ -184,6 +311,7 @@ pub fn build_report_bundle(
     failures: Vec<String>,
 ) -> ExtractionReportBundle {
     ExtractionReportBundle {
+        schema_version: Some(command_schema_core::SCHEMA_CONTRACT_VERSION.to_string()),
         generated_at: Utc::now().to_rfc3339(),
         version: version.to_string(),
         reports,
@@ -350,6 +478,9 @@ mod tests {
             scan_path: false,
             excluded_commands: vec!["cargo".to_string()],
             quality_policy: ExtractionQualityPolicy::default(),
+            installed_only: false,
+            jobs: None,
+            cache_dir: None,
         };
 
         assert_eq!(discover_tools(&config), vec!["git".to_string()]);
@@ -378,6 +509,7 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
 
         let schema = CommandSchema {
+            schema_version: None,
             command: "git".to_string(),
             description: Some("Git tool".to_string()),
             global_flags: vec![FlagSchema::boolean(Some("-v"), Some("--verbose"))],
@@ -404,6 +536,10 @@ mod tests {
         assert_eq!(bundle.version, "1.2.3");
         assert_eq!(bundle.failures, vec!["npm".to_string()]);
         assert!(bundle.generated_at.contains('T'));
+        assert_eq!(
+            bundle.schema_version,
+            Some(command_schema_core::SCHEMA_CONTRACT_VERSION.to_string())
+        );
     }
 
     fn unique_tmp_dir() -> PathBuf {
