@@ -153,6 +153,29 @@ impl Drop for CursorGuard {
     }
 }
 
+/// RAII guard that exits the alternate screen buffer on drop.
+///
+/// Ensures the main screen is restored even on error, panic, or early return
+/// from the panel input loop while in fullscreen mode.
+struct AltScreenGuard {
+    active: bool,
+}
+
+impl AltScreenGuard {
+    fn new() -> Self {
+        Self { active: false }
+    }
+}
+
+impl Drop for AltScreenGuard {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = write!(std::io::stdout(), "\x1b[?1049l");
+            let _ = std::io::stdout().flush();
+        }
+    }
+}
+
 /// Main application struct coordinating all Wrashpty components.
 ///
 /// `App` owns the PTY, pump, terminal guard, and signal handler, coordinating
@@ -1317,9 +1340,12 @@ impl App {
         // Track if we need to redraw - start with true for initial render
         let mut needs_redraw = true;
 
-        // Fullscreen toggle state (F10)
+        // Fullscreen toggle state (F10).
+        // AltScreenGuard ensures \x1b[?1049l is written on all exit paths
+        // (error, panic, early return) so the main screen is always restored.
         let mut fullscreen = false;
         let mut normal_panel_height: u16 = *panel_height;
+        let mut _alt_screen = AltScreenGuard::new();
 
         loop {
             // Only render when needed (after input or on first draw)
@@ -1376,7 +1402,9 @@ impl App {
 
                             debug!(key = ?key.code, "Panel received key");
 
-                            // F10: toggle fullscreen
+                            // F10: toggle fullscreen using alternate screen buffer.
+                            // Alt screen saves/restores the main screen atomically,
+                            // preserving PTY content and prompt without repaint logic.
                             if key.code == KeyCode::F(10) {
                                 let (current_cols, total_rows) =
                                     TerminalGuard::get_size().unwrap_or((*cols, *panel_height));
@@ -1384,10 +1412,15 @@ impl App {
                                 fullscreen = !fullscreen;
 
                                 if fullscreen {
-                                    // Save normal height and go fullscreen
+                                    // Save normal height, enter alt screen, go fullscreen
                                     normal_panel_height = *panel_height;
                                     *panel_height = total_rows;
                                     *cols = current_cols;
+
+                                    // Enter alternate screen (saves main screen + cursor)
+                                    let _ = write!(std::io::stdout(), "\x1b[?1049h");
+                                    let _ = std::io::stdout().flush();
+                                    _alt_screen.active = true;
 
                                     self.chrome
                                         .resize_panel(total_rows, total_rows)
@@ -1398,8 +1431,15 @@ impl App {
                                     *panel_height = normal_panel_height.min(max_ph).max(8);
                                     *cols = current_cols;
 
+                                    // Exit alternate screen (atomically restores main screen)
+                                    _alt_screen.active = false;
+                                    let _ = write!(std::io::stdout(), "\x1b[?1049l");
+                                    let _ = std::io::stdout().flush();
+
+                                    // Use expand_panel (not resize_panel) to set PanelState
+                                    // and scroll region without clearing restored content.
                                     self.chrome
-                                        .resize_panel(*panel_height, total_rows)
+                                        .expand_panel(*panel_height, total_rows)
                                         .context("Failed to restore panel from fullscreen")?;
 
                                     // Resize PTY to fit below panel
@@ -1409,58 +1449,12 @@ impl App {
                                             .resize(current_cols, effective)
                                             .context("Failed to resize PTY after fullscreen")?;
                                     }
-
-                                    // Repaint the freed PTY area below the panel with scrollback
-                                    // content, plus the current partial line (shell prompt).
-                                    // The scrollback buffer only has complete lines; the prompt
-                                    // is a partial line in capture_state. We paint both so the
-                                    // PTY area looks exactly as it did before fullscreen.
-                                    let freed_rows = total_rows.saturating_sub(*panel_height) as usize;
-                                    {
-                                        let stdout = std::io::stdout();
-                                        let mut out = stdout.lock();
-                                        use std::io::Write;
-
-                                        // Reserve the bottom row for the prompt (partial line)
-                                        let scrollback_rows = freed_rows.saturating_sub(1);
-                                        if scrollback_rows > 0 && !self.scrollback_buffer.is_empty() {
-                                            let lines: Vec<_> = self
-                                                .scrollback_buffer
-                                                .get_from_bottom(0, scrollback_rows)
-                                                .collect();
-                                            for (i, line) in lines.iter().enumerate() {
-                                                let row = *panel_height + 1 + i as u16;
-                                                if row >= total_rows {
-                                                    break;
-                                                }
-                                                let _ = write!(out, "\x1b[{};1H\x1b[0m", row);
-                                                let sanitized =
-                                                    crate::scrollback::sanitize_for_display(
-                                                        line.content(),
-                                                    );
-                                                let _ = out.write_all(&sanitized);
-                                                let _ = write!(out, "\x1b[K");
-                                            }
-                                        }
-
-                                        // Write the partial line (prompt) on the bottom row
-                                        let partial = self.capture_state.partial_content();
-                                        let _ = write!(out, "\x1b[{};1H\x1b[0m", total_rows);
-                                        if !partial.is_empty() {
-                                            let sanitized =
-                                                crate::scrollback::sanitize_for_display(partial);
-                                            let _ = out.write_all(&sanitized);
-                                        }
-                                        let _ = write!(out, "\x1b[K");
-                                        let _ = out.flush();
-                                    }
                                 }
 
                                 // Clear panel area for clean redraw
                                 {
                                     let stdout = std::io::stdout();
                                     let mut out = stdout.lock();
-                                    use std::io::Write;
                                     for row in 1..=*panel_height {
                                         write!(out, "\x1b[{};1H\x1b[K", row)?;
                                     }
