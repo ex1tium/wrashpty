@@ -42,7 +42,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use crossterm::event::{self, Event};
+use crossterm::event::{self, Event, KeyCode};
 use portable_pty::ExitStatus;
 use ratatui_core::buffer::Buffer;
 use ratatui_core::layout::Rect;
@@ -1317,6 +1317,10 @@ impl App {
         // Track if we need to redraw - start with true for initial render
         let mut needs_redraw = true;
 
+        // Fullscreen toggle state (F10)
+        let mut fullscreen = false;
+        let mut normal_panel_height: u16 = *panel_height;
+
         loop {
             // Only render when needed (after input or on first draw)
             if needs_redraw {
@@ -1326,10 +1330,15 @@ impl App {
                 let mut buffer = Buffer::empty(area);
 
                 // Create a bordered block for the panel with theme colors
+                let title = if fullscreen {
+                    " Wrashpty Panel (Esc to close, F10 restore) "
+                } else {
+                    " Wrashpty Panel (Esc to close, F10 fullscreen) "
+                };
                 let block = Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(theme.panel_border))
-                    .title(" Wrashpty Panel (Esc to close) ")
+                    .title(title)
                     .title_style(Style::default().fg(theme.header_fg));
 
                 // Get the inner area for panel content
@@ -1367,6 +1376,102 @@ impl App {
 
                             debug!(key = ?key.code, "Panel received key");
 
+                            // F10: toggle fullscreen
+                            if key.code == KeyCode::F(10) {
+                                let (current_cols, total_rows) =
+                                    TerminalGuard::get_size().unwrap_or((*cols, *panel_height));
+
+                                fullscreen = !fullscreen;
+
+                                if fullscreen {
+                                    // Save normal height and go fullscreen
+                                    normal_panel_height = *panel_height;
+                                    *panel_height = total_rows;
+                                    *cols = current_cols;
+
+                                    self.chrome
+                                        .resize_panel(total_rows, total_rows)
+                                        .context("Failed to resize panel to fullscreen")?;
+                                } else {
+                                    // Restore normal height
+                                    let max_ph = total_rows.saturating_sub(2);
+                                    *panel_height = normal_panel_height.min(max_ph).max(8);
+                                    *cols = current_cols;
+
+                                    self.chrome
+                                        .resize_panel(*panel_height, total_rows)
+                                        .context("Failed to restore panel from fullscreen")?;
+
+                                    // Resize PTY to fit below panel
+                                    let effective = total_rows.saturating_sub(*panel_height);
+                                    if effective > 0 {
+                                        self.pty
+                                            .resize(current_cols, effective)
+                                            .context("Failed to resize PTY after fullscreen")?;
+                                    }
+
+                                    // Repaint the freed PTY area below the panel with scrollback
+                                    // content, plus the current partial line (shell prompt).
+                                    // The scrollback buffer only has complete lines; the prompt
+                                    // is a partial line in capture_state. We paint both so the
+                                    // PTY area looks exactly as it did before fullscreen.
+                                    let freed_rows = total_rows.saturating_sub(*panel_height) as usize;
+                                    {
+                                        let stdout = std::io::stdout();
+                                        let mut out = stdout.lock();
+                                        use std::io::Write;
+
+                                        // Reserve the bottom row for the prompt (partial line)
+                                        let scrollback_rows = freed_rows.saturating_sub(1);
+                                        if scrollback_rows > 0 && !self.scrollback_buffer.is_empty() {
+                                            let lines: Vec<_> = self
+                                                .scrollback_buffer
+                                                .get_from_bottom(0, scrollback_rows)
+                                                .collect();
+                                            for (i, line) in lines.iter().enumerate() {
+                                                let row = *panel_height + 1 + i as u16;
+                                                if row >= total_rows {
+                                                    break;
+                                                }
+                                                let _ = write!(out, "\x1b[{};1H\x1b[0m", row);
+                                                let sanitized =
+                                                    crate::scrollback::sanitize_for_display(
+                                                        line.content(),
+                                                    );
+                                                let _ = out.write_all(&sanitized);
+                                                let _ = write!(out, "\x1b[K");
+                                            }
+                                        }
+
+                                        // Write the partial line (prompt) on the bottom row
+                                        let partial = self.capture_state.partial_content();
+                                        let _ = write!(out, "\x1b[{};1H\x1b[0m", total_rows);
+                                        if !partial.is_empty() {
+                                            let sanitized =
+                                                crate::scrollback::sanitize_for_display(partial);
+                                            let _ = out.write_all(&sanitized);
+                                        }
+                                        let _ = write!(out, "\x1b[K");
+                                        let _ = out.flush();
+                                    }
+                                }
+
+                                // Clear panel area for clean redraw
+                                {
+                                    let stdout = std::io::stdout();
+                                    let mut out = stdout.lock();
+                                    use std::io::Write;
+                                    for row in 1..=*panel_height {
+                                        write!(out, "\x1b[{};1H\x1b[K", row)?;
+                                    }
+                                    out.flush()?;
+                                }
+
+                                debug!(fullscreen, panel_height = *panel_height, "Toggled fullscreen");
+                                needs_redraw = true;
+                                continue;
+                            }
+
                             match panel.handle_input(key) {
                                 PanelResult::Continue => {
                                     // Input processed, need to redraw
@@ -1386,35 +1491,48 @@ impl App {
                                 return Ok(PanelResult::Dismiss);
                             }
 
-                            // Recalculate panel height
-                            let preferred = panel.preferred_height();
-                            let max_ph = new_rows.saturating_sub(2);
-                            let new_panel_height = preferred.min(max_ph).max(8);
-                            let new_effective = new_rows.saturating_sub(new_panel_height);
-                            if new_effective == 0 {
-                                return Ok(PanelResult::Dismiss);
+                            if fullscreen {
+                                // Stay fullscreen: panel takes entire terminal
+                                *panel_height = new_rows;
+                                *cols = new_cols;
+
+                                self.chrome
+                                    .resize_panel(new_rows, new_rows)
+                                    .context("Failed to resize fullscreen panel")?;
+                            } else {
+                                // Recalculate panel height
+                                let preferred = panel.preferred_height();
+                                let max_ph = new_rows.saturating_sub(2);
+                                let new_panel_height = preferred.min(max_ph).max(8);
+                                let new_effective = new_rows.saturating_sub(new_panel_height);
+                                if new_effective == 0 {
+                                    return Ok(PanelResult::Dismiss);
+                                }
+
+                                // Resize panel scroll region
+                                self.chrome
+                                    .resize_panel(new_panel_height, new_rows)
+                                    .context("Failed to resize panel")?;
+
+                                // Resize PTY to fit below panel
+                                self.pty
+                                    .resize(new_cols, new_effective)
+                                    .context("Failed to resize PTY during panel resize")?;
+
+                                // Update tracked dimensions
+                                *cols = new_cols;
+                                *panel_height = new_panel_height;
+
+                                // Also update normal_panel_height for correct restore
+                                normal_panel_height = new_panel_height;
                             }
-
-                            // Resize panel scroll region
-                            self.chrome
-                                .resize_panel(new_panel_height, new_rows)
-                                .context("Failed to resize panel")?;
-
-                            // Resize PTY to fit below panel
-                            self.pty
-                                .resize(new_cols, new_effective)
-                                .context("Failed to resize PTY during panel resize")?;
-
-                            // Update tracked dimensions
-                            *cols = new_cols;
-                            *panel_height = new_panel_height;
 
                             // Clear panel area for clean redraw
                             {
                                 let stdout = std::io::stdout();
                                 let mut out = stdout.lock();
                                 use std::io::Write;
-                                for row in 1..=new_panel_height {
+                                for row in 1..=*panel_height {
                                     write!(out, "\x1b[{};1H\x1b[K", row)?;
                                 }
                                 out.flush()?;

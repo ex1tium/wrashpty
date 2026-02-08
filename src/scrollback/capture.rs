@@ -137,6 +137,19 @@ impl CaptureState {
         }
     }
 
+    /// Returns a reference to the current partial line content.
+    ///
+    /// This is the incomplete line being accumulated (e.g. a shell prompt
+    /// that hasn't been terminated by a newline). Non-consuming — does not
+    /// affect capture state.
+    pub fn partial_content(&self) -> &[u8] {
+        if !self.partial_line.is_empty() {
+            &self.partial_line
+        } else {
+            &self.pre_cr_content
+        }
+    }
+
     /// Flushes the partial line buffer.
     ///
     /// Call this during mode transitions to ensure no content is lost.
