@@ -661,6 +661,61 @@ impl Chrome {
         Ok(())
     }
 
+    /// Resizes an already-expanded panel to a new height.
+    ///
+    /// More efficient than collapse + expand as it updates the scroll region
+    /// in-place without restoring the chrome scroll region in between.
+    ///
+    /// # Arguments
+    ///
+    /// * `new_height` - The new panel height
+    /// * `new_total_rows` - The new total terminal height
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if escape sequences cannot be written to stdout.
+    pub fn resize_panel(&mut self, new_height: u16, new_total_rows: u16) -> io::Result<()> {
+        let old_height = match self.panel_state {
+            PanelState::Expanded { height } => height,
+            PanelState::Collapsed => return self.expand_panel(new_height, new_total_rows),
+        };
+
+        self.panel_state = PanelState::Expanded {
+            height: new_height,
+        };
+
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
+
+        // Clear rows that changed (freed if shrank, new if grew)
+        let (clear_start, clear_end) = if new_height < old_height {
+            (new_height + 1, old_height)
+        } else {
+            (old_height + 1, new_height)
+        };
+        for row in clear_start..=clear_end {
+            write!(out, "\x1b[{};1H\x1b[2K", row)?;
+        }
+
+        // Update scroll region
+        let top_row = new_height + 1;
+        write!(out, "\x1b[{};{}r", top_row, new_total_rows)?;
+
+        // Position cursor at bottom of scroll region
+        write!(out, "\x1b[{};1H", new_total_rows)?;
+
+        out.flush()?;
+
+        debug!(
+            old_height,
+            new_height,
+            new_total_rows,
+            "Panel resized"
+        );
+
+        Ok(())
+    }
+
     /// Returns the current panel height.
     ///
     /// Returns 1 if collapsed (just context bar), otherwise returns the

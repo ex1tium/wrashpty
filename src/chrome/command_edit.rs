@@ -11,9 +11,14 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use super::theme::Theme;
+use ratatui_core::buffer::Buffer;
+use ratatui_core::layout::{Constraint, Layout, Rect};
 use ratatui_core::style::{Modifier, Style};
+use ratatui_core::text::{Line, Span};
+use ratatui_core::widgets::Widget;
+use ratatui_widgets::paragraph::{Paragraph, Wrap};
 
+use super::theme::Theme;
 use crate::history_store::HistoryStore;
 use crate::intelligence::FileContext;
 
@@ -996,6 +1001,315 @@ impl CommandEditState {
     /// Toggles the skip_danger_check flag.
     pub fn toggle_danger_check(&mut self) {
         self.skip_danger_check = !self.skip_danger_check;
+    }
+}
+
+// ============================================================================
+// Adaptive Edit Mode Layout
+// ============================================================================
+
+/// Layout areas for the adaptive edit mode UI.
+///
+/// The edit mode progressively drops optional elements based on available height:
+/// - Height >= 11: Full layout (spacers + prev/next suggestions)
+/// - Height 9-10: Drop spacer rows
+/// - Height 7-8: Also drop prev/next suggestion rows
+/// - Height < 7: Too small for edit mode (returns None)
+pub struct EditModeLayout {
+    pub title: Rect,
+    pub separator: Rect,
+    pub prev_suggestion: Option<Rect>,
+    pub token_strip: Rect,
+    pub next_suggestion: Option<Rect>,
+    pub edit_input: Rect,
+    pub result_preview: Rect,
+    pub border: Rect,
+    pub keybinds: Rect,
+}
+
+/// Computes the adaptive edit mode layout for the given area.
+///
+/// Returns `None` if the area is too small (height < 7) for a usable edit mode.
+pub fn compute_edit_mode_layout(area: Rect) -> Option<EditModeLayout> {
+    if area.height < 7 {
+        return None;
+    }
+
+    let show_suggestions = area.height >= 9;
+    let show_spacers = area.height >= 11;
+
+    let mut constraints = Vec::new();
+    constraints.push(Constraint::Length(1)); // title
+    constraints.push(Constraint::Length(1)); // separator
+    if show_suggestions {
+        constraints.push(Constraint::Length(1)); // prev suggestion
+    }
+    constraints.push(Constraint::Length(1)); // token strip
+    if show_suggestions {
+        constraints.push(Constraint::Length(1)); // next suggestion
+    }
+    if show_spacers {
+        constraints.push(Constraint::Length(1)); // spacer
+    }
+    constraints.push(Constraint::Length(1)); // edit input
+    if show_spacers {
+        constraints.push(Constraint::Length(1)); // spacer
+    }
+    constraints.push(Constraint::Min(1)); // result preview
+    constraints.push(Constraint::Length(1)); // border
+    constraints.push(Constraint::Length(1)); // keybinds
+
+    let chunks = Layout::vertical(constraints).split(area);
+
+    let mut idx = 0;
+    let title = chunks[idx];
+    idx += 1;
+    let separator = chunks[idx];
+    idx += 1;
+    let prev_suggestion = if show_suggestions {
+        let r = chunks[idx];
+        idx += 1;
+        Some(r)
+    } else {
+        None
+    };
+    let token_strip = chunks[idx];
+    idx += 1;
+    let next_suggestion = if show_suggestions {
+        let r = chunks[idx];
+        idx += 1;
+        Some(r)
+    } else {
+        None
+    };
+    if show_spacers {
+        idx += 1; // spacer
+    }
+    let edit_input = chunks[idx];
+    idx += 1;
+    if show_spacers {
+        idx += 1; // spacer
+    }
+    let result_preview = chunks[idx];
+    idx += 1;
+    let border = chunks[idx];
+    idx += 1;
+    let keybinds = chunks[idx];
+
+    Some(EditModeLayout {
+        title,
+        separator,
+        prev_suggestion,
+        token_strip,
+        next_suggestion,
+        edit_input,
+        result_preview,
+        border,
+        keybinds,
+    })
+}
+
+/// Renders the shared edit mode UI elements (token strip, suggestions, edit input,
+/// result preview, and border) using the computed layout.
+///
+/// The caller is responsible for rendering the title, separator, and keybind hints,
+/// as those differ between history browser and file browser.
+pub fn render_edit_mode_shared(
+    buffer: &mut Buffer,
+    theme: &Theme,
+    edit_state: &CommandEditState,
+    layout: &EditModeLayout,
+) {
+    let border_style = Style::default().fg(theme.panel_border);
+
+    // Calculate the x-position where the selected token starts and ends
+    let mut selected_x_start: usize = 3; // Initial padding
+    let mut selected_x_end: usize = 3;
+    for (i, token) in edit_state.tokens.iter().enumerate() {
+        let display_text = if i == edit_state.selected {
+            if edit_state.edit_buffer.is_empty() {
+                "_"
+            } else {
+                &edit_state.edit_buffer
+            }
+        } else if token.text.is_empty() {
+            "_"
+        } else {
+            &token.text
+        };
+        let slot_num = i + 1;
+        let superscript_len = slot_num.to_string().len();
+        let text_display_width = crate::ui::text_width::display_width(display_text);
+        let token_width = superscript_len + 1 + text_display_width + 1 + 3;
+
+        if i == edit_state.selected {
+            selected_x_end = selected_x_start + superscript_len + 1 + text_display_width + 1;
+            break;
+        }
+        selected_x_start += token_width;
+    }
+    let superscript_len = (edit_state.selected + 1).to_string().len();
+    let selected_x_offset = selected_x_start + superscript_len + 1;
+
+    // Calculate horizontal scroll offset to keep selected token visible
+    let viewport_width = layout.token_strip.width as usize;
+    let left_context = viewport_width / 3;
+    let right_margin = 8;
+    let scroll_offset = if selected_x_end > viewport_width.saturating_sub(right_margin) {
+        selected_x_start.saturating_sub(left_context)
+    } else {
+        0
+    };
+
+    // Previous suggestion row
+    if let Some(prev_area) = layout.prev_suggestion {
+        if let Some(prev_sugg) = edit_state.prev_suggestion() {
+            let adjusted_offset = selected_x_offset.saturating_sub(scroll_offset);
+            let padding = " ".repeat(adjusted_offset);
+            let prev_line = Line::from(vec![
+                Span::styled(padding, Style::default()),
+                Span::styled(prev_sugg, Style::default().fg(theme.text_secondary)),
+            ]);
+            Paragraph::new(prev_line).render(prev_area, buffer);
+        }
+    }
+
+    // Current token strip with brackets and superscript numbers
+    let mut spans = Vec::new();
+    spans.push(Span::styled("   ", Style::default()));
+
+    let bracket_style = Style::default().fg(theme.text_secondary);
+    let bracket_selected_style = Style::default().fg(theme.header_fg);
+
+    for (i, token) in edit_state.tokens.iter().enumerate() {
+        let is_selected = i == edit_state.selected;
+        let slot_num = i + 1;
+
+        let num_style = if is_selected {
+            Style::default()
+                .fg(theme.text_highlight)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.text_secondary)
+        };
+        spans.push(Span::styled(superscript_number(slot_num), num_style));
+
+        let bstyle = if is_selected {
+            bracket_selected_style
+        } else {
+            bracket_style
+        };
+        spans.push(Span::styled("⟦", bstyle));
+
+        let base_style = token_type_style(token.token_type, theme);
+        let token_style = if is_selected {
+            base_style.add_modifier(Modifier::BOLD)
+        } else {
+            base_style
+        };
+
+        let display_text = if is_selected {
+            if edit_state.edit_buffer.is_empty() {
+                "_".to_string()
+            } else {
+                edit_state.edit_buffer.clone()
+            }
+        } else if token.text.is_empty() {
+            "_".to_string()
+        } else {
+            token.text.clone()
+        };
+        spans.push(Span::styled(display_text, token_style));
+        spans.push(Span::styled("⟧", bstyle));
+        spans.push(Span::raw("   "));
+    }
+
+    let token_line = Line::from(spans);
+    Paragraph::new(token_line)
+        .scroll((0, scroll_offset as u16))
+        .render(layout.token_strip, buffer);
+
+    // Next suggestion row
+    if let Some(next_area) = layout.next_suggestion {
+        if let Some(next_sugg) = edit_state.next_suggestion() {
+            let adjusted_offset = selected_x_offset.saturating_sub(scroll_offset);
+            let padding = " ".repeat(adjusted_offset);
+            let next_line = Line::from(vec![
+                Span::styled(padding, Style::default()),
+                Span::styled(next_sugg, Style::default().fg(theme.text_secondary)),
+            ]);
+            Paragraph::new(next_line).render(next_area, buffer);
+        }
+    }
+
+    // Edit input line with type hint and cycling indicator
+    let type_hint = edit_state.type_hint();
+    let cycling_indicator = if edit_state.suggestion_index.is_some() {
+        format!(
+            " [{}/{}]",
+            edit_state.suggestion_index.unwrap_or(0) + 1,
+            edit_state.suggestions.len()
+        )
+    } else {
+        String::new()
+    };
+    let edit_label = format!(
+        "   {} {} > ",
+        superscript_number(edit_state.selected + 1),
+        type_hint
+    );
+    let edit_line = Line::from(vec![
+        Span::styled(edit_label, Style::default().fg(theme.git_fg)),
+        Span::styled(
+            &edit_state.edit_buffer,
+            Style::default()
+                .fg(theme.text_primary)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("█", Style::default().fg(theme.header_fg)),
+        Span::styled(
+            cycling_indicator,
+            Style::default().fg(theme.text_secondary),
+        ),
+    ]);
+    Paragraph::new(edit_line).render(layout.edit_input, buffer);
+
+    // Result preview
+    let result_preview: String = edit_state
+        .tokens
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            if i == edit_state.selected {
+                edit_state.edit_buffer.clone()
+            } else {
+                t.text.clone()
+            }
+        })
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let preview_changed = result_preview != edit_state.original;
+    let preview_style = if preview_changed {
+        Style::default().fg(theme.semantic_success)
+    } else {
+        Style::default().fg(theme.text_primary)
+    };
+    let preview_line = Line::from(vec![
+        Span::styled("  Result: ", Style::default().fg(theme.text_secondary)),
+        Span::styled(&result_preview, preview_style),
+    ]);
+    Paragraph::new(preview_line)
+        .wrap(Wrap { trim: false })
+        .render(layout.result_preview, buffer);
+
+    // Border line
+    for x in layout.border.x..layout.border.x + layout.border.width {
+        if let Some(cell) = buffer.cell_mut((x, layout.border.y)) {
+            cell.set_char('─');
+            cell.set_style(border_style);
+        }
     }
 }
 
