@@ -4,6 +4,7 @@
 //! with both Nerd Font and fallback (standard Unicode) variants.
 
 use crate::config::SymbolSet;
+use crate::git::GitFileStatus;
 
 /// Icons and symbols for the context bar and panels.
 #[derive(Debug, Clone, Copy)]
@@ -65,6 +66,20 @@ pub struct Symbols {
     pub notif_info: &'static str,
     /// Warning notification icon.
     pub notif_warning: &'static str,
+
+    // Git file status markers
+    /// Modified file marker.
+    pub git_status_modified: &'static str,
+    /// Added file marker.
+    pub git_status_added: &'static str,
+    /// Deleted file marker.
+    pub git_status_deleted: &'static str,
+    /// Untracked file marker.
+    pub git_status_untracked: &'static str,
+    /// Conflict file marker.
+    pub git_status_conflict: &'static str,
+    /// Renamed file marker.
+    pub git_status_renamed: &'static str,
 }
 
 impl Symbols {
@@ -73,6 +88,18 @@ impl Symbols {
         match set {
             SymbolSet::NerdFont => &NERD_FONT_SYMBOLS,
             SymbolSet::Fallback => &FALLBACK_SYMBOLS,
+        }
+    }
+
+    /// Returns the status marker string for a git file status.
+    pub fn git_status_marker(&self, status: GitFileStatus) -> &'static str {
+        match status {
+            GitFileStatus::Modified => self.git_status_modified,
+            GitFileStatus::Added => self.git_status_added,
+            GitFileStatus::Deleted => self.git_status_deleted,
+            GitFileStatus::Untracked => self.git_status_untracked,
+            GitFileStatus::Conflict => self.git_status_conflict,
+            GitFileStatus::Renamed => self.git_status_renamed,
         }
     }
 }
@@ -119,6 +146,14 @@ pub static NERD_FONT_SYMBOLS: Symbols = Symbols {
     // Notifications
     notif_info: "\u{f05a}",    //  (fa-info-circle)
     notif_warning: "\u{f071}", //  (fa-exclamation-triangle)
+
+    // Git file status markers
+    git_status_modified: "\u{25cf}",  // ● (black circle)
+    git_status_added: "\u{271a}",     // ✚ (heavy greek cross)
+    git_status_deleted: "\u{2716}",   // ✖ (heavy multiplication x)
+    git_status_untracked: "?",
+    git_status_conflict: "!",
+    git_status_renamed: "\u{2192}",   // → (rightwards arrow)
 };
 
 /// Fallback symbol set using basic Unicode.
@@ -162,6 +197,14 @@ pub static FALLBACK_SYMBOLS: Symbols = Symbols {
     // Notifications
     notif_info: "\u{2139}",    // ℹ (information source)
     notif_warning: "\u{26a0}", // ⚠ (warning sign)
+
+    // Git file status markers
+    git_status_modified: "\u{25cf}", // ● (black circle)
+    git_status_added: "+",
+    git_status_deleted: "x",
+    git_status_untracked: "?",
+    git_status_conflict: "!",
+    git_status_renamed: "r",
 };
 
 #[cfg(test)]
