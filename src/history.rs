@@ -458,6 +458,9 @@ mod tests {
         if let Some(home) = &original_home {
             // SAFETY: Restoring original HOME value
             unsafe { std::env::set_var("HOME", home) };
+        } else {
+            // SAFETY: HOME was not set originally, remove our override
+            unsafe { std::env::remove_var("HOME") };
         }
 
         result.expect("append should succeed");

@@ -8,37 +8,37 @@ CUSTOM_CSV ?= schemas/command-lists/custom-tools.csv
 .PHONY: schema-validate schema-snapshot-test
 
 schema-extract-superuser:
-	@commands="$$(cat "$(SUPERUSER_CSV)" | tr ',' '\n' | sed 's/\r//g' | sed '/^\s*$$/d' | awk '!seen[$$0]++' | paste -sd, -)"; \
+	@commands="$$(cat "$(SUPERUSER_CSV)" | tr ',' '\n' | sed 's/\r//g' | sed '/^[[:space:]]*$$/d' | awk '!seen[$$0]++' | paste -sd, -)"; \
 	cargo run -p command-schema-discovery -- extract --commands "$$commands" --output "$(SCHEMA_OUTPUT)"
 
 schema-extract-devops:
-	@commands="$$(cat "$(DEVOPS_CSV)" | tr ',' '\n' | sed 's/\r//g' | sed '/^\s*$$/d' | awk '!seen[$$0]++' | paste -sd, -)"; \
+	@commands="$$(cat "$(DEVOPS_CSV)" | tr ',' '\n' | sed 's/\r//g' | sed '/^[[:space:]]*$$/d' | awk '!seen[$$0]++' | paste -sd, -)"; \
 	cargo run -p command-schema-discovery -- extract --commands "$$commands" --output "$(SCHEMA_OUTPUT)"
 
 schema-extract-custom:
-	@commands="$$(cat "$(CUSTOM_CSV)" | tr ',' '\n' | sed 's/\r//g' | sed '/^\s*$$/d' | awk '!seen[$$0]++' | paste -sd, -)"; \
+	@commands="$$(cat "$(CUSTOM_CSV)" | tr ',' '\n' | sed 's/\r//g' | sed '/^[[:space:]]*$$/d' | awk '!seen[$$0]++' | paste -sd, -)"; \
 	if [ -z "$$commands" ]; then echo "custom-tools.csv is empty"; exit 1; fi; \
 	cargo run -p command-schema-discovery -- extract --commands "$$commands" --output "$(SCHEMA_OUTPUT)"
 
 schema-extract-all:
-	@commands="$$(cat "$(SUPERUSER_CSV)" "$(DEVOPS_CSV)" "$(CUSTOM_CSV)" | tr ',' '\n' | sed 's/\r//g' | sed '/^\s*$$/d' | awk '!seen[$$0]++' | paste -sd, -)"; \
+	@commands="$$(cat "$(SUPERUSER_CSV)" "$(DEVOPS_CSV)" "$(CUSTOM_CSV)" | tr ',' '\n' | sed 's/\r//g' | sed '/^[[:space:]]*$$/d' | awk '!seen[$$0]++' | paste -sd, -)"; \
 	cargo run -p command-schema-discovery -- extract --commands "$$commands" --output "$(SCHEMA_OUTPUT)"
 
 schema-extract-superuser-installed:
-	@commands="$$(cat "$(SUPERUSER_CSV)" | tr ',' '\n' | sed 's/\r//g' | sed '/^\s*$$/d' | awk '!seen[$$0]++' | paste -sd, -)"; \
+	@commands="$$(cat "$(SUPERUSER_CSV)" | tr ',' '\n' | sed 's/\r//g' | sed '/^[[:space:]]*$$/d' | awk '!seen[$$0]++' | paste -sd, -)"; \
 	cargo run -p command-schema-discovery -- extract --commands "$$commands" --installed-only --output "$(SCHEMA_OUTPUT)"
 
 schema-extract-devops-installed:
-	@commands="$$(cat "$(DEVOPS_CSV)" | tr ',' '\n' | sed 's/\r//g' | sed '/^\s*$$/d' | awk '!seen[$$0]++' | paste -sd, -)"; \
+	@commands="$$(cat "$(DEVOPS_CSV)" | tr ',' '\n' | sed 's/\r//g' | sed '/^[[:space:]]*$$/d' | awk '!seen[$$0]++' | paste -sd, -)"; \
 	cargo run -p command-schema-discovery -- extract --commands "$$commands" --installed-only --output "$(SCHEMA_OUTPUT)"
 
 schema-extract-custom-installed:
-	@commands="$$(cat "$(CUSTOM_CSV)" | tr ',' '\n' | sed 's/\r//g' | sed '/^\s*$$/d' | awk '!seen[$$0]++' | paste -sd, -)"; \
+	@commands="$$(cat "$(CUSTOM_CSV)" | tr ',' '\n' | sed 's/\r//g' | sed '/^[[:space:]]*$$/d' | awk '!seen[$$0]++' | paste -sd, -)"; \
 	if [ -z "$$commands" ]; then echo "custom-tools.csv is empty"; exit 1; fi; \
 	cargo run -p command-schema-discovery -- extract --commands "$$commands" --installed-only --output "$(SCHEMA_OUTPUT)"
 
 schema-extract-all-installed:
-	@commands="$$(cat "$(SUPERUSER_CSV)" "$(DEVOPS_CSV)" "$(CUSTOM_CSV)" | tr ',' '\n' | sed 's/\r//g' | sed '/^\s*$$/d' | awk '!seen[$$0]++' | paste -sd, -)"; \
+	@commands="$$(cat "$(SUPERUSER_CSV)" "$(DEVOPS_CSV)" "$(CUSTOM_CSV)" | tr ',' '\n' | sed 's/\r//g' | sed '/^[[:space:]]*$$/d' | awk '!seen[$$0]++' | paste -sd, -)"; \
 	cargo run -p command-schema-discovery -- extract --commands "$$commands" --installed-only --output "$(SCHEMA_OUTPUT)"
 
 schema-validate:
