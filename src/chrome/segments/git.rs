@@ -77,12 +77,12 @@ mod tests {
     }
 
     #[test]
-    fn test_git_segment_id() {
+    fn test_id_returns_git() {
         assert_eq!(GitSegment.id(), "git");
     }
 
     #[test]
-    fn test_git_segment_hidden_when_not_in_repo() {
+    fn test_render_when_not_in_repo_is_hidden() {
         let theme = Theme::for_preset(ThemePreset::Amber);
         let symbols = Symbols::for_set(SymbolSet::Fallback);
         let state = test_state();
@@ -92,7 +92,7 @@ mod tests {
     }
 
     #[test]
-    fn test_git_segment_renders_clean() {
+    fn test_render_when_clean_shows_branch() {
         let theme = Theme::for_preset(ThemePreset::Amber);
         let symbols = Symbols::for_set(SymbolSet::Fallback);
         let mut state = test_state();
@@ -110,7 +110,7 @@ mod tests {
     }
 
     #[test]
-    fn test_git_segment_renders_dirty() {
+    fn test_render_when_dirty_shows_branch_and_dirty_symbol() {
         let theme = Theme::for_preset(ThemePreset::Amber);
         let symbols = Symbols::for_set(SymbolSet::Fallback);
         let mut state = test_state();

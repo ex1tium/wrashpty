@@ -72,12 +72,12 @@ mod tests {
     }
 
     #[test]
-    fn test_cwd_segment_id() {
+    fn test_cwd_segment_id_returns_cwd() {
         assert_eq!(CwdSegment.id(), "cwd");
     }
 
     #[test]
-    fn test_cwd_segment_renders() {
+    fn test_cwd_segment_renders_with_default_state_contains_project() {
         let theme = Theme::for_preset(ThemePreset::Amber);
         let symbols = Symbols::for_set(SymbolSet::Fallback);
         let state = test_state();
@@ -91,7 +91,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cwd_segment_root() {
+    fn test_cwd_segment_renders_root_contains_slash() {
         let theme = Theme::for_preset(ThemePreset::Amber);
         let symbols = Symbols::for_set(SymbolSet::Fallback);
         let mut state = test_state();

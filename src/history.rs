@@ -6,7 +6,7 @@
 use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -185,7 +185,7 @@ pub fn append_to_bash_history(command: &str) -> Result<(), HistoryError> {
 }
 
 /// Gets the last non-empty line from a file.
-fn get_last_history_line(path: &PathBuf) -> Result<Option<String>, HistoryError> {
+fn get_last_history_line(path: &Path) -> Result<Option<String>, HistoryError> {
     use std::fs::File;
     use std::io::{BufRead, BufReader, Seek, SeekFrom};
 
@@ -312,13 +312,16 @@ pub fn dedupe_bash_history() -> Result<usize, HistoryError> {
         // Get original file permissions if it exists
         let permissions = fs::metadata(&history_path).ok().map(|m| m.permissions());
 
-        // Write deduplicated history to temp file
-        for line in &deduped {
-            writeln!(temp_file, "{}", line)?;
+        // Write deduplicated history with BufWriter to reduce syscalls.
+        {
+            let mut writer = std::io::BufWriter::new(&mut temp_file);
+            for line in &deduped {
+                writeln!(writer, "{}", line)?;
+            }
+            writer.flush()?;
         }
 
-        // Flush and sync to ensure all data is written to disk
-        temp_file.flush()?;
+        // Sync to ensure all data is written to disk
         temp_file.as_file().sync_all()?;
 
         // Preserve original permissions if we captured them
@@ -436,29 +439,34 @@ mod tests {
     }
 
     #[test]
-    fn test_append_to_bash_history_writes_to_file() {
+    fn test_append_to_bash_history_writes_command_to_file() {
         use std::fs;
         use tempfile::tempdir;
 
         // Create a temp directory to simulate home
         let temp_dir = tempdir().expect("Failed to create temp dir");
-        let history_file = temp_dir.path().join(".bash_history");
+        let original_home = std::env::var("HOME").ok();
 
-        // Write directly to temp file to test the write logic
-        {
-            use std::fs::OpenOptions;
-            use std::io::Write;
+        // Point HOME at temp dir so get_history_path() resolves there
+        // SAFETY: This test runs single-threaded (#[test] with serial access to env)
+        unsafe { std::env::set_var("HOME", temp_dir.path()) };
 
-            let mut file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&history_file)
-                .expect("Failed to create temp history file");
+        // Call the actual function under test
+        let result = super::append_to_bash_history("echo test_command");
 
-            writeln!(file, "echo test_command").expect("Failed to write");
+        // Restore HOME before asserting (cleanup even on failure)
+        if let Some(home) = &original_home {
+            // SAFETY: Restoring original HOME value
+            unsafe { std::env::set_var("HOME", home) };
+        } else {
+            // SAFETY: HOME was not set originally, remove our override
+            unsafe { std::env::remove_var("HOME") };
         }
 
-        // Verify the file exists and has content
+        result.expect("append should succeed");
+
+        // Verify the file exists and has the command
+        let history_file = temp_dir.path().join(".bash_history");
         let content = fs::read_to_string(&history_file).expect("Failed to read");
         assert!(content.contains("echo test_command"));
     }

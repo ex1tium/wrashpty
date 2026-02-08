@@ -275,7 +275,7 @@ mod tests {
         // The continuation space should NOT appear
         let after_cursor = ansi.split("\x1b[1;1H").nth(1).unwrap_or("");
         // Strip style codes to get visible content
-        let visible: String = strip_ansi_for_test(after_cursor);
+        let visible: String = crate::chrome::test_utils::strip_ansi_for_test(after_cursor);
         assert_eq!(
             visible, "你a ",
             "Expected 'you' + 'a' + trailing space, got: {visible:?}"
@@ -291,31 +291,8 @@ mod tests {
         let ansi = buffer_to_ansi(&buffer, area);
 
         let after_cursor = ansi.split("\x1b[1;1H").nth(1).unwrap_or("");
-        let visible: String = strip_ansi_for_test(after_cursor);
+        let visible: String = crate::chrome::test_utils::strip_ansi_for_test(after_cursor);
         // "a" (1 col) + "你" (2 cols) + "好" (2 cols) = 5 cols, 1 trailing space
         assert_eq!(visible, "a你好 ", "Mixed content: got {visible:?}");
-    }
-
-    /// Helper: strip ANSI escape sequences for test assertions.
-    fn strip_ansi_for_test(s: &str) -> String {
-        let mut result = String::new();
-        let mut chars = s.chars().peekable();
-        while let Some(ch) = chars.next() {
-            if ch == '\x1b' {
-                // Skip until final byte of escape sequence
-                if chars.peek() == Some(&'[') {
-                    chars.next();
-                    while let Some(&c) = chars.peek() {
-                        chars.next();
-                        if c.is_ascii_alphabetic() {
-                            break;
-                        }
-                    }
-                }
-            } else {
-                result.push(ch);
-            }
-        }
-        result
     }
 }

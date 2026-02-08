@@ -494,7 +494,7 @@ impl HistoryBrowserPanel {
 
         // Border
         for x in chunks[9].x..chunks[9].x + chunks[9].width {
-            if let Some(cell) = buffer.cell_mut((x, chunks[10].y)) {
+            if let Some(cell) = buffer.cell_mut((x, chunks[9].y)) {
                 cell.set_char('─');
                 cell.set_style(border_style);
             }
@@ -1392,14 +1392,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_history_browser_new() {
+    fn test_history_browser_new_constructs_empty_records() {
         let panel = HistoryBrowserPanel::new(&AMBER_THEME);
         assert!(panel.records.is_empty());
         assert_eq!(panel.selection, 0);
     }
 
     #[test]
-    fn test_filter_mode_default() {
+    fn test_filter_mode_default_flags_false() {
         let panel = HistoryBrowserPanel::new(&AMBER_THEME);
         assert!(!panel.filter_mode.dedupe);
         assert!(!panel.filter_mode.current_dir_only);
@@ -1407,7 +1407,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sort_mode_cycle() {
+    fn test_sort_mode_cycle_through_variants() {
         let mut panel = HistoryBrowserPanel::new(&AMBER_THEME);
         assert_eq!(panel.sort_mode, SortMode::Recency);
         panel.sort_mode = panel.sort_mode.next();
@@ -1419,7 +1419,7 @@ mod tests {
     }
 
     #[test]
-    fn test_column_widths() {
+    fn test_column_widths_calculated_for_80_cols() {
         let cols = ColumnWidths::calculate(80, true);
         assert_eq!(cols.status, 2);
         assert_eq!(cols.count, 5);
@@ -1430,7 +1430,7 @@ mod tests {
 
     // Tokenizer tests (delegated to command_edit module)
     #[test]
-    fn test_tokenize_simple_command() {
+    fn test_tokenize_command_simple_parses_command() {
         let tokens = tokenize_command("ls -la /tmp");
         assert_eq!(tokens.len(), 3);
         assert_eq!(tokens[0].text, "ls");
@@ -1438,14 +1438,14 @@ mod tests {
     }
 
     #[test]
-    fn test_tokenize_quoted_string() {
+    fn test_tokenize_command_quoted_returns_quoted_token() {
         let tokens = tokenize_command("echo \"hello world\"");
         assert_eq!(tokens.len(), 2);
         assert_eq!(tokens[1].text, "\"hello world\"");
     }
 
     #[test]
-    fn test_tokenize_git_command() {
+    fn test_tokenize_command_git_subcommand_detected() {
         let tokens = tokenize_command("git checkout -b feature/new-branch");
         assert_eq!(tokens.len(), 4);
         assert_eq!(tokens[1].token_type, TokenType::Subcommand);
@@ -1453,20 +1453,20 @@ mod tests {
 
     // Dangerous command tests
     #[test]
-    fn test_dangerous_rm_rf() {
+    fn test_check_dangerous_command_detects_rm_rf() {
         assert!(check_dangerous_command("rm -rf /").is_some());
         assert!(check_dangerous_command("sudo rm -rf /tmp/build").is_some());
     }
 
     #[test]
-    fn test_safe_commands() {
+    fn test_check_dangerous_command_allows_safe_commands() {
         assert!(check_dangerous_command("ls -la").is_none());
         assert!(check_dangerous_command("git push origin main").is_none());
     }
 
     // Quote handling tests
     #[test]
-    fn test_split_quotes_styles_return_expected_quote_style() {
+    fn test_split_quotes_returns_style() {
         assert_eq!(
             split_quotes("hello"),
             ("hello".to_string(), QuoteStyle::None)
@@ -1482,7 +1482,7 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_quotes() {
+    fn test_apply_quotes_wraps_correctly() {
         assert_eq!(apply_quotes("hello", QuoteStyle::None), "hello");
         assert_eq!(apply_quotes("hello", QuoteStyle::Single), "'hello'");
         assert_eq!(apply_quotes("hello", QuoteStyle::Double), "\"hello\"");
@@ -1490,7 +1490,7 @@ mod tests {
 
     // Edit state tests (using shared module)
     #[test]
-    fn test_edit_state_navigation() {
+    fn test_command_edit_state_navigation_moves_selection() {
         let mut state = CommandEditState::from_command("git push origin main");
         assert_eq!(state.selected, 0);
         state.next();
@@ -1500,7 +1500,7 @@ mod tests {
     }
 
     #[test]
-    fn test_edit_state_insert_delete() {
+    fn test_command_edit_state_insert_delete_updates_token_count() {
         let mut state = CommandEditState::from_command("git push");
         assert_eq!(state.token_count(), 2);
         state.select(1);
@@ -1511,7 +1511,7 @@ mod tests {
     }
 
     #[test]
-    fn test_edit_state_undo() {
+    fn test_command_edit_state_undo_restores_tokens() {
         let mut state = CommandEditState::from_command("git push origin main");
         state.select(2);
         state.delete_token();
@@ -1521,7 +1521,7 @@ mod tests {
     }
 
     #[test]
-    fn test_edit_state_quote_cycling() {
+    fn test_command_edit_state_quote_cycling_cycles_quotes() {
         let mut state = CommandEditState::from_command("echo hello");
         state.select(1);
         state.cycle_quote();
@@ -1540,31 +1540,10 @@ mod tests {
         panel.render(&mut buffer, area);
 
         let ansi = buffer_to_ansi(&buffer, area);
-        let visible = strip_ansi_for_test(&ansi);
+        let visible = crate::chrome::test_utils::strip_ansi_for_test(&ansi);
         assert!(
             visible.contains("Original: echo 你好"),
             "expected wide chars in original hint, got: {visible:?}"
         );
-    }
-
-    fn strip_ansi_for_test(s: &str) -> String {
-        let mut result = String::new();
-        let mut chars = s.chars().peekable();
-        while let Some(ch) = chars.next() {
-            if ch == '\x1b' {
-                if chars.peek() == Some(&'[') {
-                    chars.next();
-                    while let Some(&c) = chars.peek() {
-                        chars.next();
-                        if c.is_ascii_alphabetic() {
-                            break;
-                        }
-                    }
-                }
-            } else {
-                result.push(ch);
-            }
-        }
-        result
     }
 }

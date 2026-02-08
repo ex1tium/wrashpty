@@ -1721,7 +1721,7 @@ See [Caching Tables](#caching-tables) section for full schema. Key implementatio
 
 ### Scenario 5: User Pattern Override
 
-**User defined**: Alias `deploy` → `git push && ssh prod 'docker-compose up -d'`
+**User-defined**: Alias `deploy` → `git push && ssh prod 'docker-compose up -d'`
 
 **User types**: `dep`
 
