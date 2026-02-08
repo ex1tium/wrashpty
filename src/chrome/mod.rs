@@ -8,6 +8,7 @@ pub mod command_edit;
 pub mod command_palette;
 pub mod core;
 pub mod file_browser;
+pub mod file_tree;
 pub mod help_panel;
 pub mod history_browser;
 pub mod panel;

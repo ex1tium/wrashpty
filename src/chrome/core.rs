@@ -120,6 +120,9 @@ pub struct Chrome {
     /// Symbols for icons.
     symbols: &'static Symbols,
 
+    /// Symbol set enum for passing to sub-components.
+    symbol_set: crate::config::SymbolSet,
+
     /// Last rendered minute (0-59) for efficient clock updates.
     last_rendered_minute: Option<u8>,
 
@@ -146,6 +149,7 @@ impl Chrome {
             notifications: VecDeque::new(),
             theme,
             symbols,
+            symbol_set: config.symbol_set,
             last_rendered_minute: None,
             registry,
         }
@@ -159,6 +163,11 @@ impl Chrome {
     /// Returns the symbols used by this Chrome instance.
     pub fn symbols(&self) -> &'static Symbols {
         self.symbols
+    }
+
+    /// Returns the symbol set used by this Chrome instance.
+    pub fn symbol_set(&self) -> crate::config::SymbolSet {
+        self.symbol_set
     }
 
     /// Checks if the clock should be updated based on the current minute.

@@ -1,7 +1,6 @@
-//! File browser panel for navigating the filesystem.
+//! File browser panel with tree view, git integration, and inline filter.
 
 use std::any::Any;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -19,68 +18,66 @@ use tracing::debug;
 use super::command_edit::{
     CommandEditState, CommandToken, TokenType, compute_edit_mode_layout, render_edit_mode_shared,
 };
+use super::file_tree::{FileTreeState, FlatEntry};
 use super::panel::{Panel, PanelResult};
+use super::symbols::Symbols;
 use super::theme::Theme;
+use crate::config::SymbolSet;
+use crate::git::{CachedGitRepoStatus, GitFileStatus, get_git_repo_status_cached};
 use crate::history_store::HistoryStore;
 use crate::intelligence::FileContext;
+use crate::ui::filter_input::FilterInput;
+use crate::ui::focus_style::apply_focus;
+use crate::ui::scrollable_list::ScrollableList;
+use crate::ui::tree_view::{TreeChars, tree_chars_for_set, tree_prefix};
 
-/// A directory entry in the file browser.
-#[derive(Debug, Clone)]
-pub struct DirEntry {
-    /// File or directory name.
-    pub name: String,
-    /// Full path.
-    pub path: PathBuf,
-    /// Whether this is a directory.
-    pub is_dir: bool,
-    /// File size in bytes.
-    pub size: u64,
-    /// Last modification time.
-    pub modified: Option<SystemTime>,
-    /// Unix permissions mode (e.g., 0o755).
-    pub mode: u32,
-}
-
-/// File browser panel.
+/// File browser panel with tree view.
 pub struct FileBrowserPanel {
-    /// Current directory being browsed.
-    current_dir: PathBuf,
-    /// Directory entries.
-    entries: Vec<DirEntry>,
-    /// Currently selected index.
-    selection: usize,
-    /// Scroll offset for display.
-    scroll_offset: usize,
-    /// Whether to show hidden files.
-    show_hidden: bool,
+    /// Tree state manager.
+    tree: FileTreeState,
+    /// Scrollable list for viewport management.
+    scroll: ScrollableList,
+    /// Inline filter input.
+    filter: FilterInput,
+    /// Indices into tree.entries() that match the current filter.
+    filtered_indices: Vec<usize>,
     /// Edit mode state (None when not in edit mode).
-    /// Uses the same CommandEditState as history browser for consistent UX.
     edit_mode: Option<CommandEditState>,
     /// Filename being edited (stored separately for suggestions).
     edit_filename: Option<String>,
     /// Theme for rendering.
     theme: &'static Theme,
+    /// Tree connector characters.
+    tree_chars: &'static TreeChars,
+    /// Symbol set for git status markers.
+    symbols: &'static Symbols,
     /// Reference to the history store for intelligent suggestions.
     history_store: Option<Arc<Mutex<HistoryStore>>>,
+    /// Cached git repo status.
+    git_cache: Option<CachedGitRepoStatus>,
 }
 
 impl FileBrowserPanel {
     /// Creates a new file browser at the current directory.
-    pub fn new(theme: &'static Theme) -> Self {
+    pub fn new(theme: &'static Theme, symbol_set: SymbolSet) -> Self {
         let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
-        let mut panel = Self {
-            current_dir: current_dir.clone(),
-            entries: Vec::new(),
-            selection: 0,
-            scroll_offset: 0,
-            show_hidden: false,
+        let tree = FileTreeState::new(current_dir);
+        let symbols = Symbols::for_set(symbol_set);
+        let tree_chars = tree_chars_for_set(symbol_set);
+
+        Self {
+            tree,
+            scroll: ScrollableList::new(),
+            filter: FilterInput::new(),
+            filtered_indices: Vec::new(),
             edit_mode: None,
             edit_filename: None,
             theme,
+            tree_chars,
+            symbols,
             history_store: None,
-        };
-        let _ = panel.refresh();
-        panel
+            git_cache: None,
+        }
     }
 
     /// Sets the history store for intelligent suggestions.
@@ -88,27 +85,88 @@ impl FileBrowserPanel {
         self.history_store = Some(store);
     }
 
+    /// Navigates to the given path (sets as tree root).
+    pub fn navigate_to(&mut self, path: &Path) -> std::io::Result<()> {
+        let canonical = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.tree.root().join(path)
+        };
+
+        if canonical.is_dir() {
+            self.tree.set_root(canonical);
+            self.scroll.reset();
+            self.refresh_git();
+            self.rebuild_filtered();
+        }
+
+        Ok(())
+    }
+
+    /// Refreshes git status for the current tree root.
+    fn refresh_git(&mut self) {
+        let root = self.tree.root().to_path_buf();
+        let status = get_git_repo_status_cached(&root, &mut self.git_cache);
+        self.tree.set_git_status(status);
+    }
+
+    /// Rebuilds the filtered indices list based on current filter text.
+    fn rebuild_filtered(&mut self) {
+        self.filtered_indices.clear();
+        if self.filter.has_filter() {
+            for (i, entry) in self.tree.entries().iter().enumerate() {
+                if self.filter.matches(&entry.entry.name) {
+                    self.filtered_indices.push(i);
+                }
+            }
+        }
+    }
+
+    /// Returns the number of visible items (filtered or total).
+    fn visible_count(&self) -> usize {
+        if self.filter.has_filter() {
+            self.filtered_indices.len()
+        } else {
+            self.tree.len()
+        }
+    }
+
+    /// Maps a display index (in the scroll list) to a tree index.
+    fn display_to_tree_index(&self, display_idx: usize) -> Option<usize> {
+        if self.filter.has_filter() {
+            self.filtered_indices.get(display_idx).copied()
+        } else if display_idx < self.tree.len() {
+            Some(display_idx)
+        } else {
+            None
+        }
+    }
+
+    /// Returns the currently selected tree entry.
+    fn selected_entry(&self) -> Option<&FlatEntry> {
+        let tree_idx = self.display_to_tree_index(self.scroll.selection())?;
+        self.tree.entry_at(tree_idx)
+    }
+
+    // ── Edit mode ────────────────────────────────────────────────────────────
+
     /// Enters edit mode for the selected file.
     fn enter_edit_mode(&mut self) {
         if let Some(entry) = self.selected_entry().cloned() {
-            if !entry.is_dir {
-                debug!(file = %entry.name, "Entering file edit mode");
+            if !entry.entry.is_dir {
+                debug!(file = %entry.entry.name, "Entering file edit mode");
 
-                // Create CommandEditState with locked filepath token
-                // Token 0: Command (editable)
-                // Token 1: Filepath (locked, non-editable)
-                let raw_path = entry.path.to_string_lossy();
-                let mut edit_state = CommandEditState::for_file(&entry.name, &raw_path);
+                let raw_path = entry.entry.path.to_string_lossy();
+                let mut edit_state = CommandEditState::for_file(&entry.entry.name, &raw_path);
 
-                // Set intelligence context
                 if let Some(store) = &self.history_store {
                     edit_state.set_history_store(store.clone());
                 }
-                edit_state.set_cwd(self.current_dir.clone());
-                edit_state.set_file_context(FileContext::new(&entry.name, entry.is_dir));
+                edit_state.set_cwd(self.tree.root().to_path_buf());
+                edit_state.set_file_context(FileContext::new(&entry.entry.name, entry.entry.is_dir));
                 edit_state.update_suggestions();
 
-                self.edit_filename = Some(entry.name.clone());
+                self.edit_filename = Some(entry.entry.name.clone());
                 self.edit_mode = Some(edit_state);
             }
         }
@@ -125,237 +183,27 @@ impl FileBrowserPanel {
         self.edit_mode.is_some()
     }
 
-    /// Navigates to the given path.
-    pub fn navigate_to(&mut self, path: &Path) -> std::io::Result<()> {
-        let canonical = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            self.current_dir.join(path)
-        };
-
-        if canonical.is_dir() {
-            self.current_dir = canonical;
-            self.refresh()?;
-        }
-
-        Ok(())
-    }
-
-    /// Refreshes the directory listing.
-    fn refresh(&mut self) -> std::io::Result<()> {
-        self.entries.clear();
-
-        let read_dir = fs::read_dir(&self.current_dir)?;
-
-        for entry in read_dir.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-
-            // Skip hidden files if not showing them
-            if !self.show_hidden && name.starts_with('.') {
-                continue;
-            }
-
-            let path = entry.path();
-            let metadata = entry.metadata().ok();
-            let is_dir = path.is_dir();
-            let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
-            let modified = metadata.as_ref().and_then(|m| m.modified().ok());
-
-            // Extract Unix permissions
-            #[cfg(unix)]
-            let mode = {
-                use std::os::unix::fs::PermissionsExt;
-                metadata
-                    .as_ref()
-                    .map(|m| m.permissions().mode())
-                    .unwrap_or(if is_dir { 0o755 } else { 0o644 })
-            };
-            #[cfg(not(unix))]
-            let mode = if is_dir { 0o755 } else { 0o644 };
-
-            self.entries.push(DirEntry {
-                name,
-                path,
-                is_dir,
-                size,
-                modified,
-                mode,
-            });
-        }
-
-        // Sort: directories first, then alphabetically
-        self.entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-        });
-
-        self.selection = 0;
-        self.scroll_offset = 0;
-
-        debug!(
-            "Refreshed file browser: {} entries in {}",
-            self.entries.len(),
-            self.current_dir.display()
-        );
-
-        Ok(())
-    }
-
-    /// Navigates to the parent directory.
-    fn go_parent(&mut self) {
-        if let Some(parent) = self.current_dir.parent() {
-            let parent_path = parent.to_path_buf();
-            let _ = self.navigate_to(&parent_path);
-        }
-    }
-
-    /// Toggles display of hidden files.
-    fn toggle_hidden(&mut self) {
-        self.show_hidden = !self.show_hidden;
-        let _ = self.refresh();
-    }
-
-    /// Ensures the selection is visible in the scroll window.
-    fn ensure_visible(&mut self, visible_count: usize) {
-        if self.selection < self.scroll_offset {
-            self.scroll_offset = self.selection;
-        } else if self.selection >= self.scroll_offset + visible_count {
-            self.scroll_offset = self.selection.saturating_sub(visible_count - 1);
-        }
-    }
-
-    /// Returns the currently selected entry, if any.
-    fn selected_entry(&self) -> Option<&DirEntry> {
-        self.entries.get(self.selection)
-    }
-
-    /// Updates suggestions from the unified intelligence pipeline.
+    /// Updates suggestions from the intelligence pipeline.
     fn update_suggestions_with_file_context(&mut self) {
-        let Some(edit_state) = &mut self.edit_mode else {
-            return;
-        };
-        edit_state.update_suggestions();
-    }
-}
-
-// Note: Default is removed since FileBrowserPanel now requires a theme parameter
-
-/// Shell-quotes a string to safely handle spaces and special characters.
-///
-/// Uses single quotes with proper escaping for embedded single quotes.
-/// Example: "file name.txt" -> "'file name.txt'"
-/// Example: "it's here" -> "'it'\\''s here'"
-pub fn shell_quote(s: &str) -> String {
-    // If the string contains no special characters, return as-is
-    let needs_quoting = s.chars().any(|c| {
-        matches!(
-            c,
-            ' ' | '\t'
-                | '\n'
-                | '"'
-                | '\''
-                | '\\'
-                | '$'
-                | '`'
-                | '!'
-                | '*'
-                | '?'
-                | '['
-                | ']'
-                | '{'
-                | '}'
-                | '('
-                | ')'
-                | '<'
-                | '>'
-                | '|'
-                | '&'
-                | ';'
-                | '#'
-                | '~'
-        )
-    });
-
-    if !needs_quoting && !s.is_empty() {
-        return s.to_string();
+        if let Some(edit_state) = &mut self.edit_mode {
+            edit_state.update_suggestions();
+        }
     }
 
-    // Single-quote the string, escaping embedded single quotes
-    let escaped = s.replace('\'', "'\\''");
-    format!("'{}'", escaped)
-}
+    // ── Rendering ────────────────────────────────────────────────────────────
 
-/// Formats a file size in human-readable form.
-fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-
-    if bytes >= GB {
-        format!("{:.1}G", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1}M", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1}K", bytes as f64 / KB as f64)
-    } else {
-        format!("{}B", bytes)
-    }
-}
-
-/// Formats Unix permissions as 3-digit octal.
-fn format_permissions(mode: u32) -> String {
-    format!("{:03o}", mode & 0o777)
-}
-
-/// Formats a date in compact form (Today, Yesterday, or Mon DD).
-fn format_date_compact(time: Option<SystemTime>) -> String {
-    let Some(time) = time else {
-        return "-".to_string();
-    };
-
-    let Ok(duration) = time.elapsed() else {
-        return "-".to_string();
-    };
-
-    let secs = duration.as_secs();
-    let days = secs / 86400;
-
-    if days == 0 {
-        "Today".to_string()
-    } else if days == 1 {
-        "Yday".to_string()
-    } else if days < 7 {
-        format!("{}d", days)
-    } else if days < 365 {
-        // Format as "Mon DD" using rough month calculation
-        let months = [
-            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-        ];
-        // Rough approximation - get day of year and convert
-        let day_of_year = (days % 365) as usize;
-        let month_idx = (day_of_year / 30).min(11);
-        let day = (day_of_year % 30) + 1;
-        format!("{} {:2}", months[month_idx], day)
-    } else {
-        format!("{}y", days / 365)
-    }
-}
-
-impl FileBrowserPanel {
-    /// Renders the file edit mode UI using unified token strip (same as history browser).
+    /// Renders the file edit mode UI.
     fn render_file_edit_mode(
         &self,
         buffer: &mut Buffer,
         area: Rect,
         edit_state: &CommandEditState,
     ) {
-        // Compute adaptive layout (returns None if area too small)
         let Some(layout) = compute_edit_mode_layout(area) else {
             return;
         };
 
-        // Title with filename and suggestion count
+        // Title
         let filename = self.edit_filename.as_deref().unwrap_or("file");
         let mut title_spans = vec![
             Span::styled(
@@ -387,7 +235,6 @@ impl FileBrowserPanel {
             }
         }
 
-        // Render shared elements (token strip, suggestions, edit input, result, border)
         render_edit_mode_shared(buffer, self.theme, edit_state, &layout);
 
         // Keybindings
@@ -418,11 +265,288 @@ impl FileBrowserPanel {
         Paragraph::new(hints).render(layout.keybinds, buffer);
     }
 
+    /// Renders the path header with git summary.
+    fn render_header(&self, buffer: &mut Buffer, area: Rect) {
+        let path_str = self.tree.root().to_string_lossy();
+        let max_path_width = (area.width as usize).saturating_sub(4);
+
+        // Build git summary if available
+        let git_summary = self.build_git_summary();
+        let git_width = crate::ui::text_width::display_width(&git_summary);
+        let path_budget = max_path_width.saturating_sub(git_width + 2);
+
+        let truncated_path =
+            if crate::ui::text_width::display_width(&path_str) > path_budget {
+                let target_width = path_budget.saturating_sub(3);
+                let mut width = 0;
+                let mut start_idx = path_str.len();
+                for (idx, ch) in path_str.char_indices().rev() {
+                    let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                    if width + ch_w > target_width {
+                        break;
+                    }
+                    width += ch_w;
+                    start_idx = idx;
+                }
+                format!("...{}", &path_str[start_idx..])
+            } else {
+                path_str.to_string()
+            };
+
+        let show_hidden = self.tree.show_hidden();
+        let truncated_path_width = crate::ui::text_width::display_width(&truncated_path);
+        let mut spans = vec![
+            Span::styled(" ", Style::default().fg(self.theme.header_fg)),
+            Span::styled(
+                truncated_path,
+                Style::default()
+                    .fg(self.theme.header_fg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ];
+
+        if show_hidden {
+            spans.push(Span::styled(
+                " [H]",
+                Style::default().fg(self.theme.text_secondary),
+            ));
+        }
+
+        // Add git summary at right side
+        if !git_summary.is_empty() {
+            // Calculate padding to right-align git info
+            let used_width = 1 + truncated_path_width
+                + if show_hidden { 4 } else { 0 };
+            let padding = (area.width as usize).saturating_sub(used_width + git_width + 1);
+            if padding > 0 {
+                spans.push(Span::raw(" ".repeat(padding)));
+            }
+            spans.extend(self.build_git_summary_spans());
+        }
+
+        Paragraph::new(Line::from(spans)).render(area, buffer);
+    }
+
+    /// Builds a plain-text git summary string for width calculation.
+    fn build_git_summary(&self) -> String {
+        let Some(git_status) = self.tree.git_status() else {
+            return String::new();
+        };
+
+        let summary = git_status.summary();
+        if summary.is_empty() {
+            return String::new();
+        }
+
+        let mut parts = Vec::new();
+        if let Some(&count) = summary.get(&GitFileStatus::Modified) {
+            parts.push(format!("●{}", count));
+        }
+        if let Some(&count) = summary.get(&GitFileStatus::Added) {
+            parts.push(format!("+{}", count));
+        }
+        if let Some(&count) = summary.get(&GitFileStatus::Deleted) {
+            parts.push(format!("x{}", count));
+        }
+        if let Some(&count) = summary.get(&GitFileStatus::Untracked) {
+            parts.push(format!("?{}", count));
+        }
+        if let Some(&count) = summary.get(&GitFileStatus::Renamed) {
+            parts.push(format!("r{}", count));
+        }
+        if let Some(&count) = summary.get(&GitFileStatus::Conflict) {
+            parts.push(format!("!{}", count));
+        }
+
+        parts.join(" ")
+    }
+
+    /// Builds colored spans for the git summary.
+    fn build_git_summary_spans(&self) -> Vec<Span<'static>> {
+        let Some(git_status) = self.tree.git_status() else {
+            return vec![];
+        };
+
+        let summary = git_status.summary();
+        if summary.is_empty() {
+            return vec![];
+        }
+
+        let mut spans = Vec::new();
+        let mut first = true;
+
+        let entries: Vec<(GitFileStatus, &str, ratatui_core::style::Color)> = vec![
+            (GitFileStatus::Modified, "●", self.theme.git_modified_fg),
+            (GitFileStatus::Added, "+", self.theme.git_added_fg),
+            (GitFileStatus::Deleted, "x", self.theme.git_deleted_fg),
+            (GitFileStatus::Untracked, "?", self.theme.git_untracked_fg),
+            (GitFileStatus::Renamed, "r", self.theme.git_renamed_fg),
+            (GitFileStatus::Conflict, "!", self.theme.git_conflict_fg),
+        ];
+
+        for (status, marker, color) in entries {
+            if let Some(&count) = summary.get(&status) {
+                if !first {
+                    spans.push(Span::raw(" "));
+                }
+                first = false;
+                spans.push(Span::styled(
+                    format!("{}{}", marker, count),
+                    Style::default().fg(color),
+                ));
+            }
+        }
+
+        spans
+    }
+
+    /// Renders the dimmed parent context line.
+    fn render_parent_line(&self, buffer: &mut Buffer, area: Rect) {
+        if self.tree.root() == Path::new("/") {
+            return;
+        }
+
+        if let Some(parent) = self.tree.root().parent() {
+            let parent_name = parent.to_string_lossy();
+            let dim_style = Style::default()
+                .fg(self.theme.text_secondary)
+                .add_modifier(Modifier::DIM);
+
+            let line = Line::from(vec![
+                Span::styled(" \u{2934} ", dim_style), // ⤴
+                Span::styled(format!("{}/", parent_name), dim_style),
+            ]);
+            Paragraph::new(line).render(area, buffer);
+        }
+    }
+
+    /// Renders a single tree entry row.
+    fn render_tree_entry(
+        &self,
+        flat_entry: &FlatEntry,
+        is_selected: bool,
+        area_width: u16,
+    ) -> ListItem<'static> {
+        let entry = &flat_entry.entry;
+
+        // Tree prefix
+        let prefix = tree_prefix(&flat_entry.tree_line, self.tree_chars);
+        let prefix_style = Style::default().fg(self.theme.panel_border);
+
+        // Git status marker
+        let (git_marker, git_color) = match flat_entry.git_status {
+            Some(status) => {
+                let marker = self.symbols.git_status_marker(status);
+                let color = self.git_status_color(status);
+                (format!("{} ", marker), color)
+            }
+            None => ("  ".to_string(), self.theme.text_secondary),
+        };
+
+        // Icon
+        let icon = if entry.is_dir { "📁" } else { "📄" };
+        let icon_color = if entry.is_dir {
+            self.theme.dir_color
+        } else {
+            self.theme.file_color
+        };
+
+        // Name with optional trailing slash for dirs
+        let name_display = if entry.is_dir {
+            format!("{}/", entry.name)
+        } else {
+            entry.name.clone()
+        };
+
+        // Metadata
+        let perms_str = format_permissions(entry.mode);
+        let date_str = format_date_compact(entry.modified);
+        let size_str = if entry.is_dir {
+            "     ".to_string()
+        } else {
+            format!("{:>5}", format_size(entry.size))
+        };
+
+        // Calculate available width for name
+        let prefix_width = crate::ui::text_width::display_width(&prefix);
+        let git_marker_width = crate::ui::text_width::display_width(&git_marker);
+        let icon_width = crate::ui::text_width::display_width(icon) + 1;
+        let metadata_width = 20; // perms(4) + date(6) + size(6) + spacing(4)
+        let fixed_width = prefix_width + git_marker_width + icon_width + metadata_width;
+        let available_for_name = (area_width as usize).saturating_sub(fixed_width);
+
+        let display_name = if crate::ui::text_width::display_width(&name_display) > available_for_name
+            && available_for_name > 0
+        {
+            crate::ui::text_width::truncate_with_ellipsis(&name_display, available_for_name)
+                .into_owned()
+        } else {
+            name_display.clone()
+        };
+        let name_width = crate::ui::text_width::display_width(&display_name);
+        let name_padding = available_for_name.saturating_sub(name_width);
+
+        // Determine style based on selection and spotlight
+        let is_focused = flat_entry.in_focus_path;
+
+        let name_style = if is_selected {
+            Style::default()
+                .fg(self.theme.selection_fg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            let base = if entry.is_dir {
+                Style::default().fg(self.theme.dir_color)
+            } else {
+                Style::default().fg(self.theme.file_color)
+            };
+            apply_focus(base, is_focused)
+        };
+
+        let line = Line::from(vec![
+            Span::styled(prefix, apply_focus(prefix_style, is_focused)),
+            Span::styled(git_marker, Style::default().fg(git_color)),
+            Span::styled(format!("{} ", icon), apply_focus(Style::default().fg(icon_color), is_focused)),
+            Span::styled(display_name, name_style),
+            Span::styled(" ".repeat(name_padding), Style::default()),
+            Span::styled(
+                format!(" {} ", perms_str),
+                apply_focus(Style::default().fg(self.theme.permissions_color), is_focused),
+            ),
+            Span::styled(
+                format!("{:>5} ", date_str),
+                apply_focus(Style::default().fg(self.theme.file_date_color), is_focused),
+            ),
+            Span::styled(
+                size_str,
+                apply_focus(Style::default().fg(self.theme.file_size_color), is_focused),
+            ),
+        ]);
+
+        if is_selected {
+            ListItem::new(line).style(Style::default().bg(self.theme.selection_bg))
+        } else {
+            ListItem::new(line)
+        }
+    }
+
+    /// Returns the theme color for a git file status.
+    fn git_status_color(&self, status: GitFileStatus) -> ratatui_core::style::Color {
+        match status {
+            GitFileStatus::Modified => self.theme.git_modified_fg,
+            GitFileStatus::Added => self.theme.git_added_fg,
+            GitFileStatus::Deleted => self.theme.git_deleted_fg,
+            GitFileStatus::Untracked => self.theme.git_untracked_fg,
+            GitFileStatus::Conflict => self.theme.git_conflict_fg,
+            GitFileStatus::Renamed => self.theme.git_renamed_fg,
+        }
+    }
+
+    // ── Input handlers ───────────────────────────────────────────────────────
+
     /// Handles input in file edit mode (mirrors history browser).
     fn handle_file_edit_input(&mut self, key: KeyEvent) -> Option<PanelResult> {
         let edit_state = self.edit_mode.as_mut()?;
 
-        // Handle Ctrl+key commands
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Char('z') | KeyCode::Char('u') => {
@@ -454,10 +578,6 @@ impl FileBrowserPanel {
 
         match key.code {
             KeyCode::Esc => {
-                // Three-stage Esc:
-                // 1. If current token edit differs from saved token → revert token
-                // 2. If command differs from original → revert entire command
-                // 3. Exit edit mode
                 let token_text = edit_state
                     .tokens
                     .get(edit_state.selected)
@@ -520,21 +640,17 @@ impl FileBrowserPanel {
                 Some(PanelResult::Continue)
             }
             KeyCode::Char('|') => {
-                // Pipe: commit current token, add pipe, start new token with pipeable suggestions
                 if !edit_state.edit_buffer.is_empty() {
-                    // Save current edit to current token
                     if let Some(token) = edit_state.tokens.get_mut(edit_state.selected) {
                         if !token.locked {
                             token.text = edit_state.edit_buffer.clone();
                         }
                     }
                 }
-                // Add the pipe as its own token
                 let pipe_pos = edit_state.selected + 1;
                 edit_state
                     .tokens
                     .insert(pipe_pos, CommandToken::new("|", TokenType::Argument));
-                // Point to new empty token after pipe
                 let empty_pos = pipe_pos + 1;
                 edit_state
                     .tokens
@@ -556,14 +672,121 @@ impl FileBrowserPanel {
             _ => Some(PanelResult::Continue),
         }
     }
+
+    /// Handles input in filter mode.
+    fn handle_filter_input(&mut self, key: KeyEvent) -> PanelResult {
+        match key.code {
+            KeyCode::Esc => {
+                self.filter.deactivate();
+                PanelResult::Continue
+            }
+            KeyCode::Enter => {
+                self.filter.deactivate();
+                PanelResult::Continue
+            }
+            KeyCode::Char(c) => {
+                self.filter.type_char(c);
+                self.rebuild_filtered();
+                self.scroll.reset();
+                PanelResult::Continue
+            }
+            KeyCode::Backspace => {
+                let empty = self.filter.backspace();
+                if empty {
+                    self.filter.deactivate();
+                }
+                self.rebuild_filtered();
+                self.scroll.reset();
+                PanelResult::Continue
+            }
+            _ => PanelResult::Continue,
+        }
+    }
+
+    /// Handles Enter key: navigate into dir or insert file path.
+    fn handle_enter(&mut self) -> PanelResult {
+        if let Some(entry) = self.selected_entry().cloned() {
+            if entry.entry.is_dir {
+                let path = entry.entry.path.clone();
+                let _ = self.navigate_to(&path);
+                PanelResult::Continue
+            } else {
+                PanelResult::InsertText(entry.entry.path.to_string_lossy().to_string())
+            }
+        } else {
+            PanelResult::Continue
+        }
+    }
+
+    /// Handles Right/l: expand collapsed dir, or move to first child if expanded.
+    fn handle_expand_or_child(&mut self) -> PanelResult {
+        if let Some(tree_idx) = self.display_to_tree_index(self.scroll.selection()) {
+            if let Some(entry) = self.tree.entry_at(tree_idx) {
+                if entry.entry.is_dir {
+                    if self.tree.is_expanded(tree_idx) {
+                        // Move to first child
+                        if let Some(child_idx) = self.tree.first_child_index(tree_idx) {
+                            // Map child_idx back to display index
+                            let display_idx = if self.filter.has_filter() {
+                                self.filtered_indices.iter().position(|&i| i == child_idx)
+                            } else {
+                                Some(child_idx)
+                            };
+                            if let Some(di) = display_idx {
+                                self.scroll.set_selection(di, self.visible_count());
+                            }
+                        }
+                    } else {
+                        self.tree.expand(tree_idx);
+                        self.rebuild_filtered();
+                    }
+                }
+            }
+        }
+        PanelResult::Continue
+    }
+
+    /// Handles Left/h: collapse expanded dir, or jump to parent entry.
+    fn handle_collapse_or_parent(&mut self) -> PanelResult {
+        if let Some(tree_idx) = self.display_to_tree_index(self.scroll.selection()) {
+            if let Some(entry) = self.tree.entry_at(tree_idx) {
+                if entry.entry.is_dir && self.tree.is_expanded(tree_idx) {
+                    self.tree.collapse(tree_idx);
+                    self.rebuild_filtered();
+                } else if let Some(parent_idx) = self.tree.parent_index(tree_idx) {
+                    // Jump to parent entry
+                    let display_idx = if self.filter.has_filter() {
+                        self.filtered_indices
+                            .iter()
+                            .position(|&i| i == parent_idx)
+                    } else {
+                        Some(parent_idx)
+                    };
+                    if let Some(di) = display_idx {
+                        self.scroll.set_selection(di, self.visible_count());
+                    }
+                }
+            }
+        }
+        PanelResult::Continue
+    }
+
+    /// Handles Space: toggle expand/collapse.
+    fn handle_toggle_expand(&mut self) -> PanelResult {
+        if let Some(tree_idx) = self.display_to_tree_index(self.scroll.selection()) {
+            self.tree.toggle_expand(tree_idx);
+            self.rebuild_filtered();
+        }
+        PanelResult::Continue
+    }
 }
 
 impl Panel for FileBrowserPanel {
     fn preferred_height(&self) -> u16 {
         if self.edit_mode.is_some() {
-            13 // 12 rows including spacer before Result
+            13
         } else {
-            12
+            14
         }
     }
 
@@ -582,177 +805,153 @@ impl Panel for FileBrowserPanel {
             return;
         }
 
-        // Create layout: path header at top, list in middle, border + keybinds at bottom
-        let chunks = Layout::vertical([
+        // Update focus path for spotlight dimming
+        if let Some(tree_idx) = self.display_to_tree_index(self.scroll.selection()) {
+            self.tree.update_focus(tree_idx);
+        }
+
+        // Build layout
+        let at_root = self.tree.root() == Path::new("/");
+        let filter_active = self.filter.is_active() || self.filter.has_filter();
+
+        let mut constraints = vec![
             Constraint::Length(1), // Path header
-            Constraint::Min(1),    // File list
-            Constraint::Length(1), // Border line
-            Constraint::Length(1), // Keybind hints bar
-        ])
-        .split(area);
+        ];
+        if !at_root {
+            constraints.push(Constraint::Length(1)); // Parent context line
+        }
+        constraints.push(Constraint::Min(1)); // Tree view
+        if filter_active {
+            constraints.push(Constraint::Length(1)); // Filter bar
+        }
+        constraints.push(Constraint::Length(1)); // Border
+        constraints.push(Constraint::Length(1)); // Keybind hints
 
-        // Render path header
-        let path_str = self.current_dir.to_string_lossy();
-        let max_path_width = (area.width as usize).saturating_sub(4);
-        let truncated_path = if crate::ui::text_width::display_width(&path_str) > max_path_width {
-            // Truncate from the left (show the end of the path)
-            let target_width = max_path_width.saturating_sub(3); // room for "..."
-            // Walk backwards through chars to find how much of the tail fits.
-            let mut width = 0;
-            let mut start_idx = path_str.len();
-            for (idx, ch) in path_str.char_indices().rev() {
-                let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-                if width + ch_w > target_width {
-                    break;
+        let chunks = Layout::vertical(constraints).split(area);
+        let mut chunk_idx = 0;
+
+        // Path header
+        self.render_header(buffer, chunks[chunk_idx]);
+        chunk_idx += 1;
+
+        // Parent context line (only when not at /)
+        if !at_root {
+            self.render_parent_line(buffer, chunks[chunk_idx]);
+            chunk_idx += 1;
+        }
+
+        // Tree view
+        let tree_area = chunks[chunk_idx];
+        chunk_idx += 1;
+
+        let visible_height = tree_area.height as usize;
+        let item_count = self.visible_count();
+        self.scroll.ensure_visible(visible_height);
+        let visible = self.scroll.visible_range(visible_height, item_count);
+
+        let items: Vec<ListItem> = visible
+            .map(|display_idx| {
+                let is_selected = display_idx == self.scroll.selection();
+                if let Some(tree_idx) = self.display_to_tree_index(display_idx) {
+                    if let Some(flat_entry) = self.tree.entry_at(tree_idx) {
+                        return self.render_tree_entry(flat_entry, is_selected, area.width);
+                    }
                 }
-                width += ch_w;
-                start_idx = idx;
-            }
-            format!("...{}", &path_str[start_idx..])
-        } else {
-            path_str.to_string()
-        };
-        let header = Line::from(vec![
-            Span::styled(" ", Style::default().fg(self.theme.header_fg)),
-            Span::styled(
-                truncated_path,
-                Style::default()
-                    .fg(self.theme.header_fg)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            if self.show_hidden {
-                Span::styled(" [H]", Style::default().fg(self.theme.text_secondary))
-            } else {
-                Span::raw("")
-            },
-        ]);
-        Paragraph::new(header).render(chunks[0], buffer);
-
-        // Calculate visible items
-        let visible_height = chunks[1].height as usize;
-        self.ensure_visible(visible_height);
-
-        // Render entry list
-        let items: Vec<ListItem> = self
-            .entries
-            .iter()
-            .skip(self.scroll_offset)
-            .take(visible_height)
-            .enumerate()
-            .map(|(display_idx, entry)| {
-                let actual_idx = self.scroll_offset + display_idx;
-                let is_selected = actual_idx == self.selection;
-
-                // Use Unicode file/folder icons.
-                let icon = if entry.is_dir { "📁" } else { "📄" };
-                let icon_color = if entry.is_dir {
-                    self.theme.dir_color
-                } else {
-                    self.theme.file_color
-                };
-
-                let name_style = if is_selected {
-                    Style::default()
-                        .fg(self.theme.selection_fg)
-                        .add_modifier(Modifier::BOLD)
-                } else if entry.is_dir {
-                    Style::default().fg(self.theme.dir_color)
-                } else {
-                    Style::default().fg(self.theme.file_color)
-                };
-
-                // Format metadata columns
-                let perms_str = format_permissions(entry.mode);
-                let date_str = format_date_compact(entry.modified);
-                let size_str = if entry.is_dir {
-                    "     ".to_string()
-                } else {
-                    format!("{:>5}", format_size(entry.size))
-                };
-
-                // Calculate available width for name (total - metadata columns).
-                // icon_display_width + spacing(1) + perms(4) + date(6) + size(6) + spacing(6)
-                let icon_width = crate::ui::text_width::display_width(icon) + 1;
-                let metadata_width = icon_width + 20;
-                let available_for_name = (area.width as usize).saturating_sub(metadata_width);
-                // Use display-width-aware truncation for correct column alignment
-                let name_display_width = crate::ui::text_width::display_width(&entry.name);
-                let display_name = if name_display_width > available_for_name
-                    && available_for_name > 0
-                {
-                    crate::ui::text_width::truncate_with_ellipsis(&entry.name, available_for_name)
-                        .into_owned()
-                } else {
-                    entry.name.clone()
-                };
-                let display_name_width = crate::ui::text_width::display_width(&display_name);
-                let name_padding = available_for_name.saturating_sub(display_name_width);
-
-                let line = Line::from(vec![
-                    Span::styled(format!("{} ", icon), Style::default().fg(icon_color)),
-                    Span::styled(display_name, name_style),
-                    Span::styled(" ".repeat(name_padding), Style::default()),
-                    Span::styled(
-                        format!(" {} ", perms_str),
-                        Style::default().fg(self.theme.permissions_color),
-                    ),
-                    Span::styled(
-                        format!("{:>5} ", date_str),
-                        Style::default().fg(self.theme.file_date_color),
-                    ),
-                    Span::styled(size_str, Style::default().fg(self.theme.file_size_color)),
-                ]);
-
-                if is_selected {
-                    ListItem::new(line).style(Style::default().bg(self.theme.selection_bg))
-                } else {
-                    ListItem::new(line)
-                }
+                ListItem::new(Line::raw(""))
             })
             .collect();
 
         let list = List::new(items);
-        list.render(chunks[1], buffer);
+        list.render(tree_area, buffer);
 
-        // Render border line above keybind bar
+        // Filter bar
+        if filter_active {
+            let filter_area = chunks[chunk_idx];
+            chunk_idx += 1;
+
+            let filter_spans = self.filter.render_spans(self.theme);
+            let mut spans = Vec::new();
+            spans.extend(filter_spans);
+            // Show match count
+            if self.filter.has_filter() {
+                let count_str = format!("  ({}/{})", self.filtered_indices.len(), self.tree.len());
+                spans.push(Span::styled(
+                    count_str,
+                    Style::default().fg(self.theme.text_secondary),
+                ));
+            }
+            Paragraph::new(Line::from(spans)).render(filter_area, buffer);
+        }
+
+        // Border line
+        let border_area = chunks[chunk_idx];
+        chunk_idx += 1;
         let border_style = Style::default().fg(self.theme.panel_border);
-        for x in chunks[2].x..chunks[2].x + chunks[2].width {
-            if let Some(cell) = buffer.cell_mut((x, chunks[2].y)) {
+        for x in border_area.x..border_area.x + border_area.width {
+            if let Some(cell) = buffer.cell_mut((x, border_area.y)) {
                 cell.set_char('─');
                 cell.set_style(border_style);
             }
         }
 
-        // Render keybind bar
+        // Status info in border (sort mode + depth)
+        let sort_label = self.tree.sort_mode().label();
+        let depth_label = match self.tree.max_depth() {
+            0 => "∞".to_string(),
+            d => d.to_string(),
+        };
+        let spotlight_indicator = if self.tree.spotlight() { " ◉" } else { "" };
+        let info = format!(" sort:{} depth:{}{} ", sort_label, depth_label, spotlight_indicator);
+        let info_width = crate::ui::text_width::display_width(&info) as u16;
+        let info_start = border_area.x + border_area.width.saturating_sub(info_width + 1);
+        for (i, ch) in info.chars().enumerate() {
+            let x = info_start + i as u16;
+            if x < border_area.x + border_area.width {
+                if let Some(cell) = buffer.cell_mut((x, border_area.y)) {
+                    cell.set_char(ch);
+                    cell.set_style(Style::default().fg(self.theme.text_secondary));
+                }
+            }
+        }
+
+        // Keybind hints
+        let hints_area = chunks[chunk_idx];
         let key_style = Style::default().fg(self.theme.text_highlight);
         let label_style = Style::default().fg(self.theme.text_secondary);
         let active_label = Style::default()
             .fg(self.theme.semantic_success)
             .add_modifier(Modifier::BOLD);
+
         let hints = Line::from(vec![
             Span::styled("^E", key_style),
             Span::styled(" Edit", label_style),
             Span::raw("  "),
+            Span::styled("Space", key_style),
+            Span::styled(" Expand", label_style),
+            Span::raw("  "),
+            Span::styled("/", key_style),
+            Span::styled(" Filter", label_style),
+            Span::raw("  "),
             Span::styled(".", key_style),
             Span::styled(
                 " Hidden",
-                if self.show_hidden {
+                if self.tree.show_hidden() {
                     active_label
                 } else {
                     label_style
                 },
             ),
             Span::raw("  "),
-            Span::styled("⌫", key_style),
-            Span::styled(" Parent", label_style),
+            Span::styled("s", key_style),
+            Span::styled(" Sort", label_style),
             Span::raw("  "),
             Span::styled("Enter", key_style),
-            Span::styled(" Open/Insert", label_style),
+            Span::styled(" Open", label_style),
             Span::raw("  "),
             Span::styled("Esc", key_style),
             Span::styled(" Close", label_style),
         ]);
-        Paragraph::new(hints).render(chunks[3], buffer);
+        Paragraph::new(hints).render(hints_area, buffer);
     }
 
     fn handle_input(&mut self, key: KeyEvent) -> PanelResult {
@@ -763,57 +962,105 @@ impl Panel for FileBrowserPanel {
             }
         }
 
-        // Handle Ctrl+key commands
+        // If filter is active, handle filter input
+        if self.filter.is_active() {
+            return self.handle_filter_input(key);
+        }
+
+        // Ctrl+key commands
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Char('e') => {
-                    // Enter edit mode for the selected file
                     self.enter_edit_mode();
                     return PanelResult::Continue;
                 }
                 KeyCode::Char('h') => {
-                    self.toggle_hidden();
+                    self.tree.toggle_hidden();
+                    self.rebuild_filtered();
                     return PanelResult::Continue;
                 }
                 _ => {}
             }
         }
 
+        let count = self.visible_count();
+
         match key.code {
             KeyCode::Esc => PanelResult::Dismiss,
-            KeyCode::Enter => {
-                if let Some(entry) = self.selected_entry().cloned() {
-                    if entry.is_dir {
-                        let _ = self.navigate_to(&entry.path);
-                        PanelResult::Continue
-                    } else {
-                        // Insert the file path
-                        PanelResult::InsertText(entry.path.to_string_lossy().to_string())
-                    }
-                } else {
-                    PanelResult::Continue
-                }
-            }
+            KeyCode::Enter => self.handle_enter(),
             KeyCode::Backspace => {
-                self.go_parent();
+                // Go to parent directory (change root)
+                if let Some(parent) = self.tree.root().parent() {
+                    let parent_path = parent.to_path_buf();
+                    let _ = self.navigate_to(&parent_path);
+                }
                 PanelResult::Continue
             }
+
+            // Navigation
             KeyCode::Up => {
-                if self.selection > 0 {
-                    self.selection -= 1;
-                }
+                self.scroll.up(count);
                 PanelResult::Continue
             }
             KeyCode::Down => {
-                if self.selection + 1 < self.entries.len() {
-                    self.selection += 1;
-                }
+                self.scroll.down(count);
                 PanelResult::Continue
             }
+            KeyCode::PageUp => {
+                self.scroll.page_up(10, count);
+                PanelResult::Continue
+            }
+            KeyCode::PageDown => {
+                self.scroll.page_down(10, count);
+                PanelResult::Continue
+            }
+            KeyCode::Home => {
+                self.scroll.home();
+                PanelResult::Continue
+            }
+            KeyCode::End => {
+                self.scroll.end(count);
+                PanelResult::Continue
+            }
+
+            // Tree operations
+            KeyCode::Right | KeyCode::Char('l') => self.handle_expand_or_child(),
+            KeyCode::Left | KeyCode::Char('h') => self.handle_collapse_or_parent(),
+            KeyCode::Char(' ') => self.handle_toggle_expand(),
+
+            // Filter
+            KeyCode::Char('/') => {
+                self.filter.activate();
+                PanelResult::Continue
+            }
+
+            // Toggles
             KeyCode::Char('.') => {
-                self.toggle_hidden();
+                self.tree.toggle_hidden();
+                self.rebuild_filtered();
                 PanelResult::Continue
             }
+            KeyCode::Char('s') => {
+                self.tree.cycle_sort();
+                self.rebuild_filtered();
+                PanelResult::Continue
+            }
+            KeyCode::Char('d') => {
+                self.tree.cycle_depth();
+                self.rebuild_filtered();
+                PanelResult::Continue
+            }
+            KeyCode::Char('m') => {
+                self.tree.toggle_spotlight();
+                PanelResult::Continue
+            }
+            KeyCode::Char('r') => {
+                self.tree.refresh();
+                self.refresh_git();
+                self.rebuild_filtered();
+                PanelResult::Continue
+            }
+
             _ => PanelResult::Continue,
         }
     }
@@ -823,15 +1070,112 @@ impl Panel for FileBrowserPanel {
     }
 }
 
+// ── Formatting helpers ───────────────────────────────────────────────────────
+
+/// Shell-quotes a string to safely handle spaces and special characters.
+pub fn shell_quote(s: &str) -> String {
+    let needs_quoting = s.chars().any(|c| {
+        matches!(
+            c,
+            ' ' | '\t'
+                | '\n'
+                | '"'
+                | '\''
+                | '\\'
+                | '$'
+                | '`'
+                | '!'
+                | '*'
+                | '?'
+                | '['
+                | ']'
+                | '{'
+                | '}'
+                | '('
+                | ')'
+                | '<'
+                | '>'
+                | '|'
+                | '&'
+                | ';'
+                | '#'
+                | '~'
+        )
+    });
+
+    if !needs_quoting && !s.is_empty() {
+        return s.to_string();
+    }
+
+    let escaped = s.replace('\'', "'\\''");
+    format!("'{}'", escaped)
+}
+
+/// Formats a file size in human-readable form.
+fn format_size(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+
+    if bytes >= GB {
+        format!("{:.1}G", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1}M", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1}K", bytes as f64 / KB as f64)
+    } else {
+        format!("{}B", bytes)
+    }
+}
+
+/// Formats Unix permissions as 3-digit octal.
+fn format_permissions(mode: u32) -> String {
+    format!("{:03o}", mode & 0o777)
+}
+
+/// Formats a date in compact form.
+fn format_date_compact(time: Option<SystemTime>) -> String {
+    let Some(time) = time else {
+        return "-".to_string();
+    };
+
+    let Ok(duration) = time.elapsed() else {
+        return "-".to_string();
+    };
+
+    let secs = duration.as_secs();
+    let days = secs / 86400;
+
+    if days == 0 {
+        "Today".to_string()
+    } else if days == 1 {
+        "Yday".to_string()
+    } else if days < 7 {
+        format!("{}d", days)
+    } else if days < 365 {
+        let months = [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ];
+        let day_of_year = (days % 365) as usize;
+        let month_idx = (day_of_year / 30).min(11);
+        let day = (day_of_year % 30) + 1;
+        format!("{} {:2}", months[month_idx], day)
+    } else {
+        format!("{}y", days / 365)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::file_tree::SortMode;
     use super::super::theme::AMBER_THEME;
     use super::*;
 
     #[test]
-    fn test_file_browser_new_default_show_hidden_false() {
-        let panel = FileBrowserPanel::new(&AMBER_THEME);
-        assert!(!panel.show_hidden);
+    fn test_file_browser_new() {
+        let panel = FileBrowserPanel::new(&AMBER_THEME, SymbolSet::NerdFont);
+        assert!(!panel.tree.show_hidden());
+        assert_eq!(panel.tree.sort_mode(), SortMode::Name);
     }
 
     #[test]
@@ -842,16 +1186,6 @@ mod tests {
         assert_eq!(format_size(1536), "1.5K");
         assert_eq!(format_size(1048576), "1.0M");
         assert_eq!(format_size(1073741824), "1.0G");
-    }
-
-    #[test]
-    fn test_toggle_hidden_toggles_show_hidden() {
-        let mut panel = FileBrowserPanel::new(&AMBER_THEME);
-        assert!(!panel.show_hidden);
-        panel.toggle_hidden();
-        assert!(panel.show_hidden);
-        panel.toggle_hidden();
-        assert!(!panel.show_hidden);
     }
 
     #[test]
