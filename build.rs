@@ -9,22 +9,12 @@ fn main() {
     let schema_dir = Path::new("schemas/curated");
     println!("cargo:rerun-if-changed={}", schema_dir.display());
 
-    if !schema_dir.exists() {
-        panic!(
-            "Missing curated schema directory '{}'. Create it and add schema JSON files.",
-            schema_dir.display()
-        );
-    }
-
-    let schema_paths = collect_schema_paths(schema_dir)
-        .unwrap_or_else(|err| panic!("Failed to collect schema files: {err}"));
-
-    if schema_paths.is_empty() {
-        panic!(
-            "No curated schema JSON files found in '{}'.",
-            schema_dir.display()
-        );
-    }
+    let schema_paths = if schema_dir.exists() {
+        collect_schema_paths(schema_dir)
+            .unwrap_or_else(|err| panic!("Failed to collect schema files: {err}"))
+    } else {
+        Vec::new()
+    };
 
     for path in &schema_paths {
         println!("cargo:rerun-if-changed={}", path.display());

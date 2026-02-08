@@ -35,6 +35,7 @@ pub fn export_schema_pack(schema_index: &SchemaIndex) -> Result<String, CIError>
 
     let meta = schema_index.bundle_meta();
     let package = SchemaPackage {
+        schema_version: Some(command_schema_core::SCHEMA_CONTRACT_VERSION.to_string()),
         version: meta.version.clone(),
         name: Some("wrashpty-curated-schemas".to_string()),
         description: Some("Curated command schemas exported from wrashpty".to_string()),
@@ -829,6 +830,7 @@ mod tests {
             SchemaIndex::from_schemas(vec![CommandSchema::new("cargo", SchemaSource::Bootstrap)]);
 
         let package = SchemaPackage {
+            schema_version: None,
             version: "1.0.0".to_string(),
             name: Some("test-pack".to_string()),
             description: None,
