@@ -873,7 +873,7 @@ mod tests {
     }
 
     #[test]
-    fn test_chrome_new_headless() {
+    fn test_chrome_new_headless_is_inactive() {
         let config = test_config();
         let chrome = Chrome::new(ChromeMode::Headless, &config);
         assert_eq!(chrome.mode(), ChromeMode::Headless);
@@ -881,7 +881,7 @@ mod tests {
     }
 
     #[test]
-    fn test_chrome_new_full() {
+    fn test_chrome_new_full_is_active() {
         let config = test_config();
         let chrome = Chrome::new(ChromeMode::Full, &config);
         assert_eq!(chrome.mode(), ChromeMode::Full);
@@ -889,7 +889,7 @@ mod tests {
     }
 
     #[test]
-    fn test_chrome_toggle() {
+    fn test_chrome_toggle_switches_mode() {
         let config = test_config();
         let mut chrome = Chrome::new(ChromeMode::Headless, &config);
         assert_eq!(chrome.mode(), ChromeMode::Headless);
@@ -902,7 +902,7 @@ mod tests {
     }
 
     #[test]
-    fn test_chrome_is_active_when_suspended() {
+    fn test_chrome_check_minimum_size_suspends_and_resumes() {
         let config = test_config();
         let mut chrome = Chrome::new(ChromeMode::Full, &config);
         assert!(chrome.is_active());
@@ -926,7 +926,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::assertions_on_constants)]
-    fn test_chrome_minimum_size_constants() {
+    fn test_chrome_minimum_size_constants_within_bounds() {
         assert!(MIN_COLS > 0);
         assert!(MIN_ROWS > 0);
         assert!(MIN_COLS <= 80);
@@ -934,7 +934,7 @@ mod tests {
     }
 
     #[test]
-    fn test_check_minimum_size_boundary() {
+    fn test_check_minimum_size_at_boundary_suspends_below() {
         let config = test_config();
         let mut chrome = Chrome::new(ChromeMode::Full, &config);
 
@@ -950,7 +950,7 @@ mod tests {
     }
 
     #[test]
-    fn test_truncate_to_width_ascii() {
+    fn test_truncate_to_width_ascii_truncates_at_boundary() {
         let s = "Hello, World!";
         assert_eq!(
             crate::ui::text_width::truncate_to_width(s, 5).as_ref(),
@@ -961,7 +961,7 @@ mod tests {
     }
 
     #[test]
-    fn test_truncate_to_width_unicode() {
+    fn test_truncate_to_width_cjk_skips_half_width_chars() {
         // CJK characters have width 2
         let s = "Hello\u{4E2D}\u{6587}"; // "Hello中文"
         assert_eq!(
@@ -979,7 +979,7 @@ mod tests {
     }
 
     #[test]
-    fn test_registry_render_success() {
+    fn test_registry_render_with_clean_git_shows_all_segments() {
         use super::super::segments::GitInfo;
         use std::path::PathBuf;
 
@@ -1009,7 +1009,7 @@ mod tests {
     }
 
     #[test]
-    fn test_registry_render_failure() {
+    fn test_registry_render_with_nonzero_exit_shows_failure_symbol() {
         use super::super::segments::GitInfo;
         use std::path::PathBuf;
 
@@ -1032,7 +1032,7 @@ mod tests {
     }
 
     #[test]
-    fn test_registry_render_with_dirty_git() {
+    fn test_registry_render_with_dirty_git_shows_branch() {
         use super::super::segments::GitInfo;
         use std::path::PathBuf;
 
@@ -1059,7 +1059,7 @@ mod tests {
     }
 
     #[test]
-    fn test_registry_render_truncation() {
+    fn test_registry_render_narrow_width_truncates_without_panic() {
         use super::super::segments::GitInfo;
         use std::path::PathBuf;
 
@@ -1089,7 +1089,7 @@ mod tests {
     }
 
     #[test]
-    fn test_clear_content_area_noop_when_headless() {
+    fn test_clear_content_area_headless_returns_ok() {
         let config = test_config();
         let chrome = Chrome::new(ChromeMode::Headless, &config);
         // Should succeed without doing anything (headless mode)
@@ -1097,7 +1097,7 @@ mod tests {
     }
 
     #[test]
-    fn test_clear_content_area_succeeds_when_active() {
+    fn test_clear_content_area_full_mode_returns_ok() {
         let config = test_config();
         let chrome = Chrome::new(ChromeMode::Full, &config);
         // Should succeed (writes escape sequences to stdout)

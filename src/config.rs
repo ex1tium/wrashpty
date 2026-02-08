@@ -54,6 +54,9 @@ impl ScrollbackConfig {
     ///
     /// - `WRASHPTY_SCROLLBACK_LINES`: Maximum lines to store (e.g., `50000`).
     ///   Defaults to 10,000.
+    ///
+    /// - `WRASHPTY_SCROLLBACK_LINE_BYTES`: Maximum bytes per line before
+    ///   truncation (e.g., `8192`). Defaults to 4,096.
     pub fn from_env() -> Self {
         let enabled = !matches!(
             std::env::var("WRASHPTY_SCROLLBACK")
@@ -69,10 +72,16 @@ impl ScrollbackConfig {
             .unwrap_or(10_000)
             .clamp(100, 1_000_000); // Between 100 and 1 million lines
 
+        let max_line_bytes = std::env::var("WRASHPTY_SCROLLBACK_LINE_BYTES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(4096)
+            .clamp(256, 65_536); // Between 256 bytes and 64 KiB
+
         Self {
             enabled,
             max_lines,
-            ..Self::default()
+            max_line_bytes,
         }
     }
 }

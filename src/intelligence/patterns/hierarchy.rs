@@ -33,6 +33,12 @@ pub fn learn_hierarchy(
         return Ok(());
     }
 
+    debug_assert_eq!(
+        tokens.len(),
+        token_ids.len(),
+        "tokens and token_ids must have equal length"
+    );
+
     let success_increment = if is_success { 1 } else { 0 };
     let base_command_id = token_ids.first().copied();
 

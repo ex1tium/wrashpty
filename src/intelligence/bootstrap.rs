@@ -3,7 +3,7 @@
 //! This module seeds the command hierarchy table from the embedded schema
 //! index on first run. After bootstrap, learned data takes over for ranking.
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use tracing::{debug, info};
 
 use command_schema_core::SubcommandSchema;
@@ -23,6 +23,7 @@ pub fn bootstrap_if_empty(conn: &Connection, schema_index: &SchemaIndex) -> Resu
             [],
             |row| row.get(0),
         )
+        .optional()?
         .unwrap_or(false);
 
     if bootstrapped {
@@ -46,14 +47,9 @@ pub fn bootstrap_if_empty(conn: &Connection, schema_index: &SchemaIndex) -> Resu
 fn seed_command_knowledge(conn: &Connection, schema_index: &SchemaIndex) -> Result<(), CIError> {
     let now = chrono::Utc::now().timestamp();
 
-    conn.execute_batch("BEGIN TRANSACTION")?;
-
-    if let Err(e) = seed_from_schema_index(conn, schema_index, now) {
-        conn.execute_batch("ROLLBACK")?;
-        return Err(e);
-    }
-
-    conn.execute_batch("COMMIT")?;
+    let tx = conn.unchecked_transaction()?;
+    seed_from_schema_index(&tx, schema_index, now)?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -143,7 +139,7 @@ fn get_or_create_token(
         .query_row("SELECT id FROM ci_tokens WHERE text = ?1", [text], |row| {
             row.get(0)
         })
-        .ok();
+        .optional()?;
 
     if let Some(id) = existing {
         return Ok(id);

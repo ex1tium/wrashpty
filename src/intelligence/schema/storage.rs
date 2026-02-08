@@ -269,7 +269,7 @@ mod tests {
     }
 
     #[test]
-    fn test_store_and_retrieve_schema() {
+    fn test_store_and_get_schema_persists_flags_and_subcommands() {
         let conn = setup_test_db();
         let store = SchemaStore::new(&conn);
 
@@ -289,7 +289,7 @@ mod tests {
     }
 
     #[test]
-    fn test_get_subcommand() {
+    fn test_get_subcommand_returns_flags_for_nested_command() {
         let conn = setup_test_db();
         let store = SchemaStore::new(&conn);
 
@@ -310,7 +310,7 @@ mod tests {
     }
 
     #[test]
-    fn test_list_commands() {
+    fn test_list_commands_returns_all_stored_commands() {
         let conn = setup_test_db();
         let store = SchemaStore::new(&conn);
 
@@ -331,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn test_has_schema() {
+    fn test_has_schema_returns_true_after_store() {
         let conn = setup_test_db();
         let store = SchemaStore::new(&conn);
 
@@ -346,7 +346,7 @@ mod tests {
     }
 
     #[test]
-    fn test_delete_schema() {
+    fn test_delete_schema_removes_command_and_subcommands() {
         let conn = setup_test_db();
         let store = SchemaStore::new(&conn);
 

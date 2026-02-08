@@ -51,4 +51,5 @@ schema-snapshot-test:
 		--output "schemas/test-snapshot"
 	@echo "Comparing with curated schemas..."
 	@diff -r schemas/curated schemas/test-snapshot || \
-		(echo "Schema differences detected. Review changes."; exit 1)
+		(rm -rf schemas/test-snapshot; echo "Schema differences detected. Review changes."; exit 1)
+	@rm -rf schemas/test-snapshot

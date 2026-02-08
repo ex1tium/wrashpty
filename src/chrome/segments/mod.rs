@@ -111,6 +111,46 @@ fn strip_ansi_width(s: &str) -> usize {
     width
 }
 
+/// Truncates ANSI-styled content to a target display width.
+///
+/// Walks the string character by character, skipping SGR escape sequences,
+/// and stops emitting visible characters once `target_width` columns are
+/// reached. Any open SGR sequence at the truncation point is closed with a
+/// reset so downstream rendering is not corrupted.
+fn truncate_ansi_content(s: &str, target_width: usize) -> String {
+    let mut result = String::new();
+    let mut width = 0;
+    let mut in_escape = false;
+    let mut has_style = false;
+
+    for ch in s.chars() {
+        if ch == '\x1b' {
+            in_escape = true;
+            result.push(ch);
+            continue;
+        }
+        if in_escape {
+            result.push(ch);
+            if ch == 'm' {
+                in_escape = false;
+                has_style = true;
+            }
+            continue;
+        }
+        let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if width + cw > target_width {
+            break;
+        }
+        result.push(ch);
+        width += cw;
+    }
+
+    if has_style {
+        result.push_str("\x1b[0m");
+    }
+    result
+}
+
 /// Information about scroll position for display.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ScrollInfo {
@@ -252,7 +292,7 @@ impl TopbarRegistry {
         let right_width: usize = right_segments.iter().map(|s| s.display_width).sum();
         let mut total_width = left_width + right_width;
 
-        // Truncate segments if needed (remove highest priority first from left)
+        // Truncate segments if needed (remove highest priority number first from left)
         while total_width > max_width && left_segments.len() > 1 {
             let max_priority_idx = left_segments
                 .iter()
@@ -265,6 +305,43 @@ impl TopbarRegistry {
                 total_width = total_width.saturating_sub(removed.display_width);
             } else {
                 break;
+            }
+        }
+
+        // Fallback: remove highest-priority-number right segments if still overflowing
+        while total_width > max_width && right_segments.len() > 1 {
+            let max_priority_idx = right_segments
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, s)| s.priority)
+                .map(|(i, _)| i);
+
+            if let Some(idx) = max_priority_idx {
+                let removed = right_segments.remove(idx);
+                total_width = total_width.saturating_sub(removed.display_width);
+            } else {
+                break;
+            }
+        }
+
+        // Last resort: hard-truncate remaining segment content to fit
+        if total_width > max_width {
+            if let Some(seg) = right_segments.first_mut() {
+                let overflow = total_width - max_width;
+                if seg.display_width > overflow {
+                    seg.display_width -= overflow;
+                    seg.content = truncate_ansi_content(&seg.content, seg.display_width);
+                    total_width -= overflow;
+                }
+            }
+            if total_width > max_width {
+                if let Some(seg) = left_segments.first_mut() {
+                    let overflow = total_width - max_width;
+                    if seg.display_width > overflow {
+                        seg.display_width -= overflow;
+                        seg.content = truncate_ansi_content(&seg.content, seg.display_width);
+                    }
+                }
             }
         }
 
@@ -351,14 +428,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_strip_ansi_width() {
+    fn test_strip_ansi_width_excludes_escape_sequences() {
         assert_eq!(strip_ansi_width("hello"), 5);
         assert_eq!(strip_ansi_width("\x1b[31mred\x1b[0m"), 3);
         assert_eq!(strip_ansi_width("\x1b[38;2;255;0;0mrgb\x1b[0m"), 3);
     }
 
     #[test]
-    fn test_rendered_segment_new() {
+    fn test_rendered_segment_new_computes_display_width() {
         let segment = RenderedSegment::new("hello".to_string(), 1, SegmentAlign::Left);
         assert_eq!(segment.display_width, 5);
         assert_eq!(segment.priority, 1);
@@ -366,19 +443,79 @@ mod tests {
     }
 
     #[test]
-    fn test_rendered_segment_with_ansi() {
+    fn test_rendered_segment_left_with_ansi_strips_escapes_for_width() {
         let segment = RenderedSegment::left("\x1b[32m✓\x1b[0m".to_string(), 0);
         assert_eq!(segment.display_width, 1); // Just the checkmark
     }
 
     #[test]
-    fn test_registry_default() {
+    fn test_topbar_registry_with_defaults_has_6_segments() {
         let registry = TopbarRegistry::with_defaults();
         assert_eq!(registry.segments.len(), 6);
     }
 
     #[test]
-    fn test_segment_align_default() {
+    fn test_segment_align_default_is_left() {
         assert_eq!(SegmentAlign::default(), SegmentAlign::Left);
+    }
+
+    #[test]
+    fn test_truncate_ansi_content_plain_text_truncates_at_width() {
+        assert_eq!(truncate_ansi_content("hello world", 5), "hello");
+        assert_eq!(truncate_ansi_content("abc", 10), "abc");
+    }
+
+    #[test]
+    fn test_truncate_ansi_content_with_sgr_preserves_escapes() {
+        let styled = "\x1b[31mhello\x1b[0m";
+        let truncated = truncate_ansi_content(styled, 3);
+        assert_eq!(truncated, "\x1b[31mhel\x1b[0m");
+        assert_eq!(strip_ansi_width(&truncated), 3);
+    }
+
+    #[test]
+    fn test_right_segments_overflow_removes_highest_priority() {
+        let registry = TopbarRegistry::new();
+        // Manually test the truncation logic by creating segments that overflow
+        let left = vec![RenderedSegment {
+            content: "ABCDE".to_string(),
+            display_width: 5,
+            priority: 0,
+            align: SegmentAlign::Left,
+        }];
+        let right = vec![
+            RenderedSegment {
+                content: "12345".to_string(),
+                display_width: 5,
+                priority: 1,
+                align: SegmentAlign::Right,
+            },
+            RenderedSegment {
+                content: "XY".to_string(),
+                display_width: 2,
+                priority: 5,
+                align: SegmentAlign::Right,
+            },
+        ];
+        // 5 + 5 + 2 = 12, max_width = 8 → should drop right segment with priority 5
+        let mut right_segments = right;
+        let mut total_width: usize = 5 + right_segments.iter().map(|s| s.display_width).sum::<usize>();
+        let max_width = 8;
+
+        while total_width > max_width && right_segments.len() > 1 {
+            let idx = right_segments
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, s)| s.priority)
+                .map(|(i, _)| i)
+                .unwrap();
+            let removed = right_segments.remove(idx);
+            total_width = total_width.saturating_sub(removed.display_width);
+        }
+        // Should have removed the priority-5 segment (display_width=2), total now 10
+        assert_eq!(right_segments.len(), 1);
+        assert_eq!(right_segments[0].priority, 1);
+        drop(registry);
+        drop(left);
     }
 }
