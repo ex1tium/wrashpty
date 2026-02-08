@@ -1,0 +1,160 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "extraction-report-v1.json",
+  "title": "ExtractionReport",
+  "description": "Per-command extraction diagnostics report (contract v1.0.0)",
+  "type": "object",
+  "required": [
+    "command",
+    "success",
+    "accepted_for_suggestions",
+    "quality_tier",
+    "quality_reasons",
+    "format_scores",
+    "parsers_used",
+    "confidence",
+    "coverage",
+    "relevant_lines",
+    "recognized_lines",
+    "unresolved_lines",
+    "probe_attempts",
+    "warnings",
+    "validation_errors"
+  ],
+  "properties": {
+    "command": {
+      "type": "string",
+      "description": "Command name"
+    },
+    "success": {
+      "type": "boolean",
+      "description": "Whether extraction succeeded"
+    },
+    "accepted_for_suggestions": {
+      "type": "boolean",
+      "description": "Whether schema passed quality gates"
+    },
+    "quality_tier": {
+      "$ref": "#/$defs/QualityTier"
+    },
+    "quality_reasons": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Reasons for quality tier assignment"
+    },
+    "failure_code": {
+      "oneOf": [
+        { "$ref": "#/$defs/FailureCode" },
+        { "type": "null" }
+      ],
+      "description": "Structured failure code"
+    },
+    "failure_detail": {
+      "type": ["string", "null"],
+      "description": "Human-readable failure detail"
+    },
+    "selected_format": {
+      "type": ["string", "null"],
+      "description": "Detected help format"
+    },
+    "format_scores": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/FormatScoreReport" },
+      "description": "Format detection scores"
+    },
+    "parsers_used": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Parser strategies used"
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "description": "Schema confidence score"
+    },
+    "coverage": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "description": "Parser coverage score"
+    },
+    "relevant_lines": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Lines considered relevant"
+    },
+    "recognized_lines": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Lines successfully recognized"
+    },
+    "unresolved_lines": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Lines not recognized"
+    },
+    "probe_attempts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/ProbeAttemptReport" },
+      "description": "Details per help-flag probe"
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Non-fatal warnings"
+    },
+    "validation_errors": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Schema validation errors"
+    }
+  },
+  "$defs": {
+    "QualityTier": {
+      "type": "string",
+      "enum": ["high", "medium", "low", "failed"]
+    },
+    "FailureCode": {
+      "type": "string",
+      "enum": [
+        "not_installed",
+        "permission_blocked",
+        "timeout",
+        "not_help_output",
+        "parse_failed",
+        "quality_rejected"
+      ]
+    },
+    "FormatScoreReport": {
+      "type": "object",
+      "required": ["format", "score"],
+      "properties": {
+        "format": { "type": "string" },
+        "score": { "type": "number" }
+      }
+    },
+    "ProbeAttemptReport": {
+      "type": "object",
+      "required": [
+        "help_flag",
+        "argv",
+        "timed_out",
+        "output_len",
+        "accepted"
+      ],
+      "properties": {
+        "help_flag": { "type": "string" },
+        "argv": { "type": "array", "items": { "type": "string" } },
+        "exit_code": { "type": ["integer", "null"] },
+        "timed_out": { "type": "boolean" },
+        "error": { "type": ["string", "null"] },
+        "rejection_reason": { "type": ["string", "null"] },
+        "output_source": { "type": ["string", "null"] },
+        "output_len": { "type": "integer", "minimum": 0 },
+        "output_preview": { "type": ["string", "null"] },
+        "accepted": { "type": "boolean" }
+      }
+    }
+  }
+}

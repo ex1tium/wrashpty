@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "command-schema-v1.json",
+  "title": "CommandSchema",
+  "description": "Schema for a CLI command extracted from help output (contract v1.0.0)",
+  "type": "object",
+  "required": ["command", "global_flags", "subcommands", "positional", "source", "confidence"],
+  "properties": {
+    "schema_version": {
+      "type": ["string", "null"],
+      "description": "Schema contract version"
+    },
+    "command": {
+      "type": "string",
+      "description": "Base command name"
+    },
+    "description": {
+      "type": ["string", "null"],
+      "description": "Short description of the command"
+    },
+    "global_flags": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/FlagSchema" },
+      "description": "Flags that apply to all subcommands"
+    },
+    "subcommands": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/SubcommandSchema" },
+      "description": "Available subcommands"
+    },
+    "positional": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/ArgSchema" },
+      "description": "Positional arguments"
+    },
+    "source": {
+      "$ref": "#/$defs/SchemaSource"
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "description": "Confidence score"
+    },
+    "version": {
+      "type": ["string", "null"],
+      "description": "Detected command version string"
+    }
+  },
+  "$defs": {
+    "FlagSchema": {
+      "type": "object",
+      "required": ["value_type", "takes_value", "multiple", "conflicts_with", "requires"],
+      "properties": {
+        "short": { "type": ["string", "null"] },
+        "long": { "type": ["string", "null"] },
+        "value_type": { "$ref": "#/$defs/ValueType" },
+        "takes_value": { "type": "boolean" },
+        "description": { "type": ["string", "null"] },
+        "multiple": { "type": "boolean" },
+        "conflicts_with": { "type": "array", "items": { "type": "string" } },
+        "requires": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "ArgSchema": {
+      "type": "object",
+      "required": ["name", "value_type", "required", "multiple"],
+      "properties": {
+        "name": { "type": "string" },
+        "value_type": { "$ref": "#/$defs/ValueType" },
+        "required": { "type": "boolean" },
+        "multiple": { "type": "boolean" },
+        "description": { "type": ["string", "null"] }
+      }
+    },
+    "SubcommandSchema": {
+      "type": "object",
+      "required": ["name", "flags", "positional", "subcommands", "aliases"],
+      "properties": {
+        "name": { "type": "string" },
+        "description": { "type": ["string", "null"] },
+        "flags": { "type": "array", "items": { "$ref": "#/$defs/FlagSchema" } },
+        "positional": { "type": "array", "items": { "$ref": "#/$defs/ArgSchema" } },
+        "subcommands": { "type": "array", "items": { "$ref": "#/$defs/SubcommandSchema" } },
+        "aliases": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "SchemaSource": {
+      "type": "string",
+      "enum": ["HelpCommand", "ManPage", "Bootstrap", "Learned"]
+    },
+    "ValueType": {
+      "oneOf": [
+        { "type": "string", "enum": ["Bool", "String", "Number", "File", "Directory", "Url", "Branch", "Remote", "Any"] },
+        {
+          "type": "object",
+          "required": ["Choice"],
+          "properties": {
+            "Choice": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
