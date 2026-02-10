@@ -28,7 +28,7 @@ const SUB_SCHEMA: usize = 1;
 const SUB_COUNT: usize = 2;
 
 /// Inner sub-tab labels.
-const SUB_LABELS: [&str; SUB_COUNT] = ["Discover", "Schema"];
+const SUB_LABELS: [&str; SUB_COUNT] = ["Discover", "Browser"];
 
 /// Compound commands panel with inner tabs.
 pub struct CommandsPanel {
@@ -77,14 +77,14 @@ impl CommandsPanel {
         };
     }
 
-    /// Renders the inner tab bar.
+    /// Renders the inner tab bar (labels only — hint goes on separator).
     fn render_inner_tabs(&self, buffer: &mut Buffer, area: Rect) {
         let mut spans = Vec::new();
 
         for (i, label) in SUB_LABELS.iter().enumerate() {
             if i > 0 {
                 spans.push(Span::styled(
-                    "  ",
+                    " ",
                     Style::default().fg(self.theme.text_secondary),
                 ));
             }
@@ -92,32 +92,50 @@ impl CommandsPanel {
             let style = if i == self.active_sub {
                 Style::default()
                     .fg(self.theme.tab_active_fg)
-                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                    .bg(self.theme.tab_active_bg)
+                    .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(self.theme.tab_inactive_fg)
+                Style::default()
+                    .fg(self.theme.tab_inactive_fg)
+                    .bg(self.theme.tab_inactive_bg)
             };
 
-            spans.push(Span::styled(*label, style));
+            spans.push(Span::styled(format!(" {} ", label), style));
         }
-
-        // Right-align hint
-        let hint = "Tab/S-Tab";
-        let content_width: usize = spans
-            .iter()
-            .map(|s| crate::ui::text_width::display_width(s.content.as_ref()))
-            .sum();
-        let hint_width = crate::ui::text_width::display_width(hint);
-        let padding = (area.width as usize).saturating_sub(content_width + hint_width);
-
-        if padding > 0 {
-            spans.push(Span::raw(" ".repeat(padding)));
-        }
-        spans.push(Span::styled(
-            hint,
-            Style::default().fg(self.theme.text_secondary),
-        ));
 
         Paragraph::new(Line::from(spans)).render(area, buffer);
+    }
+
+    /// Renders a hint overlaid on the right side of a separator line.
+    fn render_separator_hint(&self, buffer: &mut Buffer, sep_area: Rect, hint: &str) {
+        let hint_display_width = crate::ui::text_width::display_width(hint) as u16;
+        let hint_start = sep_area.x + sep_area.width.saturating_sub(hint_display_width + 2);
+        let mut col: u16 = 0;
+
+        for ch in hint.chars() {
+            let ch_w = unicode_width::UnicodeWidthChar::width(ch)
+                .unwrap_or(1)
+                .max(1) as u16;
+            let x = hint_start + col;
+            if x + ch_w <= sep_area.x + sep_area.width {
+                if let Some(cell) = buffer.cell_mut((x, sep_area.y)) {
+                    cell.set_char(ch);
+                    cell.set_style(Style::default().fg(self.theme.text_secondary));
+                }
+                if ch_w > 1 {
+                    for i in 1..ch_w {
+                        let trailing_x = x + i;
+                        if trailing_x < sep_area.x + sep_area.width {
+                            if let Some(cell) = buffer.cell_mut((trailing_x, sep_area.y)) {
+                                cell.set_char(' ');
+                                cell.set_style(Style::default().fg(self.theme.text_secondary));
+                            }
+                        }
+                    }
+                }
+            }
+            col += ch_w;
+        }
     }
 }
 
@@ -149,13 +167,14 @@ impl Panel for CommandsPanel {
         // Render inner tab bar
         self.render_inner_tabs(buffer, chunks[0]);
 
-        // Render separator
+        // Render separator with hint
         for x in chunks[1].x..chunks[1].x + chunks[1].width {
             if let Some(cell) = buffer.cell_mut((x, chunks[1].y)) {
                 cell.set_char('─');
                 cell.set_style(Style::default().fg(self.theme.panel_border));
             }
         }
+        self.render_separator_hint(buffer, chunks[1], "Tab/S-Tab");
 
         // Delegate to active sub-panel
         match self.active_sub {

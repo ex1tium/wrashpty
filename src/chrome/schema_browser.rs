@@ -1,7 +1,7 @@
 //! Schema browser panel for exploring command schemas.
 //!
 //! Provides a tree view of command schemas with search, exploration,
-//! and manual discovery capabilities. This panel is the "Schema" sub-tab
+//! and manual discovery capabilities. This panel is the "Browser" sub-tab
 //! within the Commands compound panel.
 
 use std::any::Any;
@@ -400,7 +400,7 @@ impl Panel for SchemaBrowserPanel {
     }
 
     fn title(&self) -> &str {
-        "Schema"
+        "Browser"
     }
 
     fn render(&mut self, buffer: &mut Buffer, area: Rect) {
@@ -438,16 +438,40 @@ impl Panel for SchemaBrowserPanel {
 
         // Render tree list
         if self.filtered.is_empty() {
-            let msg = if self.nodes.is_empty() {
-                "No schemas available. Use Tab to switch to Discover."
+            if self.nodes.is_empty() {
+                let secondary = Style::default().fg(self.theme.text_secondary);
+                let highlight = Style::default()
+                    .fg(self.theme.text_highlight)
+                    .add_modifier(Modifier::BOLD);
+                let lines = vec![
+                    Line::from(""),
+                    Line::from(Span::styled("No command schemas loaded.", secondary)),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled("Schemas are added by: ", secondary),
+                        Span::styled("s", highlight),
+                        Span::styled(" to scan a command's --help,", secondary),
+                    ]),
+                    Line::from(vec![
+                        Span::styled("or compile with ", secondary),
+                        Span::styled("bundled-schemas", highlight),
+                        Span::styled(" feature for 975 built-in.", secondary),
+                    ]),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::styled("Type a command name above, then press ", secondary),
+                        Span::styled("s", highlight),
+                        Span::styled(" to discover.", secondary),
+                    ]),
+                ];
+                Paragraph::new(lines).render(chunks[1], buffer);
             } else {
-                "No matching schemas."
-            };
-            let help = Line::from(Span::styled(
-                msg,
-                Style::default().fg(self.theme.text_secondary),
-            ));
-            Paragraph::new(vec![Line::from(""), help]).render(chunks[1], buffer);
+                let help = Line::from(Span::styled(
+                    "No matching schemas.",
+                    Style::default().fg(self.theme.text_secondary),
+                ));
+                Paragraph::new(vec![Line::from(""), help]).render(chunks[1], buffer);
+            }
         } else {
             let visible_height = chunks[1].height as usize;
             self.ensure_visible(visible_height);
@@ -724,7 +748,7 @@ mod tests {
     #[test]
     fn test_schema_browser_title() {
         let panel = SchemaBrowserPanel::new(&AMBER_THEME);
-        assert_eq!(panel.title(), "Schema");
+        assert_eq!(panel.title(), "Browser");
     }
 
     #[test]
