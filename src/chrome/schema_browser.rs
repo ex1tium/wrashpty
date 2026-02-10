@@ -27,7 +27,6 @@ enum TreeNode {
     Command {
         name: String,
         description: Option<String>,
-        source: String,
         flag_count: usize,
         subcommand_count: usize,
     },
@@ -56,16 +55,63 @@ impl TreeNode {
 
     fn display_name(&self) -> String {
         match self {
-            TreeNode::Command { name, .. } => name.clone(),
-            TreeNode::Subcommand { name, .. } => name.clone(),
-            TreeNode::Flag { short, long, .. } => {
-                match (short, long) {
-                    (Some(s), Some(l)) => format!("{s}, {l}"),
-                    (None, Some(l)) => l.clone(),
-                    (Some(s), None) => s.clone(),
-                    (None, None) => "(unnamed)".to_string(),
-                }
+            TreeNode::Command { name, .. } | TreeNode::Subcommand { name, .. } => name.clone(),
+            TreeNode::Flag { short, long, .. } => match (short, long) {
+                (Some(s), Some(l)) => format!("{s}, {l}"),
+                (None, Some(l)) => l.clone(),
+                (Some(s), None) => s.clone(),
+                (None, None) => "(unnamed)".to_string(),
+            },
+        }
+    }
+
+    /// Returns the searchable text for filtering (name + description).
+    fn matches_filter(&self, filter_lower: &str) -> bool {
+        match self {
+            TreeNode::Command {
+                name, description, ..
+            } => {
+                name.to_lowercase().contains(filter_lower)
+                    || description
+                        .as_ref()
+                        .is_some_and(|d| d.to_lowercase().contains(filter_lower))
             }
+            TreeNode::Subcommand {
+                name, description, ..
+            } => {
+                name.to_lowercase().contains(filter_lower)
+                    || description
+                        .as_ref()
+                        .is_some_and(|d| d.to_lowercase().contains(filter_lower))
+            }
+            TreeNode::Flag {
+                short,
+                long,
+                description,
+                ..
+            } => {
+                short
+                    .as_ref()
+                    .is_some_and(|s| s.to_lowercase().contains(filter_lower))
+                    || long
+                        .as_ref()
+                        .is_some_and(|l| l.to_lowercase().contains(filter_lower))
+                    || description
+                        .as_ref()
+                        .is_some_and(|d| d.to_lowercase().contains(filter_lower))
+            }
+        }
+    }
+
+    /// Returns true if this node has expandable children.
+    fn has_children(&self) -> bool {
+        match self {
+            TreeNode::Command {
+                subcommand_count,
+                flag_count,
+                ..
+            } => *subcommand_count > 0 || *flag_count > 0,
+            _ => false,
         }
     }
 }
@@ -147,11 +193,9 @@ impl SchemaBrowserPanel {
 
         for cmd_name in commands {
             if let Some(schema) = provider.get(cmd_name) {
-                let source = format!("{:?}", schema.source);
                 self.nodes.push(TreeNode::Command {
                     name: schema.command.clone(),
                     description: schema.description.clone(),
-                    source,
                     flag_count: schema.global_flags.len(),
                     subcommand_count: schema.subcommands.len(),
                 });
@@ -166,23 +210,8 @@ impl SchemaBrowserPanel {
                     });
                 }
 
-                // Add subcommands and their flags
-                for sub in &schema.subcommands {
-                    self.nodes.push(TreeNode::Subcommand {
-                        name: sub.name.clone(),
-                        description: sub.description.clone(),
-                        depth: 1,
-                    });
-
-                    for flag in &sub.flags {
-                        self.nodes.push(TreeNode::Flag {
-                            short: flag.short.clone(),
-                            long: flag.long.clone(),
-                            description: flag.description.clone(),
-                            depth: 2,
-                        });
-                    }
-                }
+                // Add subcommands and their flags recursively
+                Self::add_subcommands_recursive(&mut self.nodes, &schema.subcommands, 1);
             }
         }
 
@@ -198,7 +227,40 @@ impl SchemaBrowserPanel {
         self.apply_filter();
     }
 
+    /// Recursively adds subcommands and their flags to the node list.
+    fn add_subcommands_recursive(
+        nodes: &mut Vec<TreeNode>,
+        subcommands: &[command_schema_core::SubcommandSchema],
+        depth: usize,
+    ) {
+        for sub in subcommands {
+            nodes.push(TreeNode::Subcommand {
+                name: sub.name.clone(),
+                description: sub.description.clone(),
+                depth,
+            });
+
+            for flag in &sub.flags {
+                nodes.push(TreeNode::Flag {
+                    short: flag.short.clone(),
+                    long: flag.long.clone(),
+                    description: flag.description.clone(),
+                    depth: depth + 1,
+                });
+            }
+
+            // Recurse into nested subcommands
+            if !sub.subcommands.is_empty() {
+                Self::add_subcommands_recursive(nodes, &sub.subcommands, depth + 1);
+            }
+        }
+    }
+
     /// Applies the current filter text.
+    ///
+    /// When a filter is active, searches across all node types (commands,
+    /// subcommands, and flags) by name and description. Matching child nodes
+    /// also pull in their parent command for context.
     fn apply_filter(&mut self) {
         self.filtered.clear();
 
@@ -211,26 +273,32 @@ impl SchemaBrowserPanel {
             }
         } else {
             let filter_lower = self.filter.to_lowercase();
-            // Show commands that match, plus their children
-            let mut show_children_of: Option<usize> = None;
+            // Track the current parent command index for child matches
+            let mut current_cmd_idx: Option<usize> = None;
+            let mut cmd_already_added = false;
 
             for (i, node) in self.nodes.iter().enumerate() {
                 match node {
-                    TreeNode::Command { name, description, .. } => {
-                        let matches = name.to_lowercase().contains(&filter_lower)
-                            || description
-                                .as_ref()
-                                .is_some_and(|d| d.to_lowercase().contains(&filter_lower));
-
-                        if matches {
+                    TreeNode::Command { .. } => {
+                        current_cmd_idx = Some(i);
+                        if node.matches_filter(&filter_lower) {
                             self.filtered.push(i);
-                            show_children_of = Some(i);
+                            cmd_already_added = true;
                         } else {
-                            show_children_of = None;
+                            cmd_already_added = false;
                         }
                     }
                     TreeNode::Subcommand { .. } | TreeNode::Flag { .. } => {
-                        if show_children_of.is_some() {
+                        if cmd_already_added {
+                            // Parent command matched — include all children
+                            self.filtered.push(i);
+                        } else if node.matches_filter(&filter_lower) {
+                            // Child matched — pull in parent command first if not yet added
+                            if let Some(cmd_i) = current_cmd_idx {
+                                if self.filtered.last() != Some(&cmd_i) {
+                                    self.filtered.push(cmd_i);
+                                }
+                            }
                             self.filtered.push(i);
                         }
                     }
@@ -254,6 +322,35 @@ impl SchemaBrowserPanel {
         }
     }
 
+    /// Returns true if the selected command is currently expanded.
+    fn is_expanded(&self) -> bool {
+        let Some(&node_idx) = self.filtered.get(self.selection) else {
+            return false;
+        };
+        if !matches!(self.nodes[node_idx], TreeNode::Command { .. }) {
+            return false;
+        }
+        self.filtered
+            .get(self.selection + 1)
+            .is_some_and(|&next_idx| self.nodes[next_idx].depth() > 0)
+    }
+
+    /// Expands the selected command node (no-op if already expanded or not a command).
+    fn expand(&mut self) {
+        if self.is_expanded() {
+            return;
+        }
+        self.toggle_expand();
+    }
+
+    /// Collapses the selected command node (no-op if already collapsed or not a command).
+    fn collapse(&mut self) {
+        if !self.is_expanded() {
+            return;
+        }
+        self.toggle_expand();
+    }
+
     /// Toggles expansion of the selected command node.
     fn toggle_expand(&mut self) {
         let Some(&node_idx) = self.filtered.get(self.selection) else {
@@ -266,14 +363,7 @@ impl SchemaBrowserPanel {
         }
 
         // Check if children are currently shown
-        let has_visible_children = self
-            .filtered
-            .get(self.selection + 1)
-            .is_some_and(|&next_idx| {
-                next_idx > node_idx && self.nodes[next_idx].depth() > 0
-            });
-
-        if has_visible_children {
+        if self.is_expanded() {
             // Collapse: remove children from filtered
             let remove_start = self.selection + 1;
             let remove_end = self.filtered[remove_start..]
@@ -283,18 +373,12 @@ impl SchemaBrowserPanel {
                 .unwrap_or(self.filtered.len());
             self.filtered.drain(remove_start..remove_end);
         } else {
-            // Expand: add children after current position
-            let mut children = Vec::new();
-            for i in (node_idx + 1)..self.nodes.len() {
-                if matches!(self.nodes[i], TreeNode::Command { .. }) {
-                    break;
-                }
-                children.push(i);
-            }
+            // Expand: add children after current position using splice for O(n) performance
+            let children: Vec<usize> = ((node_idx + 1)..self.nodes.len())
+                .take_while(|&i| !matches!(self.nodes[i], TreeNode::Command { .. }))
+                .collect();
             let insert_pos = self.selection + 1;
-            for (offset, child_idx) in children.iter().enumerate() {
-                self.filtered.insert(insert_pos + offset, *child_idx);
-            }
+            self.filtered.splice(insert_pos..insert_pos, children);
         }
     }
 
@@ -302,11 +386,10 @@ impl SchemaBrowserPanel {
     fn selected_insert_text(&self) -> Option<String> {
         let &node_idx = self.filtered.get(self.selection)?;
         match &self.nodes[node_idx] {
-            TreeNode::Command { name, .. } => Some(name.clone()),
-            TreeNode::Subcommand { name, .. } => Some(name.clone()),
-            TreeNode::Flag { long, short, .. } => {
-                long.clone().or_else(|| short.clone())
+            TreeNode::Command { name, .. } | TreeNode::Subcommand { name, .. } => {
+                Some(name.clone())
             }
+            TreeNode::Flag { long, short, .. } => long.clone().or_else(|| short.clone()),
         }
     }
 }
@@ -382,14 +465,21 @@ impl Panel for SchemaBrowserPanel {
 
                     let indent = "  ".repeat(node.depth());
                     let prefix = match node {
-                        TreeNode::Command { subcommand_count, .. } => {
-                            // Check if expanded
+                        TreeNode::Command {
+                            subcommand_count,
+                            flag_count,
+                            ..
+                        } => {
                             let is_expanded = self
                                 .filtered
                                 .get(actual_idx + 1)
                                 .is_some_and(|&next| self.nodes[next].depth() > 0);
-                            if *subcommand_count > 0 || matches!(node, TreeNode::Command { flag_count, .. } if *flag_count > 0) {
-                                if is_expanded { "▼ " } else { "▶ " }
+                            if *subcommand_count > 0 || *flag_count > 0 {
+                                if is_expanded {
+                                    "▼ "
+                                } else {
+                                    "▶ "
+                                }
                             } else {
                                 "  "
                             }
@@ -442,8 +532,7 @@ impl Panel for SchemaBrowserPanel {
 
                     let line = Line::from(spans);
                     if is_selected {
-                        ListItem::new(line)
-                            .style(Style::default().bg(self.theme.selection_bg))
+                        ListItem::new(line).style(Style::default().bg(self.theme.selection_bg))
                     } else {
                         ListItem::new(line)
                     }
@@ -480,6 +569,23 @@ impl Panel for SchemaBrowserPanel {
                 }
                 PanelResult::Continue
             }
+            KeyCode::PageUp => {
+                self.selection = self.selection.saturating_sub(10);
+                PanelResult::Continue
+            }
+            KeyCode::PageDown => {
+                self.selection =
+                    (self.selection + 10).min(self.filtered.len().saturating_sub(1));
+                PanelResult::Continue
+            }
+            KeyCode::Home => {
+                self.selection = 0;
+                PanelResult::Continue
+            }
+            KeyCode::End => {
+                self.selection = self.filtered.len().saturating_sub(1);
+                PanelResult::Continue
+            }
             KeyCode::Enter => {
                 // Toggle expand/collapse for commands, insert text for leaves
                 let is_command = self
@@ -497,13 +603,18 @@ impl Panel for SchemaBrowserPanel {
                 }
             }
             KeyCode::Right => {
-                // Expand selected command
-                if self
-                    .filtered
-                    .get(self.selection)
-                    .is_some_and(|&idx| matches!(self.nodes[idx], TreeNode::Command { .. }))
-                {
-                    self.toggle_expand();
+                // Expand selected command (standard tree: Right = expand only, not toggle)
+                if let Some(&idx) = self.filtered.get(self.selection) {
+                    if matches!(self.nodes[idx], TreeNode::Command { .. }) {
+                        if self.is_expanded() {
+                            // Already expanded: move to first child
+                            if self.selection + 1 < self.filtered.len() {
+                                self.selection += 1;
+                            }
+                        } else {
+                            self.expand();
+                        }
+                    }
                 }
                 PanelResult::Continue
             }
@@ -522,7 +633,7 @@ impl Panel for SchemaBrowserPanel {
                         }
                     } else {
                         // Already on command: collapse it
-                        self.toggle_expand();
+                        self.collapse();
                     }
                 }
                 PanelResult::Continue
@@ -548,8 +659,58 @@ impl Panel for SchemaBrowserPanel {
 
 #[cfg(test)]
 mod tests {
+    use crossterm::event::KeyCode;
+
     use super::super::theme::AMBER_THEME;
     use super::*;
+
+    /// Creates a panel pre-populated with test nodes for interactive tests.
+    fn panel_with_nodes() -> SchemaBrowserPanel {
+        let mut panel = SchemaBrowserPanel::new(&AMBER_THEME);
+        panel.nodes = vec![
+            TreeNode::Command {
+                name: "git".into(),
+                description: Some("Distributed VCS".into()),
+                flag_count: 1,
+                subcommand_count: 2,
+            },
+            TreeNode::Flag {
+                short: Some("-v".into()),
+                long: Some("--verbose".into()),
+                description: Some("Be verbose".into()),
+                depth: 1,
+            },
+            TreeNode::Subcommand {
+                name: "commit".into(),
+                description: Some("Record changes".into()),
+                depth: 1,
+            },
+            TreeNode::Flag {
+                short: Some("-m".into()),
+                long: Some("--message".into()),
+                description: Some("Commit message".into()),
+                depth: 2,
+            },
+            TreeNode::Subcommand {
+                name: "push".into(),
+                description: Some("Push to remote".into()),
+                depth: 1,
+            },
+            TreeNode::Command {
+                name: "cargo".into(),
+                description: Some("Rust package manager".into()),
+                flag_count: 0,
+                subcommand_count: 1,
+            },
+            TreeNode::Subcommand {
+                name: "build".into(),
+                description: Some("Compile the project".into()),
+                depth: 1,
+            },
+        ];
+        panel.apply_filter();
+        panel
+    }
 
     #[test]
     fn test_schema_browser_new_initial_state() {
@@ -604,7 +765,6 @@ mod tests {
         let cmd = TreeNode::Command {
             name: "git".into(),
             description: None,
-            source: "Bootstrap".into(),
             flag_count: 0,
             subcommand_count: 0,
         };
@@ -624,5 +784,280 @@ mod tests {
             depth: 2,
         };
         assert_eq!(flag.depth(), 2);
+    }
+
+    #[test]
+    fn test_tree_node_has_children() {
+        let with = TreeNode::Command {
+            name: "git".into(),
+            description: None,
+            flag_count: 1,
+            subcommand_count: 2,
+        };
+        assert!(with.has_children());
+
+        let without = TreeNode::Command {
+            name: "ls".into(),
+            description: None,
+            flag_count: 0,
+            subcommand_count: 0,
+        };
+        assert!(!without.has_children());
+    }
+
+    #[test]
+    fn test_apply_filter_no_filter_shows_commands_only() {
+        let panel = panel_with_nodes();
+        // No filter → only top-level commands
+        assert_eq!(panel.filtered.len(), 2);
+        assert_eq!(panel.nodes[panel.filtered[0]].display_name(), "git");
+        assert_eq!(panel.nodes[panel.filtered[1]].display_name(), "cargo");
+    }
+
+    #[test]
+    fn test_apply_filter_by_command_name() {
+        let mut panel = panel_with_nodes();
+        panel.filter = "git".into();
+        panel.apply_filter();
+        // "git" matches → shows git + all children
+        assert!(panel.filtered.len() >= 2);
+        assert_eq!(panel.nodes[panel.filtered[0]].display_name(), "git");
+    }
+
+    #[test]
+    fn test_apply_filter_by_subcommand_name() {
+        let mut panel = panel_with_nodes();
+        panel.filter = "build".into();
+        panel.apply_filter();
+        // "build" subcommand under cargo → should show cargo parent + build child
+        assert_eq!(panel.filtered.len(), 2);
+        assert_eq!(panel.nodes[panel.filtered[0]].display_name(), "cargo");
+        assert_eq!(panel.nodes[panel.filtered[1]].display_name(), "build");
+    }
+
+    #[test]
+    fn test_apply_filter_by_flag_name() {
+        let mut panel = panel_with_nodes();
+        panel.filter = "--verbose".into();
+        panel.apply_filter();
+        // --verbose flag under git → should show git parent + the flag
+        assert!(panel.filtered.len() >= 2);
+        assert_eq!(panel.nodes[panel.filtered[0]].display_name(), "git");
+    }
+
+    #[test]
+    fn test_apply_filter_no_match() {
+        let mut panel = panel_with_nodes();
+        panel.filter = "zzzznotfound".into();
+        panel.apply_filter();
+        assert!(panel.filtered.is_empty());
+    }
+
+    #[test]
+    fn test_toggle_expand_collapse() {
+        let mut panel = panel_with_nodes();
+        assert_eq!(panel.filtered.len(), 2); // git, cargo (collapsed)
+
+        // Expand git
+        panel.selection = 0;
+        panel.toggle_expand();
+        // git + its children (flag, commit, commit-flag, push) = 5, plus cargo = 6
+        assert!(panel.filtered.len() > 2);
+        let first_child = panel.filtered[1];
+        assert!(panel.nodes[first_child].depth() > 0);
+
+        // Collapse git
+        panel.selection = 0;
+        panel.toggle_expand();
+        assert_eq!(panel.filtered.len(), 2); // back to commands only
+    }
+
+    #[test]
+    fn test_expand_only_does_not_collapse() {
+        let mut panel = panel_with_nodes();
+        panel.selection = 0;
+        panel.expand();
+        let expanded_len = panel.filtered.len();
+        assert!(expanded_len > 2);
+
+        // expand again should be a no-op (not toggle)
+        panel.selection = 0;
+        panel.expand();
+        assert_eq!(panel.filtered.len(), expanded_len);
+    }
+
+    #[test]
+    fn test_collapse_only_does_not_expand() {
+        let mut panel = panel_with_nodes();
+        panel.selection = 0;
+        // collapse when already collapsed → no-op
+        panel.collapse();
+        assert_eq!(panel.filtered.len(), 2);
+    }
+
+    #[test]
+    fn test_right_key_expands_then_moves_to_child() {
+        let mut panel = panel_with_nodes();
+        assert_eq!(panel.selection, 0);
+
+        // First Right: expand
+        let key = KeyEvent::from(KeyCode::Right);
+        panel.handle_input(key);
+        assert!(panel.filtered.len() > 2); // expanded
+        assert_eq!(panel.selection, 0); // still on git
+
+        // Second Right: move to first child
+        panel.handle_input(key);
+        assert_eq!(panel.selection, 1); // moved to first child
+    }
+
+    #[test]
+    fn test_left_key_jumps_to_parent() {
+        let mut panel = panel_with_nodes();
+        panel.selection = 0;
+        panel.expand();
+        panel.selection = 2; // on "commit" subcommand
+
+        let key = KeyEvent::from(KeyCode::Left);
+        panel.handle_input(key);
+        assert_eq!(panel.selection, 0); // jumped back to "git"
+    }
+
+    #[test]
+    fn test_left_key_collapses_on_command() {
+        let mut panel = panel_with_nodes();
+        panel.selection = 0;
+        panel.expand();
+        assert!(panel.filtered.len() > 2);
+
+        // Left on the command itself → collapse
+        panel.selection = 0;
+        let key = KeyEvent::from(KeyCode::Left);
+        panel.handle_input(key);
+        assert_eq!(panel.filtered.len(), 2); // collapsed
+    }
+
+    #[test]
+    fn test_page_up_down_home_end() {
+        let mut panel = panel_with_nodes();
+        // Expand both to have more items
+        panel.selection = 0;
+        panel.expand();
+        panel.selection = panel.filtered.len() - 1; // go to cargo (last command)
+        // Find cargo in filtered
+        for (i, &idx) in panel.filtered.iter().enumerate() {
+            if panel.nodes[idx].display_name() == "cargo" {
+                panel.selection = i;
+                break;
+            }
+        }
+        panel.expand();
+
+        let total = panel.filtered.len();
+        assert!(total > 3);
+
+        // Home
+        panel.selection = total / 2;
+        panel.handle_input(KeyEvent::from(KeyCode::Home));
+        assert_eq!(panel.selection, 0);
+
+        // End
+        panel.handle_input(KeyEvent::from(KeyCode::End));
+        assert_eq!(panel.selection, total - 1);
+
+        // PageDown from start
+        panel.selection = 0;
+        panel.handle_input(KeyEvent::from(KeyCode::PageDown));
+        assert!(panel.selection > 0);
+
+        // PageUp from end
+        panel.selection = total - 1;
+        panel.handle_input(KeyEvent::from(KeyCode::PageUp));
+        assert!(panel.selection < total - 1);
+    }
+
+    #[test]
+    fn test_selected_insert_text() {
+        let mut panel = panel_with_nodes();
+        // Select "git" command
+        assert_eq!(panel.selected_insert_text(), Some("git".into()));
+
+        // Expand and select a flag
+        panel.expand();
+        panel.selection = 1; // --verbose flag
+        let text = panel.selected_insert_text().unwrap();
+        assert!(text == "--verbose" || text == "-v");
+    }
+
+    #[test]
+    fn test_enter_on_leaf_returns_insert_text() {
+        let mut panel = panel_with_nodes();
+        panel.selection = 0;
+        panel.expand();
+        panel.selection = 1; // flag node
+
+        let result = panel.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert!(matches!(result, PanelResult::InsertText(_)));
+    }
+
+    #[test]
+    fn test_enter_on_command_toggles_expand() {
+        let mut panel = panel_with_nodes();
+        let initial = panel.filtered.len();
+
+        let result = panel.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert!(matches!(result, PanelResult::Continue));
+        assert!(panel.filtered.len() > initial); // expanded
+    }
+
+    #[test]
+    fn test_matches_filter_searches_all_node_types() {
+        let cmd = TreeNode::Command {
+            name: "docker".into(),
+            description: Some("Container runtime".into()),
+            flag_count: 0,
+            subcommand_count: 0,
+        };
+        assert!(cmd.matches_filter("docker"));
+        assert!(cmd.matches_filter("container"));
+        assert!(!cmd.matches_filter("zzz"));
+
+        let sub = TreeNode::Subcommand {
+            name: "compose".into(),
+            description: Some("Multi-container apps".into()),
+            depth: 1,
+        };
+        assert!(sub.matches_filter("compose"));
+        assert!(sub.matches_filter("multi"));
+
+        let flag = TreeNode::Flag {
+            short: Some("-d".into()),
+            long: Some("--detach".into()),
+            description: Some("Run in background".into()),
+            depth: 1,
+        };
+        assert!(flag.matches_filter("detach"));
+        assert!(flag.matches_filter("background"));
+        assert!(flag.matches_filter("-d"));
+    }
+
+    #[test]
+    fn test_ensure_visible_scrolls_down() {
+        let mut panel = panel_with_nodes();
+        panel.selection = 0;
+        panel.expand();
+        // Simulate small viewport
+        panel.selection = panel.filtered.len() - 1;
+        panel.ensure_visible(3);
+        assert!(panel.scroll_offset > 0);
+    }
+
+    #[test]
+    fn test_ensure_visible_scrolls_up() {
+        let mut panel = panel_with_nodes();
+        panel.scroll_offset = 5;
+        panel.selection = 0;
+        panel.ensure_visible(3);
+        assert_eq!(panel.scroll_offset, 0);
     }
 }

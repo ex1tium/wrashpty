@@ -188,9 +188,31 @@ impl CommandIntelligence {
         self.schema_mode
     }
 
-    /// Sets the schema mode.
+    /// Sets the schema mode, rebuilding the provider if necessary.
+    ///
+    /// Switching to/from `FullLibrary` requires rebuilding the schema provider
+    /// to load or unload the bundled database. Other transitions only update the
+    /// mode flag (the suggestion engine gates on `SchemaMode::uses_schemas()`).
     pub fn set_schema_mode(&mut self, mode: SchemaMode) {
+        let needs_rebuild =
+            (mode == SchemaMode::FullLibrary) != (self.schema_mode == SchemaMode::FullLibrary);
         self.schema_mode = mode;
+
+        if needs_rebuild {
+            match Self::create_provider(&self.conn, mode) {
+                Ok(provider) => {
+                    self.schema_provider = provider;
+                    info!(
+                        schema_mode = ?mode,
+                        count = self.schema_provider.schema_count(),
+                        "Rebuilt schema provider for mode change"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to rebuild schema provider on mode change");
+                }
+            }
+        }
     }
 
     /// Returns a reference to the schema provider.
