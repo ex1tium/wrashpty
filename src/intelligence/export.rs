@@ -4,8 +4,7 @@ use rusqlite::Connection;
 use tracing::{debug, info};
 
 use super::error::CIError;
-use super::schema::storage::SchemaStore;
-use super::schema_index::SchemaIndex;
+use super::schema_provider::SchemaProvider;
 use super::types::{
     ConflictResolution, ExportOptions, ExportedFlagValue, ExportedPatterns, ExportedPipeChain,
     ExportedSequence, ExportedTemplate, ImportMode, ImportOptions, ImportStats, PatternExport,
@@ -24,23 +23,25 @@ pub struct SchemaPackImportStats {
     pub skipped_curated: usize,
 }
 
-/// Exports embedded curated schemas as a schema package JSON document.
-pub fn export_schema_pack(schema_index: &SchemaIndex) -> Result<String, CIError> {
-    let mut schemas = schema_index
+/// Exports all available schemas as a schema package JSON document.
+///
+/// Bundled schemas are exported with their original source; learned schemas
+/// are included as-is. This produces a portable snapshot of the provider's
+/// current schema knowledge.
+pub fn export_schema_pack(provider: &dyn SchemaProvider) -> Result<String, CIError> {
+    let mut schemas = provider
         .all_schemas()
-        .filter(|schema| schema_index.is_curated(&schema.command))
         .cloned()
         .collect::<Vec<_>>();
     schemas.sort_by(|a, b| a.command.cmp(&b.command));
 
-    let meta = schema_index.bundle_meta();
     let package = SchemaPackage {
         schema_version: Some(command_schema_core::SCHEMA_CONTRACT_VERSION.to_string()),
-        version: meta.version.clone(),
-        name: Some("wrashpty-curated-schemas".to_string()),
-        description: Some("Curated command schemas exported from wrashpty".to_string()),
+        version: "1.0.0".to_string(),
+        name: Some("wrashpty-schemas".to_string()),
+        description: Some("Command schemas exported from wrashpty".to_string()),
         generated_at: chrono::Utc::now().to_rfc3339(),
-        bundle_hash: meta.hash.clone(),
+        bundle_hash: None,
         schemas,
     };
 
@@ -55,12 +56,14 @@ pub fn export_schema_pack(schema_index: &SchemaIndex) -> Result<String, CIError>
     Ok(serde_json::to_string_pretty(&package)?)
 }
 
-/// Imports a schema package as runtime overlays for uncurated commands.
+/// Imports a schema package as runtime overlays for non-bundled commands.
 ///
-/// Curated commands are skipped to keep embedded schemas authoritative.
+/// Bundled commands are skipped to keep authoritative schemas intact.
+/// Imported schemas are added to the provider's in-memory overlay cache
+/// and persisted to cs_* SQLite tables (when command-schema feature is enabled).
 pub fn import_schema_pack(
     conn: &Connection,
-    schema_index: &mut SchemaIndex,
+    provider: &mut dyn SchemaProvider,
     json: &str,
 ) -> Result<SchemaPackImportStats, CIError> {
     let package: SchemaPackage = serde_json::from_str(json)?;
@@ -72,51 +75,44 @@ pub fn import_schema_pack(
         )));
     }
 
-    conn.execute_batch("BEGIN TRANSACTION")?;
+    let mut stats = SchemaPackImportStats::default();
 
-    let result = (|| -> Result<SchemaPackImportStats, CIError> {
-        let store = SchemaStore::new(conn);
-        let mut stats = SchemaPackImportStats::default();
-
-        for mut schema in package.schemas {
-            if schema_index.is_curated(&schema.command) {
-                stats.skipped_curated += 1;
-                continue;
-            }
-
-            let replacing_existing = schema_index.has_schema(&schema.command);
-
-            // Runtime imports are always treated as learned overlays.
-            schema.source = SchemaSource::Learned;
-            store.store(&schema)?;
-            schema_index.add_user_schema(schema);
-
-            if replacing_existing {
-                stats.replaced += 1;
-            } else {
-                stats.imported += 1;
-            }
+    for mut schema in package.schemas {
+        if provider.is_bundled(&schema.command) {
+            stats.skipped_curated += 1;
+            continue;
         }
 
-        Ok(stats)
-    })();
+        let replacing_existing = provider.has(&schema.command);
 
-    match result {
-        Ok(stats) => {
-            conn.execute_batch("COMMIT")?;
-            info!(
-                imported = stats.imported,
-                replaced = stats.replaced,
-                skipped_curated = stats.skipped_curated,
-                "Imported schema pack into runtime overlays"
-            );
-            Ok(stats)
+        // Runtime imports are always treated as learned overlays.
+        schema.source = SchemaSource::Learned;
+
+        // Persist to cs_* tables (when command-schema feature is enabled)
+        #[cfg(feature = "command-schema")]
+        if let Err(e) = super::schema_provider::persist_schema(conn, &schema) {
+            debug!(command = schema.command, error = %e, "Failed to persist imported schema");
         }
-        Err(error) => {
-            let _ = conn.execute_batch("ROLLBACK");
-            Err(error)
+
+        provider.add_overlay(schema);
+
+        if replacing_existing {
+            stats.replaced += 1;
+        } else {
+            stats.imported += 1;
         }
     }
+
+    #[cfg(not(feature = "command-schema"))]
+    let _ = conn;
+
+    info!(
+        imported = stats.imported,
+        replaced = stats.replaced,
+        skipped_curated = stats.skipped_curated,
+        "Imported schema pack"
+    );
+    Ok(stats)
 }
 
 /// Exports patterns to JSON.
@@ -751,7 +747,7 @@ mod tests {
 
     use super::*;
     use crate::intelligence::db_schema;
-    use crate::intelligence::schema_index::SchemaIndex;
+    use crate::intelligence::schema_provider::tests::TestSchemaProvider;
 
     fn setup_test_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -816,23 +812,28 @@ mod tests {
     }
 
     #[test]
-    fn test_export_schema_pack_only_exports_curated_schemas() {
-        let mut schema_index =
-            SchemaIndex::from_schemas(vec![CommandSchema::new("git", SchemaSource::Bootstrap)]);
-        schema_index.add_user_schema(CommandSchema::new("custom-tool", SchemaSource::Learned));
+    fn test_export_schema_pack_exports_all_schemas() {
+        let provider = TestSchemaProvider::from_schemas(vec![
+            CommandSchema::new("git", SchemaSource::Bootstrap),
+            CommandSchema::new("cargo", SchemaSource::Learned),
+        ]);
 
-        let json = export_schema_pack(&schema_index).unwrap();
+        let json = export_schema_pack(&provider).unwrap();
         let package: SchemaPackage = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(package.schemas.len(), 1);
-        assert_eq!(package.schemas[0].command, "git");
+        assert_eq!(package.schemas.len(), 2);
+        // Sorted alphabetically
+        assert_eq!(package.schemas[0].command, "cargo");
+        assert_eq!(package.schemas[1].command, "git");
     }
 
     #[test]
-    fn test_import_schema_pack_skips_curated_and_imports_overlay() {
+    fn test_import_schema_pack_skips_bundled_and_imports_overlay() {
         let conn = setup_test_db();
-        let mut schema_index =
-            SchemaIndex::from_schemas(vec![CommandSchema::new("cargo", SchemaSource::Bootstrap)]);
+        let mut provider = TestSchemaProvider::with_bundled(vec![CommandSchema::new(
+            "cargo",
+            SchemaSource::Bootstrap,
+        )]);
 
         let package = SchemaPackage {
             schema_version: None,
@@ -848,20 +849,11 @@ mod tests {
         };
         let json = serde_json::to_string(&package).unwrap();
 
-        let stats = import_schema_pack(&conn, &mut schema_index, &json).unwrap();
+        let stats = import_schema_pack(&conn, &mut provider, &json).unwrap();
         assert_eq!(stats.imported, 1);
         assert_eq!(stats.skipped_curated, 1);
 
-        let tool_schema = schema_index.get("tool").expect("tool overlay missing");
+        let tool_schema = provider.get("tool").expect("tool overlay missing");
         assert_eq!(tool_schema.source, SchemaSource::Learned);
-
-        let stored_source: String = conn
-            .query_row(
-                "SELECT source FROM ci_command_schemas WHERE command = 'tool' AND subcommand IS NULL",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(stored_source, "learned");
     }
 }

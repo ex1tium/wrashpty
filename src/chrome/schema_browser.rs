@@ -1,0 +1,628 @@
+//! Schema browser panel for exploring command schemas.
+//!
+//! Provides a tree view of command schemas with search, exploration,
+//! and manual discovery capabilities. This panel is the "Schema" sub-tab
+//! within the Commands compound panel.
+
+use std::any::Any;
+use std::sync::{Arc, Mutex};
+
+use crossterm::event::{KeyCode, KeyEvent};
+use ratatui_core::buffer::Buffer;
+use ratatui_core::layout::{Constraint, Layout, Rect};
+use ratatui_core::style::{Modifier, Style};
+use ratatui_core::text::{Line, Span};
+use ratatui_core::widgets::Widget;
+use ratatui_widgets::list::{List, ListItem};
+use ratatui_widgets::paragraph::Paragraph;
+
+use super::panel::{Panel, PanelResult};
+use super::theme::Theme;
+use crate::history_store::HistoryStore;
+
+/// A node in the schema tree view.
+#[derive(Debug, Clone)]
+enum TreeNode {
+    /// A top-level command.
+    Command {
+        name: String,
+        description: Option<String>,
+        source: String,
+        flag_count: usize,
+        subcommand_count: usize,
+    },
+    /// A subcommand nested under a command.
+    Subcommand {
+        name: String,
+        description: Option<String>,
+        depth: usize,
+    },
+    /// A flag nested under a command or subcommand.
+    Flag {
+        short: Option<String>,
+        long: Option<String>,
+        description: Option<String>,
+        depth: usize,
+    },
+}
+
+impl TreeNode {
+    fn depth(&self) -> usize {
+        match self {
+            TreeNode::Command { .. } => 0,
+            TreeNode::Subcommand { depth, .. } | TreeNode::Flag { depth, .. } => *depth,
+        }
+    }
+
+    fn display_name(&self) -> String {
+        match self {
+            TreeNode::Command { name, .. } => name.clone(),
+            TreeNode::Subcommand { name, .. } => name.clone(),
+            TreeNode::Flag { short, long, .. } => {
+                match (short, long) {
+                    (Some(s), Some(l)) => format!("{s}, {l}"),
+                    (None, Some(l)) => l.clone(),
+                    (Some(s), None) => s.clone(),
+                    (None, None) => "(unnamed)".to_string(),
+                }
+            }
+        }
+    }
+}
+
+/// Schema browser panel for exploring command schemas.
+pub struct SchemaBrowserPanel {
+    /// Flat list of tree nodes (expanded view).
+    nodes: Vec<TreeNode>,
+    /// Currently selected index.
+    selection: usize,
+    /// Scroll offset.
+    scroll_offset: usize,
+    /// Current filter/search text.
+    filter: String,
+    /// Filtered node indices.
+    filtered: Vec<usize>,
+    /// History store for schema provider access.
+    history_store: Option<Arc<Mutex<HistoryStore>>>,
+    /// Theme.
+    theme: &'static Theme,
+    /// Status message shown in footer.
+    status: Option<String>,
+}
+
+impl SchemaBrowserPanel {
+    /// Creates a new schema browser panel.
+    pub fn new(theme: &'static Theme) -> Self {
+        Self {
+            nodes: Vec::new(),
+            selection: 0,
+            scroll_offset: 0,
+            filter: String::new(),
+            filtered: Vec::new(),
+            history_store: None,
+            theme,
+            status: None,
+        }
+    }
+
+    /// Sets the history store for schema provider access.
+    pub fn set_history_store(&mut self, store: Arc<Mutex<HistoryStore>>) {
+        self.history_store = Some(store);
+        self.load_schemas();
+    }
+
+    /// Loads all schemas from the provider into the tree view.
+    fn load_schemas(&mut self) {
+        self.nodes.clear();
+
+        // Clone the Arc to avoid borrowing self.history_store while mutating self
+        let store = match self.history_store.clone() {
+            Some(s) => s,
+            None => {
+                self.apply_filter();
+                return;
+            }
+        };
+
+        let guard = match store.lock() {
+            Ok(g) => g,
+            Err(_) => {
+                self.apply_filter();
+                return;
+            }
+        };
+
+        let provider = match guard.schema_provider() {
+            Some(p) => p,
+            None => {
+                drop(guard);
+                self.apply_filter();
+                return;
+            }
+        };
+
+        // Collect all command names, sort alphabetically
+        let mut commands: Vec<&str> = provider.commands().collect();
+        commands.sort_unstable();
+
+        for cmd_name in commands {
+            if let Some(schema) = provider.get(cmd_name) {
+                let source = format!("{:?}", schema.source);
+                self.nodes.push(TreeNode::Command {
+                    name: schema.command.clone(),
+                    description: schema.description.clone(),
+                    source,
+                    flag_count: schema.global_flags.len(),
+                    subcommand_count: schema.subcommands.len(),
+                });
+
+                // Add global flags
+                for flag in &schema.global_flags {
+                    self.nodes.push(TreeNode::Flag {
+                        short: flag.short.clone(),
+                        long: flag.long.clone(),
+                        description: flag.description.clone(),
+                        depth: 1,
+                    });
+                }
+
+                // Add subcommands and their flags
+                for sub in &schema.subcommands {
+                    self.nodes.push(TreeNode::Subcommand {
+                        name: sub.name.clone(),
+                        description: sub.description.clone(),
+                        depth: 1,
+                    });
+
+                    for flag in &sub.flags {
+                        self.nodes.push(TreeNode::Flag {
+                            short: flag.short.clone(),
+                            long: flag.long.clone(),
+                            description: flag.description.clone(),
+                            depth: 2,
+                        });
+                    }
+                }
+            }
+        }
+
+        let count = provider.schema_count();
+        let bundled = if provider.is_bundled_available() {
+            " (bundled)"
+        } else {
+            ""
+        };
+        self.status = Some(format!("{count} schemas{bundled}"));
+
+        drop(guard);
+        self.apply_filter();
+    }
+
+    /// Applies the current filter text.
+    fn apply_filter(&mut self) {
+        self.filtered.clear();
+
+        if self.filter.is_empty() {
+            // Show only top-level commands when no filter
+            for (i, node) in self.nodes.iter().enumerate() {
+                if matches!(node, TreeNode::Command { .. }) {
+                    self.filtered.push(i);
+                }
+            }
+        } else {
+            let filter_lower = self.filter.to_lowercase();
+            // Show commands that match, plus their children
+            let mut show_children_of: Option<usize> = None;
+
+            for (i, node) in self.nodes.iter().enumerate() {
+                match node {
+                    TreeNode::Command { name, description, .. } => {
+                        let matches = name.to_lowercase().contains(&filter_lower)
+                            || description
+                                .as_ref()
+                                .is_some_and(|d| d.to_lowercase().contains(&filter_lower));
+
+                        if matches {
+                            self.filtered.push(i);
+                            show_children_of = Some(i);
+                        } else {
+                            show_children_of = None;
+                        }
+                    }
+                    TreeNode::Subcommand { .. } | TreeNode::Flag { .. } => {
+                        if show_children_of.is_some() {
+                            self.filtered.push(i);
+                        }
+                    }
+                }
+            }
+        }
+
+        self.selection = 0;
+        self.scroll_offset = 0;
+    }
+
+    /// Ensures the selection is visible.
+    fn ensure_visible(&mut self, visible_count: usize) {
+        if visible_count == 0 {
+            return;
+        }
+        if self.selection < self.scroll_offset {
+            self.scroll_offset = self.selection;
+        } else if self.selection >= self.scroll_offset + visible_count {
+            self.scroll_offset = self.selection.saturating_sub(visible_count - 1);
+        }
+    }
+
+    /// Toggles expansion of the selected command node.
+    fn toggle_expand(&mut self) {
+        let Some(&node_idx) = self.filtered.get(self.selection) else {
+            return;
+        };
+
+        // Only commands can be expanded/collapsed
+        if !matches!(self.nodes[node_idx], TreeNode::Command { .. }) {
+            return;
+        }
+
+        // Check if children are currently shown
+        let has_visible_children = self
+            .filtered
+            .get(self.selection + 1)
+            .is_some_and(|&next_idx| {
+                next_idx > node_idx && self.nodes[next_idx].depth() > 0
+            });
+
+        if has_visible_children {
+            // Collapse: remove children from filtered
+            let remove_start = self.selection + 1;
+            let remove_end = self.filtered[remove_start..]
+                .iter()
+                .position(|&idx| matches!(self.nodes[idx], TreeNode::Command { .. }))
+                .map(|pos| remove_start + pos)
+                .unwrap_or(self.filtered.len());
+            self.filtered.drain(remove_start..remove_end);
+        } else {
+            // Expand: add children after current position
+            let mut children = Vec::new();
+            for i in (node_idx + 1)..self.nodes.len() {
+                if matches!(self.nodes[i], TreeNode::Command { .. }) {
+                    break;
+                }
+                children.push(i);
+            }
+            let insert_pos = self.selection + 1;
+            for (offset, child_idx) in children.iter().enumerate() {
+                self.filtered.insert(insert_pos + offset, *child_idx);
+            }
+        }
+    }
+
+    /// Returns the insert text for the currently selected node.
+    fn selected_insert_text(&self) -> Option<String> {
+        let &node_idx = self.filtered.get(self.selection)?;
+        match &self.nodes[node_idx] {
+            TreeNode::Command { name, .. } => Some(name.clone()),
+            TreeNode::Subcommand { name, .. } => Some(name.clone()),
+            TreeNode::Flag { long, short, .. } => {
+                long.clone().or_else(|| short.clone())
+            }
+        }
+    }
+}
+
+impl Panel for SchemaBrowserPanel {
+    fn preferred_height(&self) -> u16 {
+        10
+    }
+
+    fn title(&self) -> &str {
+        "Schema"
+    }
+
+    fn render(&mut self, buffer: &mut Buffer, area: Rect) {
+        if area.height < 3 || area.width < 10 {
+            return;
+        }
+
+        // Layout: filter (1 line), list (flexible), status (1 line)
+        let has_status = self.status.is_some();
+        let constraints = if has_status {
+            vec![
+                Constraint::Length(1),
+                Constraint::Min(1),
+                Constraint::Length(1),
+            ]
+        } else {
+            vec![Constraint::Length(1), Constraint::Min(1)]
+        };
+        let chunks = Layout::vertical(constraints).split(area);
+
+        // Render filter input
+        let filter_text = if self.filter.is_empty() {
+            Span::styled(
+                "Type to search schemas...",
+                Style::default().fg(self.theme.text_secondary),
+            )
+        } else {
+            Span::styled(&self.filter, Style::default().fg(self.theme.text_primary))
+        };
+        let filter_line = Line::from(vec![
+            Span::styled("> ", Style::default().fg(self.theme.text_highlight)),
+            filter_text,
+        ]);
+        Paragraph::new(filter_line).render(chunks[0], buffer);
+
+        // Render tree list
+        if self.filtered.is_empty() {
+            let msg = if self.nodes.is_empty() {
+                "No schemas available. Use Tab to switch to Discover."
+            } else {
+                "No matching schemas."
+            };
+            let help = Line::from(Span::styled(
+                msg,
+                Style::default().fg(self.theme.text_secondary),
+            ));
+            Paragraph::new(vec![Line::from(""), help]).render(chunks[1], buffer);
+        } else {
+            let visible_height = chunks[1].height as usize;
+            self.ensure_visible(visible_height);
+
+            let items: Vec<ListItem> = self
+                .filtered
+                .iter()
+                .skip(self.scroll_offset)
+                .take(visible_height)
+                .enumerate()
+                .map(|(display_idx, &node_idx)| {
+                    let node = &self.nodes[node_idx];
+                    let actual_idx = self.scroll_offset + display_idx;
+                    let is_selected = actual_idx == self.selection;
+
+                    let indent = "  ".repeat(node.depth());
+                    let prefix = match node {
+                        TreeNode::Command { subcommand_count, .. } => {
+                            // Check if expanded
+                            let is_expanded = self
+                                .filtered
+                                .get(actual_idx + 1)
+                                .is_some_and(|&next| self.nodes[next].depth() > 0);
+                            if *subcommand_count > 0 || matches!(node, TreeNode::Command { flag_count, .. } if *flag_count > 0) {
+                                if is_expanded { "▼ " } else { "▶ " }
+                            } else {
+                                "  "
+                            }
+                        }
+                        TreeNode::Subcommand { .. } => "├─ ",
+                        TreeNode::Flag { .. } => "│  ",
+                    };
+
+                    let name = node.display_name();
+                    let desc = match node {
+                        TreeNode::Command { description, .. }
+                        | TreeNode::Subcommand { description, .. }
+                        | TreeNode::Flag { description, .. } => {
+                            description.as_deref().unwrap_or("")
+                        }
+                    };
+
+                    let name_style = if is_selected {
+                        Style::default()
+                            .fg(self.theme.selection_fg)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        match node {
+                            TreeNode::Command { .. } => {
+                                Style::default().fg(self.theme.text_primary)
+                            }
+                            TreeNode::Subcommand { .. } => {
+                                Style::default().fg(self.theme.text_highlight)
+                            }
+                            TreeNode::Flag { .. } => {
+                                Style::default().fg(self.theme.text_secondary)
+                            }
+                        }
+                    };
+
+                    let mut spans = vec![
+                        Span::styled(
+                            format!("{indent}{prefix}"),
+                            Style::default().fg(self.theme.panel_border),
+                        ),
+                        Span::styled(name, name_style),
+                    ];
+
+                    if !desc.is_empty() {
+                        spans.push(Span::styled(
+                            format!("  {desc}"),
+                            Style::default().fg(self.theme.text_secondary),
+                        ));
+                    }
+
+                    let line = Line::from(spans);
+                    if is_selected {
+                        ListItem::new(line)
+                            .style(Style::default().bg(self.theme.selection_bg))
+                    } else {
+                        ListItem::new(line)
+                    }
+                })
+                .collect();
+
+            List::new(items).render(chunks[1], buffer);
+        }
+
+        // Render status line
+        if has_status {
+            if let Some(ref status) = self.status {
+                let status_line = Line::from(Span::styled(
+                    status.as_str(),
+                    Style::default().fg(self.theme.text_secondary),
+                ));
+                Paragraph::new(status_line).render(chunks[2], buffer);
+            }
+        }
+    }
+
+    fn handle_input(&mut self, key: KeyEvent) -> PanelResult {
+        match key.code {
+            KeyCode::Esc => PanelResult::Dismiss,
+            KeyCode::Up => {
+                if self.selection > 0 {
+                    self.selection -= 1;
+                }
+                PanelResult::Continue
+            }
+            KeyCode::Down => {
+                if self.selection + 1 < self.filtered.len() {
+                    self.selection += 1;
+                }
+                PanelResult::Continue
+            }
+            KeyCode::Enter => {
+                // Toggle expand/collapse for commands, insert text for leaves
+                let is_command = self
+                    .filtered
+                    .get(self.selection)
+                    .is_some_and(|&idx| matches!(self.nodes[idx], TreeNode::Command { .. }));
+
+                if is_command {
+                    self.toggle_expand();
+                    PanelResult::Continue
+                } else if let Some(text) = self.selected_insert_text() {
+                    PanelResult::InsertText(text)
+                } else {
+                    PanelResult::Continue
+                }
+            }
+            KeyCode::Right => {
+                // Expand selected command
+                if self
+                    .filtered
+                    .get(self.selection)
+                    .is_some_and(|&idx| matches!(self.nodes[idx], TreeNode::Command { .. }))
+                {
+                    self.toggle_expand();
+                }
+                PanelResult::Continue
+            }
+            KeyCode::Left => {
+                // Collapse: jump to parent command if on a child node
+                if let Some(&node_idx) = self.filtered.get(self.selection) {
+                    if self.nodes[node_idx].depth() > 0 {
+                        // Find parent command
+                        for i in (0..self.selection).rev() {
+                            if let Some(&parent_idx) = self.filtered.get(i) {
+                                if matches!(self.nodes[parent_idx], TreeNode::Command { .. }) {
+                                    self.selection = i;
+                                    break;
+                                }
+                            }
+                        }
+                    } else {
+                        // Already on command: collapse it
+                        self.toggle_expand();
+                    }
+                }
+                PanelResult::Continue
+            }
+            KeyCode::Char(c) => {
+                self.filter.push(c);
+                self.apply_filter();
+                PanelResult::Continue
+            }
+            KeyCode::Backspace => {
+                self.filter.pop();
+                self.apply_filter();
+                PanelResult::Continue
+            }
+            _ => PanelResult::Continue,
+        }
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::theme::AMBER_THEME;
+    use super::*;
+
+    #[test]
+    fn test_schema_browser_new_initial_state() {
+        let panel = SchemaBrowserPanel::new(&AMBER_THEME);
+        assert!(panel.nodes.is_empty());
+        assert!(panel.filtered.is_empty());
+        assert_eq!(panel.selection, 0);
+        assert!(panel.filter.is_empty());
+    }
+
+    #[test]
+    fn test_schema_browser_title() {
+        let panel = SchemaBrowserPanel::new(&AMBER_THEME);
+        assert_eq!(panel.title(), "Schema");
+    }
+
+    #[test]
+    fn test_schema_browser_preferred_height() {
+        let panel = SchemaBrowserPanel::new(&AMBER_THEME);
+        assert_eq!(panel.preferred_height(), 10);
+    }
+
+    #[test]
+    fn test_tree_node_display_name_flag_variants() {
+        let both = TreeNode::Flag {
+            short: Some("-v".into()),
+            long: Some("--verbose".into()),
+            description: None,
+            depth: 1,
+        };
+        assert_eq!(both.display_name(), "-v, --verbose");
+
+        let long_only = TreeNode::Flag {
+            short: None,
+            long: Some("--help".into()),
+            description: None,
+            depth: 1,
+        };
+        assert_eq!(long_only.display_name(), "--help");
+
+        let short_only = TreeNode::Flag {
+            short: Some("-h".into()),
+            long: None,
+            description: None,
+            depth: 1,
+        };
+        assert_eq!(short_only.display_name(), "-h");
+    }
+
+    #[test]
+    fn test_tree_node_depth() {
+        let cmd = TreeNode::Command {
+            name: "git".into(),
+            description: None,
+            source: "Bootstrap".into(),
+            flag_count: 0,
+            subcommand_count: 0,
+        };
+        assert_eq!(cmd.depth(), 0);
+
+        let sub = TreeNode::Subcommand {
+            name: "commit".into(),
+            description: None,
+            depth: 1,
+        };
+        assert_eq!(sub.depth(), 1);
+
+        let flag = TreeNode::Flag {
+            short: None,
+            long: Some("--message".into()),
+            description: None,
+            depth: 2,
+        };
+        assert_eq!(flag.depth(), 2);
+    }
+}

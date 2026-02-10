@@ -6,7 +6,7 @@ use tracing::{debug, info};
 use super::error::CIError;
 
 /// Current schema version.
-pub const SCHEMA_VERSION: i32 = 2;
+pub const SCHEMA_VERSION: i32 = 3;
 
 /// Creates the Command Intelligence schema in the given database connection.
 ///
@@ -62,16 +62,34 @@ pub fn create_schema(conn: &Connection) -> Result<(), CIError> {
 /// Applies schema migrations from one version to another.
 fn apply_migrations(conn: &Connection, from_version: i32, to_version: i32) -> Result<(), CIError> {
     if from_version < 2 && to_version >= 2 {
-        // Phase 8b cutoff: purge legacy non-authoritative schema rows created by
-        // historical bootstrap/help probing paths. Learned rows are preserved.
-        let deleted = conn.execute(
-            "DELETE FROM ci_command_schemas WHERE source IN ('bootstrap', 'help')",
+        // v2: purge legacy non-authoritative schema rows (only if table exists —
+        // fresh installs at v3+ won't have ci_command_schemas).
+        let table_exists: bool = conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='ci_command_schemas'",
             [],
+            |row| Ok(row.get::<_, i64>(0)? > 0),
         )?;
-        debug!(
-            deleted,
-            "Applied schema v2 migration: purged bootstrap/help command schemas"
-        );
+        if table_exists {
+            let deleted = conn.execute(
+                "DELETE FROM ci_command_schemas WHERE source IN ('bootstrap', 'help')",
+                [],
+            )?;
+            debug!(
+                deleted,
+                "Applied schema v2 migration: purged bootstrap/help command schemas"
+            );
+        }
+    }
+
+    if from_version < 3 && to_version >= 3 {
+        // v3: drop ci_command_schemas (replaced by cs_* tables via command-schema-sqlite)
+        // and ci_suggestion_cache (unused dead code).
+        conn.execute("DROP TABLE IF EXISTS ci_command_schemas", [])?;
+        conn.execute("DROP TABLE IF EXISTS ci_suggestion_cache", [])?;
+        conn.execute("DROP INDEX IF EXISTS idx_schema_command", [])?;
+        conn.execute("DROP INDEX IF EXISTS idx_schema_source", [])?;
+        conn.execute("DROP INDEX IF EXISTS idx_ci_cache_expires", [])?;
+        debug!("Applied schema v3 migration: dropped ci_command_schemas and ci_suggestion_cache");
     }
 
     Ok(())
@@ -149,43 +167,6 @@ fn create_tables(conn: &Connection) -> Result<(), CIError> {
     // User pattern tables
     create_user_pattern_tables(conn)?;
 
-    // Suggestion cache
-    create_cache_table(conn)?;
-
-    // Command schemas (extracted from --help)
-    create_command_schema_tables(conn)?;
-
-    Ok(())
-}
-
-/// Creates command schema storage tables.
-fn create_command_schema_tables(conn: &Connection) -> Result<(), CIError> {
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS ci_command_schemas (
-            id INTEGER PRIMARY KEY,
-            command TEXT NOT NULL,
-            subcommand TEXT,
-            schema_json TEXT NOT NULL,
-            source TEXT NOT NULL,
-            confidence REAL DEFAULT 1.0,
-            extracted_at INTEGER NOT NULL,
-            last_validated INTEGER,
-            UNIQUE(command, subcommand)
-        )",
-        [],
-    )?;
-
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_schema_command ON ci_command_schemas(command)",
-        [],
-    )?;
-
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_schema_source ON ci_command_schemas(source)",
-        [],
-    )?;
-
-    debug!("Created command schema tables");
     Ok(())
 }
 
@@ -686,7 +667,6 @@ pub fn reset_database(conn: &Connection) -> Result<(), CIError> {
         "ci_flag_values",
         "ci_command_hierarchy",
         "ci_command_variants",
-        "ci_suggestion_cache",
         // Drop FTS triggers first
         "ci_commands_fts_ai",
         "ci_commands_fts_ad",
@@ -701,7 +681,9 @@ pub fn reset_database(conn: &Connection) -> Result<(), CIError> {
         "ci_user_aliases",
         "ci_sync_state",
         "ci_schema_version",
+        // Legacy tables (may still exist on upgraded databases)
         "ci_command_schemas",
+        "ci_suggestion_cache",
     ];
 
     conn.execute_batch("BEGIN TRANSACTION")?;
@@ -718,27 +700,6 @@ pub fn reset_database(conn: &Connection) -> Result<(), CIError> {
     create_schema(conn)?;
 
     info!("Database reset complete");
-    Ok(())
-}
-
-/// Creates suggestion cache table.
-fn create_cache_table(conn: &Connection) -> Result<(), CIError> {
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS ci_suggestion_cache (
-            cache_key TEXT PRIMARY KEY,
-            suggestions TEXT NOT NULL,
-            computed_at INTEGER NOT NULL,
-            expires_at INTEGER NOT NULL
-        )",
-        [],
-    )?;
-
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_ci_cache_expires ON ci_suggestion_cache(expires_at)",
-        [],
-    )?;
-
-    debug!("Created cache table");
     Ok(())
 }
 
@@ -790,9 +751,10 @@ mod tests {
     }
 
     #[test]
-    fn test_migration_v2_purges_bootstrap_and_help_schema_rows() {
+    fn test_migration_v1_to_v3_drops_legacy_tables() {
         let conn = Connection::open_in_memory().unwrap();
 
+        // Simulate a v1 database with legacy tables
         conn.execute(
             "CREATE TABLE ci_schema_version (
                 version INTEGER PRIMARY KEY,
@@ -822,16 +784,20 @@ mod tests {
             [],
         )
         .unwrap();
+        conn.execute(
+            "CREATE TABLE ci_suggestion_cache (
+                id INTEGER PRIMARY KEY,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                expires_at INTEGER NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
 
         conn.execute(
             "INSERT INTO ci_command_schemas (command, subcommand, schema_json, source, confidence, extracted_at)
              VALUES ('git', NULL, '{}', 'bootstrap', 1.0, 0)",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO ci_command_schemas (command, subcommand, schema_json, source, confidence, extracted_at)
-             VALUES ('kubectl', NULL, '{}', 'help', 1.0, 0)",
             [],
         )
         .unwrap();
@@ -842,16 +808,20 @@ mod tests {
         )
         .unwrap();
 
+        // Run migration: v1 → v3
         create_schema(&conn).unwrap();
 
-        let sources: Vec<String> = conn
-            .prepare("SELECT source FROM ci_command_schemas ORDER BY command")
+        // v3 migration should have dropped both legacy tables
+        let table_exists = |name: &str| -> bool {
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                [name],
+                |row| Ok(row.get::<_, i64>(0).unwrap() > 0),
+            )
             .unwrap()
-            .query_map([], |row| row.get(0))
-            .unwrap()
-            .filter_map(|row| row.ok())
-            .collect();
-        assert_eq!(sources, vec!["learned".to_string()]);
+        };
+        assert!(!table_exists("ci_command_schemas"));
+        assert!(!table_exists("ci_suggestion_cache"));
 
         let version = get_schema_version(&conn).unwrap();
         assert_eq!(version, SCHEMA_VERSION);

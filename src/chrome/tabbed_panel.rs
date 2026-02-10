@@ -12,7 +12,7 @@ use ratatui_core::text::{Line, Span};
 use ratatui_core::widgets::Widget;
 use ratatui_widgets::tabs::Tabs;
 
-use super::command_palette::CommandPalettePanel;
+use super::commands_panel::CommandsPanel;
 use super::file_browser::FileBrowserPanel;
 use super::help_panel::HelpPanel;
 use super::history_browser::HistoryBrowserPanel;
@@ -46,7 +46,7 @@ impl TabbedPanel {
         let tabs: Vec<Box<dyn Panel>> = vec![
             Box::new(HistoryBrowserPanel::new(theme)),
             Box::new(FileBrowserPanel::new(theme, symbol_set)),
-            Box::new(CommandPalettePanel::new(theme)),
+            Box::new(CommandsPanel::new(theme)),
             Box::new(HelpPanel::new(theme)),
         ];
 
@@ -84,7 +84,14 @@ impl TabbedPanel {
         // Pass store to file browser panel for intelligent suggestions
         if let Some(panel) = self.tabs.get_mut(TAB_FILE_BROWSER) {
             if let Some(file_panel) = panel.as_any_mut().downcast_mut::<FileBrowserPanel>() {
-                file_panel.set_history_store(store);
+                file_panel.set_history_store(Arc::clone(&store));
+            }
+        }
+
+        // Pass store to commands panel (for schema browser)
+        if let Some(panel) = self.tabs.get_mut(TAB_COMMAND_PALETTE) {
+            if let Some(cmd_panel) = panel.as_any_mut().downcast_mut::<CommandsPanel>() {
+                cmd_panel.set_history_store(store);
             }
         }
     }
@@ -100,9 +107,9 @@ impl TabbedPanel {
 
     /// Loads context for all panels based on the current working directory.
     pub fn load_context(&mut self, cwd: &Path) {
-        // Load commands for command palette
+        // Load commands for commands panel (Discover sub-tab)
         if let Some(panel) = self.tabs.get_mut(TAB_COMMAND_PALETTE) {
-            if let Some(cmd_panel) = panel.as_any_mut().downcast_mut::<CommandPalettePanel>() {
+            if let Some(cmd_panel) = panel.as_any_mut().downcast_mut::<CommandsPanel>() {
                 cmd_panel.load_commands(cwd);
             }
         }

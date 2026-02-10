@@ -190,6 +190,20 @@ pub struct RenderStats {
     pub first_visible_line: usize,
 }
 
+/// RAII guard that restores cursor visibility on drop.
+///
+/// Writes `crossterm::cursor::Show` to stdout when dropped, ensuring the
+/// cursor is restored even if `render_viewport` panics. Uses stdout directly
+/// because the render writer is generic (`W: Write`) and cannot be borrowed
+/// by both the guard and the render call simultaneously.
+struct CursorHideGuard;
+
+impl Drop for CursorHideGuard {
+    fn drop(&mut self) {
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::cursor::Show);
+    }
+}
+
 /// Stateless scrollback viewer.
 ///
 /// Provides a single unified rendering function for scrollback content.
@@ -220,13 +234,15 @@ impl ScrollViewer {
         rows: u16,
         config: &RenderConfig,
     ) -> io::Result<RenderStats> {
-        // Hide cursor during render; restore on all exit paths (including errors)
+        // Hide cursor during render; guard restores visibility on all exit
+        // paths including panics (Drop writes Show to stdout).
         crossterm::queue!(out, crossterm::cursor::Hide)?;
+        let _cursor_guard = CursorHideGuard;
+
         let result = Self::render_viewport(out, buffer, offset, cols, rows, config);
-        // Always restore cursor visibility, even if rendering failed
-        let _ = crossterm::queue!(out, crossterm::cursor::Show);
         let _ = out.flush();
         result
+        // _cursor_guard drops here → cursor::Show via stdout
     }
 
     /// Inner rendering implementation called by `render`.
