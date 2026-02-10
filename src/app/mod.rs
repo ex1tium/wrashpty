@@ -1311,9 +1311,10 @@ impl App {
         {
             let stdout = std::io::stdout();
             let mut out = stdout.lock();
-            use std::io::Write;
+            use crossterm::cursor::MoveTo;
+            use crossterm::terminal::{Clear, ClearType};
             for row in 1..=panel_height {
-                write!(out, "\x1b[{};1H\x1b[K", row)?;
+                crossterm::queue!(out, MoveTo(0, row - 1), Clear(ClearType::UntilNewLine))?;
             }
             out.flush()?;
         }
@@ -1346,7 +1347,7 @@ impl App {
         let mut needs_redraw = true;
 
         // Fullscreen toggle state (F10).
-        // AltScreenGuard ensures \x1b[?1049l is written on all exit paths
+        // AltScreenGuard ensures LeaveAlternateScreen on all exit paths
         // (error, panic, early return) so the main screen is always restored.
         let mut fullscreen = false;
         let mut normal_panel_height: u16 = *panel_height;
@@ -1423,8 +1424,10 @@ impl App {
                                     *cols = current_cols;
 
                                     // Enter alternate screen (saves main screen + cursor)
-                                    let _ = write!(std::io::stdout(), "\x1b[?1049h");
-                                    let _ = std::io::stdout().flush();
+                                    let _ = crossterm::execute!(
+                                        std::io::stdout(),
+                                        crossterm::terminal::EnterAlternateScreen
+                                    );
                                     _alt_screen.active = true;
 
                                     self.chrome
@@ -1438,8 +1441,10 @@ impl App {
 
                                     // Exit alternate screen (atomically restores main screen)
                                     _alt_screen.active = false;
-                                    let _ = write!(std::io::stdout(), "\x1b[?1049l");
-                                    let _ = std::io::stdout().flush();
+                                    let _ = crossterm::execute!(
+                                        std::io::stdout(),
+                                        crossterm::terminal::LeaveAlternateScreen
+                                    );
 
                                     // Use expand_panel (not resize_panel) to set PanelState
                                     // and scroll region without clearing restored content.
@@ -1460,8 +1465,10 @@ impl App {
                                 {
                                     let stdout = std::io::stdout();
                                     let mut out = stdout.lock();
+                                    use crossterm::cursor::MoveTo;
+                                    use crossterm::terminal::{Clear, ClearType};
                                     for row in 1..=*panel_height {
-                                        write!(out, "\x1b[{};1H\x1b[K", row)?;
+                                        crossterm::queue!(out, MoveTo(0, row - 1), Clear(ClearType::UntilNewLine))?;
                                     }
                                     out.flush()?;
                                 }
@@ -1534,9 +1541,10 @@ impl App {
                             {
                                 let stdout = std::io::stdout();
                                 let mut out = stdout.lock();
-                                use std::io::Write;
+                                use crossterm::cursor::MoveTo;
+                                use crossterm::terminal::{Clear, ClearType};
                                 for row in 1..=*panel_height {
-                                    write!(out, "\x1b[{};1H\x1b[K", row)?;
+                                    crossterm::queue!(out, MoveTo(0, row - 1), Clear(ClearType::UntilNewLine))?;
                                 }
                                 out.flush()?;
                             }
@@ -1600,6 +1608,9 @@ impl App {
 
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
+        use crossterm::cursor::MoveTo;
+        use crossterm::style::{Attribute, SetAttribute};
+        use crossterm::terminal::{Clear, ClearType};
 
         // Sanitize and write each line to the correct terminal row
         for (i, line) in lines.iter().enumerate() {
@@ -1608,12 +1619,12 @@ impl App {
                 break;
             }
             // Position cursor, reset attributes
-            let _ = write!(out, "\x1b[{};1H\x1b[0m", row);
+            let _ = crossterm::queue!(out, MoveTo(0, row - 1), SetAttribute(Attribute::Reset));
             // Write sanitized line content (strip dangerous CSI, preserve colors)
             let sanitized = crate::scrollback::sanitize_for_display(line.content());
             let _ = out.write_all(&sanitized);
             // Clear rest of line
-            let _ = write!(out, "\x1b[K");
+            let _ = crossterm::queue!(out, Clear(ClearType::UntilNewLine));
         }
 
         let _ = out.flush();
@@ -1696,10 +1707,7 @@ impl App {
         // which wipes everything below the cursor. By placing the cursor at the bottom,
         // the repainted scrollback content and PTY content above are preserved.
         if self.chrome.is_active() {
-            use std::io::Write;
-            let mut out = std::io::stdout();
-            write!(out, "\x1b[{};1H", rows)?;
-            out.flush()?;
+            crossterm::execute!(std::io::stdout(), crossterm::cursor::MoveTo(0, rows - 1))?;
         }
 
         Ok(())

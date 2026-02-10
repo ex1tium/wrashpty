@@ -1455,6 +1455,8 @@ impl App {
     /// Note: The topbar will be redrawn by the main edit loop before reedline
     /// takes control, so we just need to restore scroll region and clear content.
     pub(super) fn clear_scrollback_view(&mut self) -> std::io::Result<()> {
+        use crossterm::cursor::MoveTo;
+        use crossterm::terminal::{Clear, ClearType};
         use std::io::Write;
 
         let mut stdout = std::io::stdout();
@@ -1469,9 +1471,9 @@ impl App {
                 // Clear the content area (rows 2 to N), leaving topbar row alone
                 // Position cursor at row 2 column 1
                 for row in 2..=rows {
-                    write!(stdout, "\x1b[{};1H\x1b[2K", row)?;
+                    crossterm::queue!(stdout, MoveTo(0, row - 1), Clear(ClearType::CurrentLine))?;
                 }
-                write!(stdout, "\x1b[2;1H")?;
+                crossterm::queue!(stdout, MoveTo(0, 1))?;
 
                 // Draw topbar immediately so it's visible
                 let timestamp = chrono::Local::now().format("%H:%M").to_string();
@@ -1481,11 +1483,11 @@ impl App {
                 }
 
                 // Move cursor back to row 2 for reedline prompt
-                write!(stdout, "\x1b[2;1H")?;
+                crossterm::queue!(stdout, MoveTo(0, 1))?;
             }
         } else {
             // No chrome - just clear screen and go home
-            write!(stdout, "\x1b[2J\x1b[H")?;
+            crossterm::queue!(stdout, Clear(ClearType::All), MoveTo(0, 0))?;
         }
 
         stdout.flush()?;
@@ -1513,7 +1515,7 @@ impl App {
 
         let result = self.run_scroll_view_inner();
 
-        // Guard drops → \x1b[?1049l restores main screen
+        // Guard drops → LeaveAlternateScreen restores main screen
         drop(alt_guard);
 
         // Re-establish chrome after main screen restore
