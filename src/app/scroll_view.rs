@@ -1535,7 +1535,7 @@ impl App {
     ///
     /// Handles all three variants: Append, Overwrite, and EraseBelow.
     /// Adjusts command boundaries when lines are dropped from the ring buffer.
-    fn apply_captured_line(&mut self, captured: crate::scrollback::CapturedLine) {
+    pub(super) fn apply_captured_line(&mut self, captured: crate::scrollback::CapturedLine) {
         match captured {
             crate::scrollback::CapturedLine::Append(content) => {
                 let dropped = self.scrollback_buffer.push_line(content);

@@ -1227,32 +1227,7 @@ impl App {
 
         // Flush capture state so scrollback buffer has all content up to this point
         if let Some(captured) = self.capture_state.flush() {
-            match captured {
-                crate::scrollback::CapturedLine::Append(content) => {
-                    let dropped = self.scrollback_buffer.push_line(content);
-                    if dropped > 0 {
-                        self.viewer_state
-                            .boundaries
-                            .adjust_for_dropped_lines(dropped);
-                    }
-                }
-                crate::scrollback::CapturedLine::Overwrite {
-                    lines_back,
-                    content,
-                } => {
-                    let len = self.scrollback_buffer.len();
-                    if lines_back > 0 && lines_back <= len {
-                        self.scrollback_buffer
-                            .replace_line(len - lines_back, content);
-                    }
-                }
-                crate::scrollback::CapturedLine::EraseBelow { lines_back } => {
-                    let len = self.scrollback_buffer.len();
-                    if lines_back > 0 && lines_back <= len {
-                        self.scrollback_buffer.erase_from(len - lines_back);
-                    }
-                }
-            }
+            self.apply_captured_line(captured);
         }
 
         // Remember how many visible rows the PTY had before panel (for scrollback repaint)
@@ -1418,17 +1393,18 @@ impl App {
                                 fullscreen = !fullscreen;
 
                                 if fullscreen {
-                                    // Save normal height, enter alt screen, go fullscreen
+                                    // Enter alternate screen (saves main screen + cursor)
+                                    crossterm::execute!(
+                                        std::io::stdout(),
+                                        crossterm::terminal::EnterAlternateScreen
+                                    )
+                                    .context("Failed to enter alternate screen")?;
+                                    _alt_screen.active = true;
+
+                                    // Save normal height, go fullscreen
                                     normal_panel_height = *panel_height;
                                     *panel_height = total_rows;
                                     *cols = current_cols;
-
-                                    // Enter alternate screen (saves main screen + cursor)
-                                    let _ = crossterm::execute!(
-                                        std::io::stdout(),
-                                        crossterm::terminal::EnterAlternateScreen
-                                    );
-                                    _alt_screen.active = true;
 
                                     self.chrome
                                         .resize_panel(total_rows, total_rows)
@@ -1440,11 +1416,12 @@ impl App {
                                     *cols = current_cols;
 
                                     // Exit alternate screen (atomically restores main screen)
-                                    _alt_screen.active = false;
-                                    let _ = crossterm::execute!(
+                                    crossterm::execute!(
                                         std::io::stdout(),
                                         crossterm::terminal::LeaveAlternateScreen
-                                    );
+                                    )
+                                    .context("Failed to leave alternate screen")?;
+                                    _alt_screen.active = false;
 
                                     // Use expand_panel (not resize_panel) to set PanelState
                                     // and scroll region without clearing restored content.
