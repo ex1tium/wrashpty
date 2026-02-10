@@ -33,7 +33,7 @@ use rusqlite::Connection;
 use tracing::debug;
 
 use super::error::CIError;
-use super::schema_index::SchemaIndex;
+use super::schema_provider::SchemaProvider;
 use super::templates;
 use super::tokenizer::{analyze_command, compute_command_hash, token_type_to_string};
 use super::variants;
@@ -56,7 +56,7 @@ pub fn learn_command(
     command: &str,
     exit_status: Option<i32>,
     session_db_id: Option<i64>,
-    schema_index: &SchemaIndex,
+    provider: &dyn SchemaProvider,
 ) -> Result<(), CIError> {
     let command = command.trim();
     if command.is_empty() {
@@ -108,8 +108,8 @@ pub fn learn_command(
     // Learn command hierarchy (unified position-aware learning)
     hierarchy::learn_hierarchy(conn, &tokens, &token_ids, is_success, now)?;
 
-    // Keep schema store in sync with learned command structure.
-    if let Err(e) = super::sync::upsert_schema_from_tokens(conn, &tokens, schema_index) {
+    // Keep schema provider in sync with learned command structure.
+    if let Err(e) = super::sync::upsert_schema_from_tokens(conn, &tokens, provider) {
         debug!(
             command = %command,
             error = %e,
@@ -255,7 +255,7 @@ mod tests {
     fn test_learn_command() {
         let mut conn = setup_test_db();
         let mut cache = HashMap::new();
-        let schema_index = super::super::schema_index::SchemaIndex::from_schemas(Vec::new());
+        let provider = super::super::schema_provider::tests::TestSchemaProvider::new();
 
         learn_command(
             &mut conn,
@@ -263,7 +263,7 @@ mod tests {
             "git commit -m 'test'",
             Some(0),
             None,
-            &schema_index,
+            &provider,
         )
         .unwrap();
 
@@ -278,7 +278,7 @@ mod tests {
     fn test_learn_command_with_session() {
         let mut conn = setup_test_db();
         let mut cache = HashMap::new();
-        let schema_index = super::super::schema_index::SchemaIndex::from_schemas(Vec::new());
+        let provider = super::super::schema_provider::tests::TestSchemaProvider::new();
 
         // Create a session
         let now = chrono::Utc::now().timestamp();
@@ -301,7 +301,7 @@ mod tests {
             "git status",
             Some(0),
             Some(session_db_id),
-            &schema_index,
+            &provider,
         )
         .unwrap();
 

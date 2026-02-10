@@ -1,28 +1,29 @@
 //! Command Intelligence Engine for wrashpty.
 //!
-//! This module provides intelligent command suggestions using a schema-first
-//! architecture with learned ranking signals from command history. It
-//! integrates with reedline's SQLite database using the `ci_*` table prefix
-//! for all intelligence data.
+//! This module provides intelligent command suggestions using a trait-based
+//! schema provider architecture with learned ranking signals from command
+//! history. It integrates with reedline's SQLite database using the `ci_*`
+//! table prefix for intelligence data and `cs_*` for command schemas.
 //!
 //! # Architecture
 //!
 //! The engine combines two sources of intelligence:
 //!
-//! - **Structural Truth**: Curated command schemas are embedded at build time
-//!   and loaded into `SchemaIndex`. These provide command tree structure,
-//!   flags, and value candidates.
+//! - **Schema Provider**: A pluggable [`SchemaProvider`] trait backed by the
+//!   `command-schema` library (when feature-enabled) or a zero-cost stub.
+//!   Provides command tree structure, flags, and value candidates.
 //! - **Learned Ranking Signals**: Runtime tables (`ci_command_hierarchy`,
 //!   `ci_sequences`, `ci_pipe_chains`, variant success rates, etc.) influence
 //!   ordering and personalization from observed usage.
 //!
-//! Runtime schema overlays are explicit and limited to uncurated commands so
-//! embedded curated schemas remain authoritative.
+//! Schema mode controls how schemas feed into suggestions:
+//! - `HistoryOnly`: Only ci_* learned patterns, no schema enrichment
+//! - `SchemaEnabled`: Schemas from discovery + SQLite, manual scan available
+//! - `FullLibrary`: Bundled schema library loaded (requires `bundled-schemas` feature)
 //!
 //! # Features
 //!
-//! - **Embedded Schemas**: Build-time curated command structures
-//! - **Schema Overlays**: Learned overlays for uncurated commands only
+//! - **Schema Provider**: Trait-based schema access via command-schema library
 //! - **Hierarchy Learning**: Position-aware token relationships
 //! - **Pattern Learning**: Token sequences, pipe chains, and flag values
 //! - **Session Tracking**: Tracks command sequences within terminal sessions
@@ -30,7 +31,7 @@
 //! - **Failure Learning**: Prefers successful command variants
 //! - **Fuzzy Search**: FTS5-powered typo tolerance
 //! - **User Patterns**: Custom aliases and suggestion rules
-//! - **Export/Import**: Pattern export/import plus curated schema-pack export/import
+//! - **Export/Import**: Pattern export/import plus schema-pack export/import
 //!
 //! # Example
 //!
@@ -51,11 +52,13 @@
 pub mod bootstrap;
 pub mod db_schema;
 pub mod error;
-pub mod schema;
-pub mod schema_index;
+pub mod schema_provider;
 pub mod sync;
 pub mod tokenizer;
 pub mod types;
+
+// Re-export command_schema_core types for convenience
+pub use command_schema_core;
 
 // Pattern learning submodule
 pub mod patterns;
@@ -76,6 +79,7 @@ use rusqlite::Connection;
 use tracing::info;
 
 pub use error::CIError;
+pub use schema_provider::{SchemaMode, SchemaProvider};
 pub use types::*;
 
 /// The main Command Intelligence Engine.
@@ -95,8 +99,11 @@ pub struct CommandIntelligence {
     /// Current session context.
     current_session: Option<SessionContext>,
 
-    /// In-memory curated schema index loaded from embedded bundle.
-    schema_index: schema_index::SchemaIndex,
+    /// Pluggable schema provider (FullSchemaProvider or StubSchemaProvider).
+    schema_provider: Box<dyn SchemaProvider>,
+
+    /// How schemas feed into suggestions.
+    schema_mode: SchemaMode,
 
     /// Whether the intelligence system is enabled.
     enabled: bool,
@@ -107,24 +114,28 @@ impl CommandIntelligence {
     ///
     /// This initializes the schema if needed and loads the last sync state.
     pub fn new(conn: Connection) -> Result<Self, CIError> {
-        // Create schema if needed
+        Self::with_mode(conn, SchemaMode::default())
+    }
+
+    /// Creates a new CommandIntelligence with a specific schema mode.
+    pub fn with_mode(conn: Connection, schema_mode: SchemaMode) -> Result<Self, CIError> {
+        // Create ci_* schema if needed
         db_schema::create_schema(&conn)?;
 
-        // Load embedded schema index
-        let mut schema_index = schema_index::SchemaIndex::from_embedded()?;
+        // Create the schema provider based on feature flags
+        let schema_provider = Self::create_provider(&conn, schema_mode)?;
 
         // Bootstrap command hierarchy if empty (first run)
-        bootstrap::bootstrap_if_empty(&conn, &schema_index)?;
-
-        // Load learned overlays for uncurated commands.
-        let overlays_loaded = schema_index.load_runtime_overlays(&conn)?;
+        bootstrap::bootstrap_if_empty(&conn, schema_provider.as_ref())?;
 
         // Load last sync ID
         let last_sync_id = sync::get_last_sync_id(&conn)?;
 
         info!(
             last_sync_id,
-            overlays_loaded, "Command Intelligence initialized"
+            schema_count = schema_provider.schema_count(),
+            schema_mode = ?schema_mode,
+            "Command Intelligence initialized"
         );
 
         Ok(Self {
@@ -132,9 +143,27 @@ impl CommandIntelligence {
             token_cache: HashMap::new(),
             last_sync_id,
             current_session: None,
-            schema_index,
+            schema_provider,
+            schema_mode,
             enabled: true,
         })
+    }
+
+    /// Creates the appropriate schema provider based on feature flags.
+    fn create_provider(
+        conn: &Connection,
+        mode: SchemaMode,
+    ) -> Result<Box<dyn SchemaProvider>, CIError> {
+        #[cfg(feature = "command-schema")]
+        {
+            let provider = schema_provider::FullSchemaProvider::new(conn, mode)?;
+            Ok(Box::new(provider))
+        }
+        #[cfg(not(feature = "command-schema"))]
+        {
+            let _ = (conn, mode);
+            Ok(Box::new(schema_provider::StubSchemaProvider::new()))
+        }
     }
 
     /// Creates a new CommandIntelligence from an existing database path.
@@ -154,6 +183,48 @@ impl CommandIntelligence {
         self.enabled = enabled;
     }
 
+    /// Returns the current schema mode.
+    pub fn schema_mode(&self) -> SchemaMode {
+        self.schema_mode
+    }
+
+    /// Sets the schema mode, rebuilding the provider if necessary.
+    ///
+    /// Switching to/from `FullLibrary` requires rebuilding the schema provider
+    /// to load or unload the bundled database. Other transitions only update the
+    /// mode flag (the suggestion engine gates on `SchemaMode::uses_schemas()`).
+    pub fn set_schema_mode(&mut self, mode: SchemaMode) {
+        let needs_rebuild =
+            (mode == SchemaMode::FullLibrary) != (self.schema_mode == SchemaMode::FullLibrary);
+        self.schema_mode = mode;
+
+        if needs_rebuild {
+            match Self::create_provider(&self.conn, mode) {
+                Ok(provider) => {
+                    self.schema_provider = provider;
+                    info!(
+                        schema_mode = ?mode,
+                        count = self.schema_provider.schema_count(),
+                        "Rebuilt schema provider for mode change"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to rebuild schema provider on mode change");
+                }
+            }
+        }
+    }
+
+    /// Returns a reference to the schema provider.
+    pub fn schema_provider(&self) -> &dyn SchemaProvider {
+        self.schema_provider.as_ref()
+    }
+
+    /// Returns a mutable reference to the schema provider.
+    pub fn schema_provider_mut(&mut self) -> &mut dyn SchemaProvider {
+        self.schema_provider.as_mut()
+    }
+
     /// Synchronizes with reedline's history.
     ///
     /// This reads new entries since the last sync and processes them
@@ -163,8 +234,11 @@ impl CommandIntelligence {
             return Err(CIError::Disabled);
         }
 
-        let (stats, new_last_id) =
-            sync::sync_from_reedline(&self.conn, self.last_sync_id, &self.schema_index)?;
+        let (stats, new_last_id) = sync::sync_from_reedline(
+            &self.conn,
+            self.last_sync_id,
+            self.schema_provider.as_ref(),
+        )?;
         self.last_sync_id = new_last_id;
 
         Ok(stats)
@@ -217,7 +291,7 @@ impl CommandIntelligence {
             command,
             exit_status,
             session_db_id,
-            &self.schema_index,
+            self.schema_provider.as_ref(),
         )?;
 
         // Track session command if active
@@ -247,7 +321,13 @@ impl CommandIntelligence {
             return Vec::new();
         }
 
-        suggest::suggest(&self.conn, &self.schema_index, context, limit)
+        suggest::suggest(
+            &self.conn,
+            self.schema_provider.as_ref(),
+            self.schema_mode,
+            context,
+            limit,
+        )
     }
 
     /// Starts a new session.
@@ -381,17 +461,17 @@ impl CommandIntelligence {
         export::import(&self.conn, json, options)
     }
 
-    /// Exports curated schemas as a schema-pack JSON document.
+    /// Exports schemas as a schema-pack JSON document.
     pub fn export_schema_pack(&self) -> Result<String, CIError> {
-        export::export_schema_pack(&self.schema_index)
+        export::export_schema_pack(self.schema_provider.as_ref())
     }
 
-    /// Imports schemas as runtime overlays for uncurated commands.
+    /// Imports schemas as runtime overlays.
     pub fn import_schema_pack(
         &mut self,
         json: &str,
     ) -> Result<export::SchemaPackImportStats, CIError> {
-        export::import_schema_pack(&self.conn, &mut self.schema_index, json)
+        export::import_schema_pack(&self.conn, self.schema_provider.as_mut(), json)
     }
 
     // ========================================================================
@@ -413,15 +493,15 @@ impl CommandIntelligence {
     /// Resets the intelligence database, deleting all learned patterns.
     ///
     /// This drops and recreates all `ci_*` tables, giving a clean slate.
-    /// Embedded schemas are then reloaded and hierarchy is re-seeded.
+    /// Schemas are then reloaded and hierarchy is re-seeded.
     pub fn reset(&mut self) -> Result<(), CIError> {
         db_schema::reset_database(&self.conn)?;
 
-        // Reset schema index to embedded-only view after DB reset.
-        self.schema_index = schema_index::SchemaIndex::from_embedded()?;
+        // Recreate the schema provider
+        self.schema_provider = Self::create_provider(&self.conn, self.schema_mode)?;
 
-        // Re-bootstrap hierarchy from embedded schema index.
-        bootstrap::bootstrap_if_empty(&self.conn, &self.schema_index)?;
+        // Re-bootstrap hierarchy from schema provider.
+        bootstrap::bootstrap_if_empty(&self.conn, self.schema_provider.as_ref())?;
 
         // Clear in-memory state
         self.token_cache.clear();
@@ -462,7 +542,9 @@ impl CommandIntelligence {
             sequence_count: sequence_count as usize,
             template_count: template_count as usize,
             user_pattern_count: user_pattern_count as usize,
+            schema_count: self.schema_provider.schema_count(),
             last_sync_id: self.last_sync_id,
+            schema_mode: self.schema_mode,
         })
     }
 }
@@ -485,8 +567,14 @@ pub struct IntelligenceStats {
     /// Number of user-defined patterns.
     pub user_pattern_count: usize,
 
+    /// Number of available command schemas.
+    pub schema_count: usize,
+
     /// Last synced reedline history ID.
     pub last_sync_id: i64,
+
+    /// Current schema mode.
+    pub schema_mode: SchemaMode,
 }
 
 #[cfg(test)]
@@ -546,5 +634,11 @@ mod tests {
 
         ci.end_session().unwrap();
         assert!(ci.current_session().is_none());
+    }
+
+    #[test]
+    fn test_schema_mode() {
+        let ci = setup_test_ci();
+        assert_eq!(ci.schema_mode(), SchemaMode::SchemaEnabled);
     }
 }

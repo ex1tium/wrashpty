@@ -16,7 +16,7 @@
 //! 3. **Supplementary Sources** (context-specific):
 //!    - Flag values (`ci_flag_values`) for `--flag <value>` positions
 //!    - Pipe commands (`ci_pipe_chains`) for post-pipe positions
-//!    - Embedded curated command schemas (`SchemaIndex`) for subcommands/flags/value choices
+//!    - Command schemas (`SchemaProvider`) for subcommands/flags/value choices
 //!    - Session transitions (`ci_transitions`) for likely next commands
 //!    - Templates (`ci_templates`) for reusable command patterns
 //!
@@ -32,7 +32,7 @@ use tracing::debug;
 
 use super::fuzzy;
 use super::patterns;
-use super::schema_index::SchemaIndex;
+use super::schema_provider::{SchemaMode, SchemaProvider};
 use super::scoring::{self, ContextMatch};
 use super::sessions;
 use super::templates;
@@ -45,11 +45,12 @@ use super::variants;
 /// Main entry point for getting suggestions.
 pub fn suggest(
     conn: &Connection,
-    schema_index: &SchemaIndex,
+    provider: &dyn SchemaProvider,
+    schema_mode: SchemaMode,
     context: &SuggestionContext,
     limit: usize,
 ) -> Vec<Suggestion> {
-    let mut suggestions = gather_suggestions(conn, schema_index, context);
+    let mut suggestions = gather_suggestions(conn, provider, schema_mode, context);
 
     // Apply prefix filter if partial text provided
     if !context.partial.is_empty() {
@@ -145,7 +146,8 @@ fn boost_successful(suggestions: &mut [Suggestion], threshold: f64, boost: f64) 
 /// come from the same learned source.
 fn gather_suggestions(
     conn: &Connection,
-    schema_index: &SchemaIndex,
+    provider: &dyn SchemaProvider,
+    schema_mode: SchemaMode,
     context: &SuggestionContext,
 ) -> Vec<Suggestion> {
     let mut suggestions = Vec::new();
@@ -157,8 +159,10 @@ fn gather_suggestions(
     // This provides position-aware token suggestions for all positions
     suggestions.extend(suggest_from_hierarchy(conn, context));
 
-    // 3. Schema source: extracted/bootstrapped command definitions
-    suggestions.extend(suggest_from_schema(schema_index, context));
+    // 3. Schema source: gated on SchemaMode (skipped in HistoryOnly mode)
+    if schema_mode.uses_schemas() {
+        suggestions.extend(suggest_from_schema(provider, context));
+    }
 
     // 4. Session transitions and template completions
     suggestions.extend(suggest_from_session_transitions(conn, context));
@@ -269,11 +273,18 @@ fn template_token_for_context(preview: &str, context: &SuggestionContext) -> Opt
         .map(ToString::to_string)
 }
 
+/// Score multiplier applied to schema-sourced suggestions.
+///
+/// Schema suggestions are slightly deprioritized relative to learned hierarchy
+/// suggestions (which have real frequency/recency data) to avoid overwhelming
+/// the user with schema entries they've never used.
+const SCHEMA_SCORE_FACTOR: f64 = 0.9;
+
 /// Suggests from stored command schemas.
 ///
 /// This integrates extracted/bootstrapped command schemas into the same
 /// unified suggestion pipeline used by learned hierarchy patterns.
-fn suggest_from_schema(schema_index: &SchemaIndex, context: &SuggestionContext) -> Vec<Suggestion> {
+fn suggest_from_schema(provider: &dyn SchemaProvider, context: &SuggestionContext) -> Vec<Suggestion> {
     let mut suggestions = Vec::new();
     let now = chrono::Utc::now().timestamp();
 
@@ -283,7 +294,7 @@ fn suggest_from_schema(schema_index: &SchemaIndex, context: &SuggestionContext) 
 
     match &context.position {
         PositionType::Command => {
-            for command in schema_index.commands().take(40) {
+            for command in provider.commands().take(40) {
                 suggestions.push(schema_suggestion(
                     command.to_string(),
                     ContextMatch::Generic,
@@ -299,7 +310,7 @@ fn suggest_from_schema(schema_index: &SchemaIndex, context: &SuggestionContext) 
                 return suggestions;
             };
 
-            if let Some(schema) = schema_index.get(base_command) {
+            if let Some(schema) = provider.get(base_command) {
                 let path = resolve_subcommand_path(schema, context);
                 let active_subcommand = find_subcommand_by_path(schema, &path);
                 let available_flags = schema_flags_for_context(schema, active_subcommand);
@@ -326,7 +337,7 @@ fn suggest_from_schema(schema_index: &SchemaIndex, context: &SuggestionContext) 
                 return suggestions;
             };
 
-            if let Some(schema) = schema_index.get(base_command) {
+            if let Some(schema) = provider.get(base_command) {
                 let path = resolve_subcommand_path(schema, context);
                 let active_subcommand = find_subcommand_by_path(schema, &path);
                 let next_subcommands = active_subcommand
@@ -364,6 +375,8 @@ fn suggest_from_schema(schema_index: &SchemaIndex, context: &SuggestionContext) 
                 }
             }
         }
+        // AfterPipe is handled by the early return above; this arm is
+        // unreachable but required for exhaustiveness.
         PositionType::AfterPipe => {}
     }
 
@@ -381,7 +394,7 @@ fn schema_suggestion(
         text,
         source: SuggestionSource::Schema,
         score: scoring::compute_score(1, last_seen, None, context_match, SuggestionSource::Schema)
-            * 0.9,
+            * SCHEMA_SCORE_FACTOR,
         metadata: SuggestionMetadata {
             frequency: 1,
             last_seen: Some(last_seen),
@@ -698,7 +711,7 @@ fn suggest_from_historical_frequency(conn: &Connection, limit: usize) -> Vec<Sug
 mod tests {
     use super::*;
     use crate::intelligence::db_schema;
-    use crate::intelligence::schema_index::SchemaIndex;
+    use crate::intelligence::schema_provider::tests::TestSchemaProvider;
     use crate::intelligence::tokenizer::compute_command_hash;
     use crate::intelligence::types::AnalyzedToken;
     use command_schema_core::{
@@ -711,11 +724,11 @@ mod tests {
         conn
     }
 
-    fn empty_schema_index() -> SchemaIndex {
-        SchemaIndex::from_schemas(Vec::new())
+    fn empty_provider() -> TestSchemaProvider {
+        TestSchemaProvider::new()
     }
 
-    fn bootstrap_schema_index() -> SchemaIndex {
+    fn bootstrap_provider() -> TestSchemaProvider {
         let mut git = CommandSchema::new("git", SchemaSource::Bootstrap);
         let mut remote = SubcommandSchema::new("remote");
         remote.subcommands = vec![
@@ -729,20 +742,20 @@ mod tests {
             remote,
         ];
 
-        SchemaIndex::from_schemas(vec![git])
+        TestSchemaProvider::from_schemas(vec![git])
     }
 
     #[test]
     fn test_suggest_empty_context() {
         let conn = setup_test_db();
-        let schema_index = empty_schema_index();
+        let provider = empty_provider();
         let context = SuggestionContext::default();
 
         // Bootstrap the database with some commands
-        let bootstrap_index = bootstrap_schema_index();
-        crate::intelligence::bootstrap::bootstrap_if_empty(&conn, &bootstrap_index).unwrap();
+        let bootstrap = bootstrap_provider();
+        crate::intelligence::bootstrap::bootstrap_if_empty(&conn, &bootstrap).unwrap();
 
-        let suggestions = suggest(&conn, &schema_index, &context, 10);
+        let suggestions = suggest(&conn, &provider, SchemaMode::SchemaEnabled, &context, 10);
         // Should return suggestions from bootstrapped hierarchy
         assert!(!suggestions.is_empty());
     }
@@ -750,11 +763,11 @@ mod tests {
     #[test]
     fn test_suggest_with_preceding() {
         let conn = setup_test_db();
-        let schema_index = empty_schema_index();
+        let provider = empty_provider();
 
         // Bootstrap the database
-        let bootstrap_index = bootstrap_schema_index();
-        crate::intelligence::bootstrap::bootstrap_if_empty(&conn, &bootstrap_index).unwrap();
+        let bootstrap = bootstrap_provider();
+        crate::intelligence::bootstrap::bootstrap_if_empty(&conn, &bootstrap).unwrap();
 
         let context = SuggestionContext {
             preceding_tokens: vec![AnalyzedToken::new(
@@ -767,7 +780,7 @@ mod tests {
         };
 
         // Request enough to include all git subcommands (22 bootstrapped)
-        let suggestions = suggest(&conn, &schema_index, &context, 30);
+        let suggestions = suggest(&conn, &provider, SchemaMode::SchemaEnabled, &context, 30);
         // Should return git subcommands from bootstrapped hierarchy
         assert!(!suggestions.is_empty());
         // Verify we get git subcommands
@@ -892,11 +905,11 @@ mod tests {
     #[test]
     fn test_hierarchy_returns_tokens_not_full_commands() {
         let conn = setup_test_db();
-        let schema_index = empty_schema_index();
+        let provider = empty_provider();
 
         // Bootstrap to get initial data
-        let bootstrap_index = bootstrap_schema_index();
-        crate::intelligence::bootstrap::bootstrap_if_empty(&conn, &bootstrap_index).unwrap();
+        let bootstrap = bootstrap_provider();
+        crate::intelligence::bootstrap::bootstrap_if_empty(&conn, &bootstrap).unwrap();
 
         // Context: git remote add (position 3)
         let context = SuggestionContext {
@@ -914,7 +927,7 @@ mod tests {
             ..Default::default()
         };
 
-        let suggestions = gather_suggestions(&conn, &schema_index, &context);
+        let suggestions = gather_suggestions(&conn, &provider, SchemaMode::SchemaEnabled, &context);
 
         // All suggestions should be individual tokens, not full commands
         for suggestion in &suggestions {
@@ -930,7 +943,7 @@ mod tests {
     #[test]
     fn test_hierarchy_provides_position_aware_suggestions() {
         let conn = setup_test_db();
-        let schema_index = empty_schema_index();
+        let provider = empty_provider();
         let now = chrono::Utc::now().timestamp();
 
         // Create tokens
@@ -989,7 +1002,7 @@ mod tests {
             ..Default::default()
         };
 
-        let suggestions = suggest(&conn, &schema_index, &context, 10);
+        let suggestions = suggest(&conn, &provider, SchemaMode::SchemaEnabled, &context, 10);
 
         // Should get 'origin' as a suggestion
         let texts: Vec<&str> = suggestions.iter().map(|s| s.text.as_str()).collect();
@@ -1005,10 +1018,10 @@ mod tests {
         let conn = setup_test_db();
 
         let mut schema =
-            crate::intelligence::schema::CommandSchema::new("tool", SchemaSource::Bootstrap);
+            command_schema_core::CommandSchema::new("tool", SchemaSource::Bootstrap);
         schema.subcommands.push(SubcommandSchema::new("build"));
         schema.subcommands.push(SubcommandSchema::new("deploy"));
-        let schema_index = SchemaIndex::from_schemas(vec![schema]);
+        let provider = TestSchemaProvider::from_schemas(vec![schema]);
 
         let context = SuggestionContext {
             preceding_tokens: vec![AnalyzedToken::new(
@@ -1020,7 +1033,7 @@ mod tests {
             ..Default::default()
         };
 
-        let suggestions = suggest(&conn, &schema_index, &context, 10);
+        let suggestions = suggest(&conn, &provider, SchemaMode::SchemaEnabled, &context, 10);
         let texts: Vec<&str> = suggestions.iter().map(|s| s.text.as_str()).collect();
         assert!(texts.contains(&"build"), "expected 'build' in {:?}", texts);
         assert!(
@@ -1035,12 +1048,12 @@ mod tests {
         let conn = setup_test_db();
 
         let mut schema =
-            crate::intelligence::schema::CommandSchema::new("git", SchemaSource::Bootstrap);
+            command_schema_core::CommandSchema::new("git", SchemaSource::Bootstrap);
         let mut remote = SubcommandSchema::new("remote");
         remote.subcommands.push(SubcommandSchema::new("add"));
         remote.subcommands.push(SubcommandSchema::new("remove"));
         schema.subcommands.push(remote);
-        let schema_index = SchemaIndex::from_schemas(vec![schema]);
+        let provider = TestSchemaProvider::from_schemas(vec![schema]);
 
         let context = SuggestionContext {
             preceding_tokens: vec![
@@ -1055,7 +1068,7 @@ mod tests {
             ..Default::default()
         };
 
-        let suggestions = suggest(&conn, &schema_index, &context, 10);
+        let suggestions = suggest(&conn, &provider, SchemaMode::SchemaEnabled, &context, 10);
         let texts: Vec<&str> = suggestions.iter().map(|s| s.text.as_str()).collect();
         assert!(texts.contains(&"add"), "expected 'add' in {:?}", texts);
         assert!(
@@ -1070,13 +1083,13 @@ mod tests {
         let conn = setup_test_db();
 
         let mut schema =
-            crate::intelligence::schema::CommandSchema::new("tool", SchemaSource::Bootstrap);
+            command_schema_core::CommandSchema::new("tool", SchemaSource::Bootstrap);
         schema.global_flags.push(FlagSchema::with_value(
             None,
             Some("--format"),
             ValueType::Choice(vec!["json".to_string(), "yaml".to_string()]),
         ));
-        let schema_index = SchemaIndex::from_schemas(vec![schema]);
+        let provider = TestSchemaProvider::from_schemas(vec![schema]);
 
         let context = SuggestionContext {
             preceding_tokens: vec![
@@ -1089,7 +1102,7 @@ mod tests {
             ..Default::default()
         };
 
-        let suggestions = suggest(&conn, &schema_index, &context, 10);
+        let suggestions = suggest(&conn, &provider, SchemaMode::SchemaEnabled, &context, 10);
         let texts: Vec<&str> = suggestions.iter().map(|s| s.text.as_str()).collect();
         assert!(texts.contains(&"json"), "expected 'json' in {:?}", texts);
         assert!(texts.contains(&"yaml"), "expected 'yaml' in {:?}", texts);
@@ -1098,7 +1111,7 @@ mod tests {
     #[test]
     fn test_session_transition_source_is_used_in_main_suggest_pipeline() {
         let conn = setup_test_db();
-        let schema_index = empty_schema_index();
+        let provider = empty_provider();
         let now = chrono::Utc::now().timestamp();
         let from_command = "git status";
         let to_command = "git commit -m test";
@@ -1127,7 +1140,7 @@ mod tests {
             ..Default::default()
         };
 
-        let suggestions = suggest(&conn, &schema_index, &context, 10);
+        let suggestions = suggest(&conn, &provider, SchemaMode::SchemaEnabled, &context, 10);
         let transition = suggestions
             .iter()
             .find(|s| s.text == to_command && s.source == SuggestionSource::SessionTransition);
@@ -1142,9 +1155,46 @@ mod tests {
     }
 
     #[test]
+    fn test_history_only_mode_suppresses_schema_suggestions() {
+        let conn = setup_test_db();
+
+        let mut schema = command_schema_core::CommandSchema::new("mytool", SchemaSource::Bootstrap);
+        schema
+            .subcommands
+            .push(SubcommandSchema::new("schema-only-sub"));
+        let provider = TestSchemaProvider::from_schemas(vec![schema]);
+
+        let context = SuggestionContext {
+            preceding_tokens: vec![AnalyzedToken::new(
+                "mytool",
+                crate::chrome::command_edit::TokenType::Command,
+                0,
+            )],
+            position: PositionType::Subcommand,
+            ..Default::default()
+        };
+
+        // With SchemaEnabled, schema suggestions should appear
+        let enabled = suggest(&conn, &provider, SchemaMode::SchemaEnabled, &context, 10);
+        assert!(
+            enabled.iter().any(|s| s.text == "schema-only-sub"),
+            "SchemaEnabled should include schema suggestions, got: {:?}",
+            enabled.iter().map(|s| &s.text).collect::<Vec<_>>()
+        );
+
+        // With HistoryOnly, schema suggestions should be suppressed
+        let history_only = suggest(&conn, &provider, SchemaMode::HistoryOnly, &context, 10);
+        assert!(
+            !history_only.iter().any(|s| s.text == "schema-only-sub"),
+            "HistoryOnly should suppress schema suggestions, got: {:?}",
+            history_only.iter().map(|s| &s.text).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn test_template_source_suggests_next_token_in_main_pipeline() {
         let conn = setup_test_db();
-        let schema_index = empty_schema_index();
+        let provider = empty_provider();
         let now = chrono::Utc::now().timestamp();
         let template = "git checkout <BRANCH>";
         let template_hash = compute_command_hash(template);
@@ -1168,7 +1218,7 @@ mod tests {
             ..Default::default()
         };
 
-        let suggestions = suggest(&conn, &schema_index, &context, 10);
+        let suggestions = suggest(&conn, &provider, SchemaMode::SchemaEnabled, &context, 10);
         let template_suggestion = suggestions
             .iter()
             .find(|s| s.text == "checkout" && s.source == SuggestionSource::Template);
