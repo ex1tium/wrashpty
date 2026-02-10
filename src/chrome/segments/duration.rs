@@ -73,7 +73,7 @@ impl TopbarSegment for DurationSegment {
 }
 
 /// Formats a duration into a human-readable string.
-fn format_duration(dur: Duration) -> String {
+pub(crate) fn format_duration(dur: Duration) -> String {
     // Round total seconds first to avoid "1m60s" from floating point edge cases
     let total_secs = dur.as_secs_f64().round() as u64;
     if total_secs >= 60 {

@@ -1,11 +1,14 @@
 //! Stateless scrollback rendering utilities for display output.
 //! Scroll offset ownership stays in `App`; this module only renders views.
 
+use std::collections::HashSet;
 use std::io::{self, Write};
 
+use super::boundaries::CommandRecord;
 use super::buffer::ScrollbackBuffer;
 use super::features::{FilterState, SearchState};
-use crate::chrome::theme::Theme;
+use super::separator::SeparatorRegistry;
+use crate::chrome::{symbols::Symbols, theme::Theme};
 
 /// Truncates raw byte content (potentially containing ANSI escape sequences)
 /// to fit within `max_display_cols` terminal columns.
@@ -122,20 +125,60 @@ fn write_truncated_content<W: Write>(
     Ok(())
 }
 
-/// Rendering options for scrollback viewer.
-#[derive(Debug, Clone, Default)]
-pub struct RenderOptions {
-    /// Starting row for content (1-indexed). Default: 1.
-    /// Set to 2 to preserve row 1 for topbar.
+/// Rendering configuration for the unified scrollback render pipeline.
+///
+/// Replaces the old `RenderOptions` and the per-method parameter explosion.
+/// All optional features (search, filter, boundary markers) are configured here.
+pub struct RenderConfig<'a> {
+    /// Starting terminal row (1-indexed). Set to 2 when chrome reserves row 1.
     pub start_row: u16,
-    /// Whether to show line numbers in left gutter.
+    /// Show line numbers in left gutter.
     pub show_line_numbers: bool,
-    /// Whether to show relative timestamps in left gutter.
+    /// Show relative timestamps in left gutter.
     pub show_timestamps: bool,
-    /// Show "END" marker when at the bottom of the buffer.
-    pub show_end_marker: bool,
-    /// Show "BEGIN" marker when at the top of the buffer.
-    pub show_begin_marker: bool,
+    /// Show BEGIN/END boundary markers at scroll extremes.
+    pub boundary_markers: bool,
+    /// Sorted prompt line indices for command separator rendering.
+    pub boundary_lines: &'a [usize],
+    /// Rich command metadata keyed by prompt boundaries.
+    pub records: &'a [CommandRecord],
+    /// Search state for match highlighting. `None` = no highlighting.
+    pub search: Option<&'a SearchState>,
+    /// Filter state for showing only matching lines. `None` = show all.
+    pub filter: Option<&'a FilterState>,
+    /// Scroll offset within filtered view (only used when `filter` is `Some`).
+    pub filter_offset: usize,
+    /// Separator segment registry for rich command metadata display.
+    pub separator_registry: Option<&'a SeparatorRegistry>,
+    /// UI symbols for status/failure indicators in separator segments.
+    pub symbols: Option<&'a Symbols>,
+    /// Optional external collapsed command set (reserved for future use).
+    pub collapsed_commands: Option<&'a HashSet<usize>>,
+    /// Whether sticky command headers are enabled in normal mode.
+    pub sticky_header: bool,
+    /// Theme for styled rendering. `None` = dim ANSI fallback.
+    pub theme: Option<&'a Theme>,
+}
+
+impl Default for RenderConfig<'_> {
+    fn default() -> Self {
+        Self {
+            start_row: 1,
+            show_line_numbers: false,
+            show_timestamps: false,
+            boundary_markers: false,
+            boundary_lines: &[],
+            records: &[],
+            search: None,
+            filter: None,
+            filter_offset: 0,
+            separator_registry: None,
+            symbols: None,
+            collapsed_commands: None,
+            sticky_header: false,
+            theme: None,
+        }
+    }
 }
 
 /// Statistics from a render operation.
@@ -149,187 +192,415 @@ pub struct RenderStats {
 
 /// Stateless scrollback viewer.
 ///
-/// Provides rendering functions for scrollback content. All state (scroll offset,
-/// buffer) is owned externally - this struct just handles rendering logic.
+/// Provides a single unified rendering function for scrollback content.
+/// All state (scroll offset, buffer) is owned externally.
 pub struct ScrollViewer;
 
 impl ScrollViewer {
     /// Renders scrollback content to the terminal.
     ///
-    /// This renders the visible portion of the scrollback buffer based on
-    /// the current offset and viewport dimensions. Use `RenderOptions` to
-    /// configure starting row and line numbers.
+    /// This is the single entry point for all scrollback rendering: normal view,
+    /// search highlighting, filter mode, boundary markers, and command separators
+    /// are all controlled via `RenderConfig` fields.
     ///
     /// # Arguments
     ///
     /// * `out` - Writer to render to (usually stdout)
     /// * `buffer` - The scrollback buffer to read from
-    /// * `offset` - Lines from bottom (0 = most recent visible at bottom)
+    /// * `offset` - Lines from bottom (0 = most recent visible at bottom).
+    ///   Ignored when `config.filter` is `Some` (uses `config.filter_offset`).
     /// * `cols` - Terminal width in columns
-    /// * `rows` - Number of rows to render (viewport height)
-    /// * `options` - Rendering options (start_row, line_numbers)
-    ///
-    /// # Returns
-    ///
-    /// RenderStats containing number of lines rendered and first visible line.
+    /// * `rows` - Number of rows available for content (viewport height)
+    /// * `config` - Rendering configuration
     pub fn render<W: Write>(
         out: &mut W,
         buffer: &ScrollbackBuffer,
         offset: usize,
         cols: u16,
         rows: u16,
-        options: &RenderOptions,
-        theme: Option<&Theme>,
+        config: &RenderConfig,
     ) -> io::Result<RenderStats> {
-        let rows = rows as usize;
-        let start_row = options.start_row.max(1) as usize;
+        // Hide cursor during render; restore on all exit paths (including errors)
+        crossterm::queue!(out, crossterm::cursor::Hide)?;
+        let result = Self::render_viewport(out, buffer, offset, cols, rows, config);
+        // Always restore cursor visibility, even if rendering failed
+        let _ = crossterm::queue!(out, crossterm::cursor::Show);
+        let _ = out.flush();
+        result
+    }
+
+    /// Inner rendering implementation called by `render`.
+    ///
+    /// Cursor hide/show is managed by the caller to guarantee restore on error.
+    fn render_viewport<W: Write>(
+        out: &mut W,
+        buffer: &ScrollbackBuffer,
+        offset: usize,
+        cols: u16,
+        rows: u16,
+        config: &RenderConfig,
+    ) -> io::Result<RenderStats> {
+        use crossterm::cursor::MoveTo;
+        use crossterm::terminal::{Clear, ClearType};
+
         let total = buffer.len();
+        let start_row = config.start_row.max(1) as usize;
+        let content_rows = rows as usize;
+        let is_filter_mode = config.filter.is_some();
 
-        // Calculate boundary conditions
-        let max_offset = Self::max_offset(total, rows);
-        let is_at_bottom = offset == 0;
-        let is_at_top = offset >= max_offset && total > 0;
-
-        // Determine if we need to show markers
-        let show_end = options.show_end_marker && is_at_bottom && total > 0;
-        let show_begin = options.show_begin_marker && is_at_top && total > 0;
-
-        // Calculate how many content rows available
-        // Markers only "cost" a row when buffer would otherwise fill the viewport
-        let buffer_fills_viewport = total >= rows;
-        let end_cost = if show_end && buffer_fills_viewport {
-            1
-        } else {
-            0
-        };
-        let begin_cost = if show_begin && buffer_fills_viewport {
-            1
-        } else {
-            0
-        };
-        let content_rows = rows.saturating_sub(end_cost).saturating_sub(begin_cost);
-
-        // Get lines to display and calculate first visible line number
-        // When at top (BEGIN showing), fetch from line 1 using get_range
-        // Otherwise use offset-based get_from_bottom
-        let (first_visible_line, lines): (usize, Vec<_>) = if show_begin {
-            (1, buffer.get_range(0, content_rows).collect())
-        } else {
-            let first = total
-                .saturating_sub(offset)
-                .saturating_sub(content_rows)
-                .saturating_add(1)
-                .max(1);
-            (
-                first,
-                buffer.get_from_bottom(offset, content_rows).collect(),
-            )
-        };
-
-        // Hide cursor during render
-        write!(out, "\x1b[?25l")?;
-
-        // Calculate gutter width for line numbers
-        // Format: "  42 │ " = num_width + 3 (space + │ + space)
-        let line_num_width = if options.show_line_numbers {
-            let max_line = total;
-            let num_width = if max_line == 0 {
-                1
-            } else {
-                (max_line as f64).log10().floor() as usize + 1
-            };
-            num_width.max(4) + 3 // +3 for " │ " (space + separator + space)
-        } else {
-            0
-        };
-
-        // Calculate timestamp gutter width
-        // Format: " 5m │ " = 6 chars minimum (time + unit + space + │ + space)
-        let timestamp_width = if options.show_timestamps { 7 } else { 0 };
-
-        let gutter_width = line_num_width + timestamp_width;
+        // Calculate gutter widths (once)
+        let (line_num_width, _timestamp_width, gutter_width) =
+            Self::gutter_widths(config.show_line_numbers, config.show_timestamps, total);
         let content_cols = (cols as usize).saturating_sub(gutter_width);
 
-        // Get current time for relative timestamp calculation
         let now = std::time::Instant::now();
 
         let mut current_row = start_row;
+        let max_row = start_row + content_rows;
         let mut rendered = 0;
 
-        // Render BEGIN marker if at top
-        if show_begin {
-            write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
-            Self::render_boundary_marker_styled(out, cols as usize, gutter_width, "BEGIN", theme)?;
-            current_row += 1;
-        }
+        if is_filter_mode {
+            // ─── Filter mode: show only matching lines ───────────────
+            let filter = config.filter.unwrap();
+            let lines = filter.get_filtered_range(buffer, config.filter_offset, content_rows);
+            let first_visible_line = lines.first().map(|(idx, _)| *idx + 1).unwrap_or(1);
 
-        for (i, line) in lines.iter().enumerate() {
-            let screen_row = current_row;
-            let line_number = first_visible_line + i;
+            // Get search state for optional highlighting within filter
+            let current_match = config.search.and_then(|s| s.current().copied());
 
-            // Move to line position
-            write!(out, "\x1b[{};1H", screen_row)?;
+            for (original_idx, line) in &lines {
+                let line_number = *original_idx + 1;
 
-            // Clear line
-            write!(out, "\x1b[2K")?;
+                crossterm::queue!(out, MoveTo(0, (current_row - 1) as u16), Clear(ClearType::CurrentLine))?;
 
-            // Render timestamp gutter if enabled
-            // Format: " 5m │ " showing relative time since capture
-            if options.show_timestamps {
-                let elapsed = now.duration_since(line.timestamp());
-                let time_str = Self::format_relative_time(elapsed);
-                write!(out, "\x1b[2m")?; // Dim
-                write!(out, "{:>4} │ ", time_str)?;
-                write!(out, "\x1b[22m")?; // Reset dim
-            }
-
-            // Render line number gutter if enabled
-            // Format: "  42 │ " with spaces around separator for easier copy-paste
-            if options.show_line_numbers {
-                write!(out, "\x1b[2m")?; // Dim
-                write!(
+                Self::render_gutter(
                     out,
-                    "{:>width$} │ ",
                     line_number,
-                    width = line_num_width - 3
+                    line.timestamp(),
+                    now,
+                    config.show_timestamps,
+                    config.show_line_numbers,
+                    line_num_width,
                 )?;
-                write!(out, "\x1b[22m")?; // Reset dim
+
+                // Content: with search highlights if available, otherwise plain
+                if let Some(search) = config.search {
+                    if let Some(theme) = config.theme {
+                        let line_matches: Vec<_> =
+                            search.matches_on_line(*original_idx).collect();
+                        if !line_matches.is_empty() {
+                            Self::render_line_with_highlights(
+                                out,
+                                line.content(),
+                                content_cols,
+                                *original_idx,
+                                &line_matches,
+                                current_match,
+                                theme,
+                            )?;
+                        } else {
+                            write_truncated_content(out, line.content(), content_cols)?;
+                        }
+                    } else {
+                        write_truncated_content(out, line.content(), content_cols)?;
+                    }
+                } else {
+                    write_truncated_content(out, line.content(), content_cols)?;
+                }
+
+                if line.is_truncated() {
+                    crossterm::queue!(
+                        out,
+                        crossterm::style::SetAttribute(crossterm::style::Attribute::Reverse)
+                    )?;
+                    write!(out, ">")?;
+                    crossterm::queue!(
+                        out,
+                        crossterm::style::SetAttribute(crossterm::style::Attribute::NoReverse)
+                    )?;
+                }
+
+                current_row += 1;
+                rendered += 1;
             }
 
-            // Write line content
-            let content = line.content();
-            write_truncated_content(out, content, content_cols)?;
-
-            // If line was truncated in storage, show indicator
-            if line.is_truncated() {
-                write!(out, "\x1b[7m>\x1b[27m")?; // Reverse video '>'
+            // Clear remaining rows
+            while current_row < max_row {
+                crossterm::queue!(out, MoveTo(0, (current_row - 1) as u16), Clear(ClearType::CurrentLine))?;
+                current_row += 1;
             }
 
-            current_row += 1;
-            rendered += 1;
+            Ok(RenderStats {
+                lines_rendered: rendered,
+                first_visible_line,
+            })
+        } else {
+            // ─── Normal mode: full buffer with markers and separators ─
+            let visible_line_indices = Self::collect_visible_line_indices(
+                total,
+                config.records,
+                config.collapsed_commands,
+            );
+            let visible_total = visible_line_indices.len();
+            let max_offset = Self::max_offset(visible_total, content_rows);
+            let is_at_bottom = offset == 0;
+            let is_at_top = offset >= max_offset && visible_total > 0;
+
+            let show_end = config.boundary_markers && is_at_bottom && visible_total > 0;
+            let show_begin = config.boundary_markers && is_at_top && visible_total > 0;
+
+            let mut available_rows = content_rows
+                .saturating_sub(show_begin as usize)
+                .saturating_sub(show_end as usize);
+
+            let mut line_positions = Self::visible_line_positions(
+                &visible_line_indices,
+                offset,
+                available_rows,
+                show_begin,
+                config.boundary_lines,
+            );
+            let mut first_visible_idx = line_positions
+                .first()
+                .and_then(|pos| visible_line_indices.get(*pos))
+                .copied()
+                .unwrap_or(0);
+            let mut sticky_record = None;
+
+            if config.sticky_header && available_rows > 0 {
+                if let Some(record) = Self::record_for_line(config.records, first_visible_idx) {
+                    let separator_visible = line_positions.iter().any(|pos| {
+                        visible_line_indices.get(*pos).copied() == Some(record.output_start)
+                    });
+                    if first_visible_idx > record.output_start && !separator_visible {
+                        sticky_record = Some(record);
+                    }
+                }
+            }
+
+            if sticky_record.is_some() && available_rows > 0 {
+                available_rows = available_rows.saturating_sub(1);
+                line_positions = Self::visible_line_positions(
+                    &visible_line_indices,
+                    offset,
+                    available_rows,
+                    show_begin,
+                    config.boundary_lines,
+                );
+                first_visible_idx = line_positions
+                    .first()
+                    .and_then(|pos| visible_line_indices.get(*pos))
+                    .copied()
+                    .unwrap_or(0);
+
+                if let Some(record) = sticky_record {
+                    let separator_visible = line_positions.iter().any(|pos| {
+                        visible_line_indices.get(*pos).copied() == Some(record.output_start)
+                    });
+                    if separator_visible || first_visible_idx <= record.output_start {
+                        sticky_record = None;
+                    }
+                }
+            }
+
+            let first_visible_line = if visible_total == 0 {
+                1
+            } else {
+                first_visible_idx.saturating_add(1)
+            };
+
+            // Get search state for optional highlighting
+            let current_match = config.search.and_then(|s| s.current().copied());
+
+            // BEGIN marker
+            if show_begin {
+                crossterm::queue!(out, MoveTo(0, (current_row - 1) as u16), Clear(ClearType::CurrentLine))?;
+                Self::render_boundary_marker_styled(
+                    out,
+                    cols as usize,
+                    gutter_width,
+                    "BEGIN",
+                    config.theme,
+                )?;
+                current_row += 1;
+            }
+
+            if let Some(record) = sticky_record {
+                if current_row < max_row {
+                    crossterm::queue!(out, MoveTo(0, (current_row - 1) as u16), Clear(ClearType::CurrentLine))?;
+                    Self::render_command_separator(
+                        out,
+                        cols as usize,
+                        gutter_width,
+                        config.theme,
+                        Some(record),
+                        config.separator_registry,
+                        config.symbols,
+                    )?;
+                    current_row += 1;
+                }
+            }
+
+            for line_pos in line_positions {
+                let line_index = visible_line_indices[line_pos];
+                let line_number = line_index + 1;
+
+                if config.boundary_lines.binary_search(&line_index).is_ok() {
+                    if current_row >= max_row {
+                        break;
+                    }
+                    crossterm::queue!(out, MoveTo(0, (current_row - 1) as u16), Clear(ClearType::CurrentLine))?;
+                    Self::render_command_separator(
+                        out,
+                        cols as usize,
+                        gutter_width,
+                        config.theme,
+                        Self::record_for_line(config.records, line_index),
+                        config.separator_registry,
+                        config.symbols,
+                    )?;
+                    current_row += 1;
+                }
+
+                if current_row >= max_row {
+                    break;
+                }
+
+                let Some(line) = buffer.get(line_index) else {
+                    continue;
+                };
+
+                crossterm::queue!(out, MoveTo(0, (current_row - 1) as u16), Clear(ClearType::CurrentLine))?;
+
+                Self::render_gutter(
+                    out,
+                    line_number,
+                    line.timestamp(),
+                    now,
+                    config.show_timestamps,
+                    config.show_line_numbers,
+                    line_num_width,
+                )?;
+
+                // Content: with search highlights if available
+                if let Some(search) = config.search {
+                    if let Some(theme) = config.theme {
+                        let line_matches: Vec<_> =
+                            search.matches_on_line(line_index).collect();
+                        if !line_matches.is_empty() {
+                            Self::render_line_with_highlights(
+                                out,
+                                line.content(),
+                                content_cols,
+                                line_index,
+                                &line_matches,
+                                current_match,
+                                theme,
+                            )?;
+                        } else {
+                            write_truncated_content(out, line.content(), content_cols)?;
+                        }
+                    } else {
+                        write_truncated_content(out, line.content(), content_cols)?;
+                    }
+                } else {
+                    write_truncated_content(out, line.content(), content_cols)?;
+                }
+
+                if line.is_truncated() {
+                    crossterm::queue!(
+                        out,
+                        crossterm::style::SetAttribute(crossterm::style::Attribute::Reverse)
+                    )?;
+                    write!(out, ">")?;
+                    crossterm::queue!(
+                        out,
+                        crossterm::style::SetAttribute(crossterm::style::Attribute::NoReverse)
+                    )?;
+                }
+
+                current_row += 1;
+                rendered += 1;
+            }
+
+            // END marker
+            if show_end && current_row < max_row {
+                crossterm::queue!(out, MoveTo(0, (current_row - 1) as u16), Clear(ClearType::CurrentLine))?;
+                Self::render_boundary_marker_styled(
+                    out,
+                    cols as usize,
+                    gutter_width,
+                    "END",
+                    config.theme,
+                )?;
+                current_row += 1;
+            }
+
+            // Clear remaining rows
+            while current_row < max_row {
+                crossterm::queue!(out, MoveTo(0, (current_row - 1) as u16), Clear(ClearType::CurrentLine))?;
+                current_row += 1;
+            }
+
+            Ok(RenderStats {
+                lines_rendered: rendered,
+                first_visible_line,
+            })
         }
+    }
 
-        // Render END marker if at bottom
-        if show_end {
-            write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
-            Self::render_boundary_marker_styled(out, cols as usize, gutter_width, "END", theme)?;
-            current_row += 1;
+    // ─── Private helpers ─────────────────────────────────────────────────
+
+    /// Calculates gutter widths for line numbers and timestamps.
+    ///
+    /// Returns `(line_num_width, timestamp_width, total_gutter_width)`.
+    fn gutter_widths(
+        show_line_numbers: bool,
+        show_timestamps: bool,
+        total_lines: usize,
+    ) -> (usize, usize, usize) {
+        let line_num_width = if show_line_numbers {
+            let num_width = if total_lines == 0 {
+                1
+            } else {
+                (total_lines as f64).log10().floor() as usize + 1
+            };
+            num_width.max(4) + 3 // +3 for " │ "
+        } else {
+            0
+        };
+        let timestamp_width = if show_timestamps { 7 } else { 0 };
+        (
+            line_num_width,
+            timestamp_width,
+            line_num_width + timestamp_width,
+        )
+    }
+
+    /// Renders the gutter (timestamp + line number) for a single row.
+    fn render_gutter<W: Write>(
+        out: &mut W,
+        line_number: usize,
+        timestamp: std::time::Instant,
+        now: std::time::Instant,
+        show_timestamps: bool,
+        show_line_numbers: bool,
+        line_num_width: usize,
+    ) -> io::Result<()> {
+        if show_timestamps {
+            let elapsed = now.duration_since(timestamp);
+            let time_str = Self::format_relative_time(elapsed);
+            write!(out, "\x1b[2m{:>4} │ \x1b[22m", time_str)?;
         }
-
-        // Clear any remaining rows
-        while current_row < start_row + rows {
-            write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
-            current_row += 1;
+        if show_line_numbers {
+            write!(
+                out,
+                "\x1b[2m{:>width$} │ \x1b[22m",
+                line_number,
+                width = line_num_width - 3
+            )?;
         }
-
-        // Show cursor
-        write!(out, "\x1b[?25h")?;
-
-        out.flush()?;
-        Ok(RenderStats {
-            lines_rendered: rendered,
-            first_visible_line,
-        })
+        Ok(())
     }
 
     /// Formats a duration as a relative time string.
@@ -348,24 +619,6 @@ impl ScrollViewer {
         }
     }
 
-    /// Renders a centered boundary marker (BEGIN/END).
-    ///
-    /// # Arguments
-    ///
-    /// * `out` - Writer to render to
-    /// * `cols` - Terminal width
-    /// * `gutter_width` - Width of line number/timestamp gutter
-    /// * `label` - Marker text ("BEGIN" or "END")
-    /// * `theme` - Optional theme for colored markers (uses dim if None)
-    fn render_boundary_marker<W: Write>(
-        out: &mut W,
-        cols: usize,
-        gutter_width: usize,
-        label: &str,
-    ) -> io::Result<()> {
-        Self::render_boundary_marker_styled(out, cols, gutter_width, label, None)
-    }
-
     /// Renders a centered boundary marker with optional theme styling.
     fn render_boundary_marker_styled<W: Write>(
         out: &mut W,
@@ -378,27 +631,23 @@ impl ScrollViewer {
 
         let content_cols = cols.saturating_sub(gutter_width);
 
-        // Build marker: "─────── LABEL ───────"
         let label_with_spaces = format!(" {} ", label);
         let label_width = crate::ui::text_width::display_width(&label_with_spaces);
         let dashes_total = content_cols.saturating_sub(label_width);
         let dashes_left = dashes_total / 2;
         let dashes_right = dashes_total - dashes_left;
 
-        // Render gutter spacer if needed
         if gutter_width > 0 {
             write!(out, "{:width$}", "", width = gutter_width)?;
         }
 
-        // Apply color - either themed or dim
         if let Some(theme) = theme {
             let fg = color_to_fg_ansi(theme.marker_fg);
             write!(out, "{}", fg)?;
         } else {
-            write!(out, "\x1b[2m")?; // Dim fallback
+            write!(out, "\x1b[2m")?;
         }
 
-        // Render the marker line
         for _ in 0..dashes_left {
             write!(out, "─")?;
         }
@@ -407,47 +656,6 @@ impl ScrollViewer {
             write!(out, "─")?;
         }
 
-        // Reset styling
-        if theme.is_some() {
-            write!(out, "\x1b[39m")?; // Reset fg
-        } else {
-            write!(out, "\x1b[22m")?; // Reset dim
-        }
-
-        Ok(())
-    }
-
-    /// Renders a command boundary separator line.
-    ///
-    /// Draws a thin horizontal rule: `────────────────────`
-    fn render_command_separator<W: Write>(
-        out: &mut W,
-        cols: usize,
-        gutter_width: usize,
-        theme: Option<&Theme>,
-    ) -> io::Result<()> {
-        use crate::chrome::segments::color_to_fg_ansi;
-
-        let content_cols = cols.saturating_sub(gutter_width);
-
-        // Render gutter spacer if needed
-        if gutter_width > 0 {
-            write!(out, "{:width$}", "", width = gutter_width)?;
-        }
-
-        // Apply color
-        if let Some(theme) = theme {
-            let fg = color_to_fg_ansi(theme.marker_fg);
-            write!(out, "{}", fg)?;
-        } else {
-            write!(out, "\x1b[2m")?;
-        }
-
-        for _ in 0..content_cols {
-            write!(out, "─")?;
-        }
-
-        // Reset styling
         if theme.is_some() {
             write!(out, "\x1b[39m")?;
         } else {
@@ -457,478 +665,154 @@ impl ScrollViewer {
         Ok(())
     }
 
-    fn count_command_separators_in_range(
-        boundary_lines: &[usize],
-        start_idx: usize,
-        line_count: usize,
-    ) -> usize {
-        if boundary_lines.is_empty() || line_count == 0 {
-            return 0;
+    /// Renders a command boundary separator line.
+    fn render_command_separator<W: Write>(
+        out: &mut W,
+        cols: usize,
+        gutter_width: usize,
+        theme: Option<&Theme>,
+        record: Option<&CommandRecord>,
+        separator_registry: Option<&SeparatorRegistry>,
+        symbols: Option<&Symbols>,
+    ) -> io::Result<()> {
+        if let (Some(theme), Some(registry), Some(symbols)) = (theme, separator_registry, symbols) {
+            let separator = registry.render(record, cols, gutter_width, theme, symbols);
+            write!(out, "{}", separator)?;
+            return Ok(());
         }
 
-        let end_idx = start_idx.saturating_add(line_count);
-        let start_pos = boundary_lines.partition_point(|&idx| idx < start_idx);
-        let end_pos = boundary_lines.partition_point(|&idx| idx < end_idx);
+        use crate::chrome::segments::color_to_fg_ansi;
 
-        boundary_lines[start_pos..end_pos]
-            .iter()
-            .filter(|&&idx| idx > 0)
-            .count()
+        let content_cols = cols.saturating_sub(gutter_width);
+
+        if gutter_width > 0 {
+            write!(out, "{:width$}", "", width = gutter_width)?;
+        }
+
+        if let Some(theme) = theme {
+            let fg = color_to_fg_ansi(theme.marker_fg);
+            write!(out, "{}", fg)?;
+        } else {
+            write!(out, "\x1b[2m")?;
+        }
+
+        for _ in 0..content_cols {
+            write!(out, "╌")?;
+        }
+
+        if theme.is_some() {
+            write!(out, "\x1b[39m")?;
+        } else {
+            write!(out, "\x1b[22m")?;
+        }
+
+        Ok(())
     }
 
-    fn adjusted_visible_line_count_for_separators(
+    fn record_for_line(records: &[CommandRecord], line_idx: usize) -> Option<&CommandRecord> {
+        Self::record_for_line_with_index(records, line_idx).map(|(_, record)| record)
+    }
+
+    fn record_for_line_with_index(
+        records: &[CommandRecord],
+        line_idx: usize,
+    ) -> Option<(usize, &CommandRecord)> {
+        let pos = records.partition_point(|record| record.output_start <= line_idx);
+        if pos == 0 {
+            return None;
+        }
+        let idx = pos - 1;
+        let record = records.get(idx)?;
+        let end = record.prompt_line.unwrap_or(usize::MAX);
+        if line_idx < end {
+            Some((idx, record))
+        } else {
+            None
+        }
+    }
+
+    fn is_line_folded(
+        line_idx: usize,
+        records: &[CommandRecord],
+        collapsed_commands: Option<&HashSet<usize>>,
+    ) -> bool {
+        let Some((record_idx, record)) = Self::record_for_line_with_index(records, line_idx) else {
+            return false;
+        };
+        let externally_folded = collapsed_commands
+            .map(|set| set.contains(&record_idx))
+            .unwrap_or(false);
+        if !(record.folded || externally_folded) {
+            return false;
+        }
+
+        let prompt_line = record.prompt_line.unwrap_or(usize::MAX);
+        line_idx > record.output_start && line_idx < prompt_line
+    }
+
+    fn collect_visible_line_indices(
         total: usize,
+        records: &[CommandRecord],
+        collapsed_commands: Option<&HashSet<usize>>,
+    ) -> Vec<usize> {
+        let mut indices = Vec::with_capacity(total);
+        for line_idx in 0..total {
+            if !Self::is_line_folded(line_idx, records, collapsed_commands) {
+                indices.push(line_idx);
+            }
+        }
+        indices
+    }
+
+    fn visible_line_positions(
+        visible_indices: &[usize],
         offset: usize,
         requested_rows: usize,
         show_begin: bool,
         boundary_lines: &[usize],
-    ) -> usize {
-        if requested_rows == 0 || total == 0 {
-            return 0;
+    ) -> Vec<usize> {
+        if visible_indices.is_empty() || requested_rows == 0 {
+            return Vec::new();
         }
 
-        let visible_limit = if show_begin {
-            total
-        } else {
-            total.saturating_sub(offset)
-        };
-        let mut line_count = requested_rows.min(visible_limit);
+        if show_begin {
+            let mut rows = 0usize;
+            let mut positions = Vec::new();
+            for (pos, line_idx) in visible_indices.iter().enumerate() {
+                let separator_rows =
+                    usize::from(*line_idx > 0 && boundary_lines.binary_search(line_idx).is_ok());
+                let needed = 1 + separator_rows;
+                if rows + needed > requested_rows {
+                    break;
+                }
+                rows += needed;
+                positions.push(pos);
+            }
+            return positions;
+        }
 
-        for _ in 0..=requested_rows {
-            let first_visible_line = if show_begin {
-                1
-            } else {
-                total
-                    .saturating_sub(offset)
-                    .saturating_sub(line_count)
-                    .saturating_add(1)
-                    .max(1)
-            };
-            let start_idx = first_visible_line.saturating_sub(1);
+        let end_pos = visible_indices
+            .len()
+            .saturating_sub(offset.min(visible_indices.len()));
+        if end_pos == 0 {
+            return Vec::new();
+        }
+
+        let mut start_pos = end_pos;
+        let mut rows = 0usize;
+        while start_pos > 0 {
+            let line_idx = visible_indices[start_pos - 1];
             let separator_rows =
-                Self::count_command_separators_in_range(boundary_lines, start_idx, line_count);
-            let next_line_count = requested_rows
-                .saturating_sub(separator_rows)
-                .min(visible_limit);
-
-            if next_line_count == line_count {
+                usize::from(line_idx > 0 && boundary_lines.binary_search(&line_idx).is_ok());
+            let needed = 1 + separator_rows;
+            if rows + needed > requested_rows {
                 break;
             }
-            line_count = next_line_count;
+            rows += needed;
+            start_pos -= 1;
         }
 
-        line_count
-    }
-
-    /// Renders scrollback content preserving the topbar (starts at row 2).
-    ///
-    /// This is a convenience method for the common case of rendering scrollback
-    /// while keeping the chrome context bar visible on row 1.
-    ///
-    /// # Arguments
-    ///
-    /// * `out` - Writer to render to
-    /// * `buffer` - The scrollback buffer
-    /// * `offset` - Scroll offset (lines from bottom)
-    /// * `cols` - Terminal width
-    /// * `rows` - Total terminal rows (content will use rows 2..rows)
-    /// * `show_line_numbers` - Whether to show line number gutter
-    /// * `show_timestamps` - Whether to show relative timestamp gutter
-    /// * `show_boundary_markers` - Whether to show BEGIN/END markers at buffer boundaries
-    /// * `theme` - Optional theme for styled boundary markers
-    /// * `boundary_lines` - Sorted prompt line indices for command separators
-    #[allow(clippy::too_many_arguments)]
-    pub fn render_with_chrome<W: Write>(
-        out: &mut W,
-        buffer: &ScrollbackBuffer,
-        offset: usize,
-        cols: u16,
-        rows: u16,
-        show_line_numbers: bool,
-        show_timestamps: bool,
-        show_boundary_markers: bool,
-        theme: Option<&Theme>,
-        boundary_lines: &[usize],
-    ) -> io::Result<RenderStats> {
-        let content_rows = rows.saturating_sub(1) as usize; // Reserve row 1 for topbar
-        let total = buffer.len();
-
-        // Calculate boundary conditions
-        let max_offset = Self::max_offset(total, content_rows);
-        let is_at_bottom = offset == 0;
-        let is_at_top = offset >= max_offset && total > 0;
-
-        // Determine if we need to show markers
-        let show_end = show_boundary_markers && is_at_bottom && total > 0;
-        let show_begin = show_boundary_markers && is_at_top && total > 0;
-
-        // Calculate marker row costs
-        let buffer_fills_viewport = total >= content_rows;
-        let end_cost = if show_end && buffer_fills_viewport {
-            1
-        } else {
-            0
-        };
-        let begin_cost = if show_begin && buffer_fills_viewport {
-            1
-        } else {
-            0
-        };
-        let available_rows = content_rows
-            .saturating_sub(end_cost)
-            .saturating_sub(begin_cost);
-        let available_rows = Self::adjusted_visible_line_count_for_separators(
-            total,
-            offset,
-            available_rows,
-            show_begin,
-            boundary_lines,
-        );
-
-        // Get lines to display
-        let (first_visible_line, lines): (usize, Vec<_>) = if show_begin {
-            (1, buffer.get_range(0, available_rows).collect())
-        } else {
-            let first = total
-                .saturating_sub(offset)
-                .saturating_sub(available_rows)
-                .saturating_add(1)
-                .max(1);
-            (
-                first,
-                buffer.get_from_bottom(offset, available_rows).collect(),
-            )
-        };
-
-        // Calculate gutter widths
-        let line_num_width = if show_line_numbers {
-            let max_line = total;
-            let num_width = if max_line == 0 {
-                1
-            } else {
-                (max_line as f64).log10().floor() as usize + 1
-            };
-            num_width.max(4) + 3
-        } else {
-            0
-        };
-        let timestamp_width = if show_timestamps { 7 } else { 0 };
-        let gutter_width = line_num_width + timestamp_width;
-        let content_cols = (cols as usize).saturating_sub(gutter_width);
-
-        let now = std::time::Instant::now();
-
-        // Hide cursor during render
-        write!(out, "\x1b[?25l")?;
-
-        let mut current_row = 2usize; // Start at row 2 (after topbar)
-        let max_row = 2 + content_rows;
-        let mut rendered = 0;
-
-        // Render BEGIN marker if at top
-        if show_begin {
-            write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
-            Self::render_boundary_marker_styled(out, cols as usize, gutter_width, "BEGIN", theme)?;
-            current_row += 1;
-        }
-
-        for (i, line) in lines.iter().enumerate() {
-            let line_index = first_visible_line + i - 1; // 0-indexed buffer position
-            let line_number = first_visible_line + i;
-
-            // Render command separator if this line is a prompt boundary
-            if !boundary_lines.is_empty()
-                && boundary_lines.binary_search(&line_index).is_ok()
-                && line_index > 0
-            {
-                if current_row >= max_row {
-                    break;
-                }
-                write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
-                Self::render_command_separator(out, cols as usize, gutter_width, theme)?;
-                current_row += 1;
-            }
-
-            if current_row >= max_row {
-                break;
-            }
-
-            // Move to line position and clear
-            write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
-
-            // Render timestamp gutter
-            if show_timestamps {
-                let elapsed = now.duration_since(line.timestamp());
-                let time_str = Self::format_relative_time(elapsed);
-                write!(out, "\x1b[2m{:>4} │ \x1b[22m", time_str)?;
-            }
-
-            // Render line number gutter
-            if show_line_numbers {
-                write!(
-                    out,
-                    "\x1b[2m{:>width$} │ \x1b[22m",
-                    line_number,
-                    width = line_num_width - 3
-                )?;
-            }
-
-            // Write line content
-            write_truncated_content(out, line.content(), content_cols)?;
-
-            if line.is_truncated() {
-                write!(out, "\x1b[7m>\x1b[27m")?;
-            }
-
-            current_row += 1;
-            rendered += 1;
-        }
-
-        // Render END marker if at bottom
-        if show_end && current_row < max_row {
-            write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
-            Self::render_boundary_marker_styled(out, cols as usize, gutter_width, "END", theme)?;
-            current_row += 1;
-        }
-
-        // Clear remaining rows
-        while current_row < max_row {
-            write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
-            current_row += 1;
-        }
-
-        // Show cursor
-        write!(out, "\x1b[?25h")?;
-        out.flush()?;
-
-        Ok(RenderStats {
-            lines_rendered: rendered,
-            first_visible_line,
-        })
-    }
-
-    /// Renders scrollback content with search highlighting.
-    ///
-    /// This extends `render_with_chrome` by adding visual highlights for
-    /// search matches. The current match is highlighted more prominently
-    /// than other matches.
-    ///
-    /// # Arguments
-    ///
-    /// * `out` - Writer to render to
-    /// * `buffer` - The scrollback buffer
-    /// * `offset` - Scroll offset (lines from bottom)
-    /// * `cols` - Terminal width
-    /// * `rows` - Total terminal rows
-    /// * `show_line_numbers` - Whether to show line number gutter
-    /// * `show_timestamps` - Whether to show relative timestamp gutter
-    /// * `show_boundary_markers` - Whether to show BEGIN/END markers
-    /// * `search` - Search state with matches to highlight
-    /// * `theme` - Theme for highlight colors
-    /// * `boundary_lines` - Sorted prompt line indices for command separators
-    #[allow(clippy::too_many_arguments)]
-    pub fn render_with_search<W: Write>(
-        out: &mut W,
-        buffer: &ScrollbackBuffer,
-        offset: usize,
-        cols: u16,
-        rows: u16,
-        show_line_numbers: bool,
-        show_timestamps: bool,
-        show_boundary_markers: bool,
-        search: &SearchState,
-        theme: &Theme,
-        boundary_lines: &[usize],
-    ) -> io::Result<RenderStats> {
-        let content_rows = rows.saturating_sub(1) as usize; // Reserve row 1 for topbar
-        let total = buffer.len();
-
-        // Calculate boundary conditions
-        let max_offset = Self::max_offset(total, content_rows);
-        let is_at_bottom = offset == 0;
-        let is_at_top = offset >= max_offset && total > 0;
-
-        // Determine if we need to show markers
-        let show_end = show_boundary_markers && is_at_bottom && total > 0;
-        let show_begin = show_boundary_markers && is_at_top && total > 0;
-
-        // Calculate marker row costs
-        let buffer_fills_viewport = total >= content_rows;
-        let end_cost = if show_end && buffer_fills_viewport {
-            1
-        } else {
-            0
-        };
-        let begin_cost = if show_begin && buffer_fills_viewport {
-            1
-        } else {
-            0
-        };
-        let available_rows = content_rows
-            .saturating_sub(end_cost)
-            .saturating_sub(begin_cost);
-        let available_rows = Self::adjusted_visible_line_count_for_separators(
-            total,
-            offset,
-            available_rows,
-            show_begin,
-            boundary_lines,
-        );
-
-        // Get lines to display and calculate first visible line number
-        let (first_visible_line, lines): (usize, Vec<_>) = if show_begin {
-            (1, buffer.get_range(0, available_rows).collect())
-        } else {
-            let first = total
-                .saturating_sub(offset)
-                .saturating_sub(available_rows)
-                .saturating_add(1)
-                .max(1);
-            (
-                first,
-                buffer.get_from_bottom(offset, available_rows).collect(),
-            )
-        };
-
-        // Calculate gutter widths
-        let line_num_width = if show_line_numbers {
-            let max_line = total;
-            let num_width = if max_line == 0 {
-                1
-            } else {
-                (max_line as f64).log10().floor() as usize + 1
-            };
-            num_width.max(4) + 3
-        } else {
-            0
-        };
-        let timestamp_width = if show_timestamps { 7 } else { 0 };
-        let gutter_width = line_num_width + timestamp_width;
-        let content_cols = (cols as usize).saturating_sub(gutter_width);
-
-        // Get current time for relative timestamp calculation
-        let now = std::time::Instant::now();
-
-        // Hide cursor during render
-        write!(out, "\x1b[?25l")?;
-
-        let mut current_row = 2usize; // Start at row 2 (after topbar)
-        let max_row = 2 + content_rows;
-        let mut rendered = 0;
-
-        // Render BEGIN marker if at top (with theme styling)
-        if show_begin {
-            write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
-            Self::render_boundary_marker_styled(
-                out,
-                cols as usize,
-                gutter_width,
-                "BEGIN",
-                Some(theme),
-            )?;
-            current_row += 1;
-        }
-
-        // Get exact current match for special highlighting
-        let current_match = search.current().copied();
-
-        for (i, line) in lines.iter().enumerate() {
-            let line_index = first_visible_line + i - 1; // Convert to 0-indexed
-            let line_number = first_visible_line + i;
-
-            // Render command separator if this line is a prompt boundary
-            if !boundary_lines.is_empty()
-                && boundary_lines.binary_search(&line_index).is_ok()
-                && line_index > 0
-            {
-                if current_row >= max_row {
-                    break;
-                }
-                write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
-                Self::render_command_separator(out, cols as usize, gutter_width, Some(theme))?;
-                current_row += 1;
-            }
-
-            if current_row >= max_row {
-                break;
-            }
-
-            // Move to line position
-            write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
-
-            // Render timestamp gutter if enabled
-            if show_timestamps {
-                let elapsed = now.duration_since(line.timestamp());
-                let time_str = Self::format_relative_time(elapsed);
-                write!(out, "\x1b[2m{:>4} │ \x1b[22m", time_str)?;
-            }
-
-            // Render line number gutter if enabled
-            if show_line_numbers {
-                write!(
-                    out,
-                    "\x1b[2m{:>width$} │ \x1b[22m",
-                    line_number,
-                    width = line_num_width - 3
-                )?;
-            }
-
-            // Get matches for this line
-            let line_matches: Vec<_> = search.matches_on_line(line_index).collect();
-
-            if line_matches.is_empty() {
-                // No matches - render line normally
-                let content = line.content();
-                write_truncated_content(out, content, content_cols)?;
-            } else {
-                // Render line with search highlights
-                Self::render_line_with_highlights(
-                    out,
-                    line.content(),
-                    content_cols,
-                    line_index,
-                    &line_matches,
-                    current_match,
-                    theme,
-                )?;
-            }
-
-            // If line was truncated in storage, show indicator
-            if line.is_truncated() {
-                write!(out, "\x1b[7m>\x1b[27m")?;
-            }
-
-            current_row += 1;
-            rendered += 1;
-        }
-
-        // Render END marker if at bottom (with theme styling)
-        if show_end && current_row < max_row {
-            write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
-            Self::render_boundary_marker_styled(
-                out,
-                cols as usize,
-                gutter_width,
-                "END",
-                Some(theme),
-            )?;
-            current_row += 1;
-        }
-
-        // Clear remaining rows
-        while current_row < max_row {
-            write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
-            current_row += 1;
-        }
-
-        // Show cursor
-        write!(out, "\x1b[?25h")?;
-        out.flush()?;
-
-        Ok(RenderStats {
-            lines_rendered: rendered,
-            first_visible_line,
-        })
+        (start_pos..end_pos).collect()
     }
 
     /// Renders a line with search match highlighting.
@@ -952,24 +836,19 @@ impl ScrollViewer {
         let content_str = String::from_utf8_lossy(truncated);
         let mut pos = 0;
 
-        // Sort matches by start position
         let mut sorted_matches = matches.to_vec();
         sorted_matches.sort_by_key(|m| m.start);
 
         for search_match in sorted_matches {
-            // Clamp indices to valid range
             let match_start = search_match.start.min(truncated.len());
             let match_end = search_match.end.min(truncated.len());
 
-            // Write text before match (using safe .get() to handle edge cases)
             if match_start > pos {
                 if let Some(before) = content_str.get(pos..match_start) {
                     write!(out, "{}", before)?;
                 }
             }
 
-            // Determine highlight color based on whether this exact match
-            // (line + range) is the current match.
             let is_current_match = current_match
                 .map(|m| {
                     m.line == line_index
@@ -984,15 +863,13 @@ impl ScrollViewer {
             };
             let bg_ansi = color_to_bg_ansi(bg_color);
 
-            // Write highlighted match (using safe .get() to handle edge cases)
             if let Some(match_text) = content_str.get(match_start..match_end) {
-                write!(out, "{}{}\x1b[49m", bg_ansi, match_text)?; // 49 resets bg
+                write!(out, "{}{}\x1b[49m", bg_ansi, match_text)?;
             }
 
             pos = match_end;
         }
 
-        // Write remaining text after last match
         if let Some(remaining) = content_str.get(pos..) {
             write!(out, "{}", remaining)?;
         }
@@ -1004,282 +881,15 @@ impl ScrollViewer {
         Ok(())
     }
 
-    /// Renders scrollback with filter mode active (showing only matching lines).
-    ///
-    /// This extends render_with_chrome by only displaying lines that match
-    /// the filter pattern. Original line numbers are preserved.
-    ///
-    /// # Arguments
-    ///
-    /// * `out` - Writer to render to
-    /// * `buffer` - The scrollback buffer
-    /// * `filter` - Filter state with matching lines
-    /// * `filter_offset` - Scroll offset within filtered lines
-    /// * `cols` - Terminal width
-    /// * `rows` - Total terminal rows
-    /// * `show_line_numbers` - Whether to show line number gutter
-    /// * `show_timestamps` - Whether to show relative timestamp gutter
-    #[allow(clippy::too_many_arguments)]
-    pub fn render_with_filter<W: Write>(
-        out: &mut W,
-        buffer: &ScrollbackBuffer,
-        filter: &FilterState,
-        filter_offset: usize,
-        cols: u16,
-        rows: u16,
-        show_line_numbers: bool,
-        show_timestamps: bool,
-    ) -> io::Result<RenderStats> {
-        let content_rows = rows.saturating_sub(1) as usize; // Reserve row 1 for topbar
-        let _filtered_total = filter.match_count();
-
-        // Calculate gutter widths based on original buffer
-        let total = buffer.len();
-        let line_num_width = if show_line_numbers {
-            let max_line = total;
-            let num_width = if max_line == 0 {
-                1
-            } else {
-                (max_line as f64).log10().floor() as usize + 1
-            };
-            num_width.max(4) + 3
-        } else {
-            0
-        };
-        let timestamp_width = if show_timestamps { 7 } else { 0 };
-        let gutter_width = line_num_width + timestamp_width;
-        let content_cols = (cols as usize).saturating_sub(gutter_width);
-
-        // Get current time for relative timestamp calculation
-        let now = std::time::Instant::now();
-
-        // Hide cursor during render
-        write!(out, "\x1b[?25l")?;
-
-        let mut current_row = 2; // Start at row 2 (after topbar)
-        let mut rendered = 0;
-
-        // Get filtered lines for the current viewport
-        let lines = filter.get_filtered_range(buffer, filter_offset, content_rows);
-
-        // Track first visible line
-        let first_visible_line = lines.first().map(|(idx, _)| *idx + 1).unwrap_or(1);
-
-        for (original_idx, line) in &lines {
-            let line_number = *original_idx + 1; // Convert to 1-indexed
-
-            // Move to line position and clear
-            write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
-
-            // Render timestamp gutter if enabled
-            if show_timestamps {
-                let elapsed = now.duration_since(line.timestamp());
-                let time_str = Self::format_relative_time(elapsed);
-                write!(out, "\x1b[2m{:>4} │ \x1b[22m", time_str)?;
-            }
-
-            // Render line number gutter if enabled
-            if show_line_numbers {
-                write!(
-                    out,
-                    "\x1b[2m{:>width$} │ \x1b[22m",
-                    line_number,
-                    width = line_num_width - 3
-                )?;
-            }
-
-            // Write line content
-            let content = line.content();
-            write_truncated_content(out, content, content_cols)?;
-
-            // If line was truncated in storage, show indicator
-            if line.is_truncated() {
-                write!(out, "\x1b[7m>\x1b[27m")?;
-            }
-
-            current_row += 1;
-            rendered += 1;
-        }
-
-        // Clear remaining rows
-        let start_row = 2;
-        while current_row < start_row + content_rows {
-            write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
-            current_row += 1;
-        }
-
-        // Show cursor
-        write!(out, "\x1b[?25h")?;
-        out.flush()?;
-
-        Ok(RenderStats {
-            lines_rendered: rendered,
-            first_visible_line,
-        })
-    }
-
-    /// Renders scrollback with filter AND search active (filtered lines with highlights).
-    ///
-    /// This combines filter mode (showing only matching lines) with search
-    /// highlighting (visual highlights for search matches within filtered lines).
-    ///
-    /// # Arguments
-    ///
-    /// * `out` - Writer to render to
-    /// * `buffer` - The scrollback buffer
-    /// * `filter` - Filter state with matching lines
-    /// * `filter_offset` - Scroll offset within filtered lines
-    /// * `cols` - Terminal width
-    /// * `rows` - Total terminal rows
-    /// * `show_line_numbers` - Whether to show line number gutter
-    /// * `show_timestamps` - Whether to show relative timestamp gutter
-    /// * `search` - Search state with matches to highlight
-    /// * `theme` - Theme for highlight colors
-    #[allow(clippy::too_many_arguments)]
-    pub fn render_with_filter_and_search<W: Write>(
-        out: &mut W,
-        buffer: &ScrollbackBuffer,
-        filter: &FilterState,
-        filter_offset: usize,
-        cols: u16,
-        rows: u16,
-        show_line_numbers: bool,
-        show_timestamps: bool,
-        search: &SearchState,
-        theme: &Theme,
-    ) -> io::Result<RenderStats> {
-        let content_rows = rows.saturating_sub(1) as usize; // Reserve row 1 for topbar
-
-        // Calculate gutter widths based on original buffer
-        let total = buffer.len();
-        let line_num_width = if show_line_numbers {
-            let max_line = total;
-            let num_width = if max_line == 0 {
-                1
-            } else {
-                (max_line as f64).log10().floor() as usize + 1
-            };
-            num_width.max(4) + 3
-        } else {
-            0
-        };
-        let timestamp_width = if show_timestamps { 7 } else { 0 };
-        let gutter_width = line_num_width + timestamp_width;
-        let content_cols = (cols as usize).saturating_sub(gutter_width);
-
-        // Get current time for relative timestamp calculation
-        let now = std::time::Instant::now();
-
-        // Hide cursor during render
-        write!(out, "\x1b[?25l")?;
-
-        let mut current_row = 2; // Start at row 2 (after topbar)
-        let mut rendered = 0;
-
-        // Get filtered lines for the current viewport
-        let lines = filter.get_filtered_range(buffer, filter_offset, content_rows);
-
-        // Track first visible line
-        let first_visible_line = lines.first().map(|(idx, _)| *idx + 1).unwrap_or(1);
-
-        // Get exact current search match for special highlighting
-        let current_match = search.current().copied();
-
-        for (original_idx, line) in &lines {
-            let line_number = *original_idx + 1; // Convert to 1-indexed
-
-            // Move to line position and clear
-            write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
-
-            // Render timestamp gutter if enabled
-            if show_timestamps {
-                let elapsed = now.duration_since(line.timestamp());
-                let time_str = Self::format_relative_time(elapsed);
-                write!(out, "\x1b[2m{:>4} │ \x1b[22m", time_str)?;
-            }
-
-            // Render line number gutter if enabled
-            if show_line_numbers {
-                write!(
-                    out,
-                    "\x1b[2m{:>width$} │ \x1b[22m",
-                    line_number,
-                    width = line_num_width - 3
-                )?;
-            }
-
-            // Get search matches for this line
-            let line_matches: Vec<_> = search.matches_on_line(*original_idx).collect();
-
-            if line_matches.is_empty() {
-                // No matches - render line normally
-                let content = line.content();
-                write_truncated_content(out, content, content_cols)?;
-            } else {
-                // Render line with search highlights
-                Self::render_line_with_highlights(
-                    out,
-                    line.content(),
-                    content_cols,
-                    *original_idx,
-                    &line_matches,
-                    current_match,
-                    theme,
-                )?;
-            }
-
-            // If line was truncated in storage, show indicator
-            if line.is_truncated() {
-                write!(out, "\x1b[7m>\x1b[27m")?;
-            }
-
-            current_row += 1;
-            rendered += 1;
-        }
-
-        // Clear remaining rows
-        let start_row = 2;
-        while current_row < start_row + content_rows {
-            write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
-            current_row += 1;
-        }
-
-        // Show cursor
-        write!(out, "\x1b[?25h")?;
-        out.flush()?;
-
-        Ok(RenderStats {
-            lines_rendered: rendered,
-            first_visible_line,
-        })
-    }
+    // ─── Public utilities ────────────────────────────────────────────────
 
     /// Calculates the maximum valid scroll offset.
-    ///
-    /// # Arguments
-    ///
-    /// * `total_lines` - Total lines in buffer
-    /// * `viewport_rows` - Number of visible rows
-    ///
-    /// # Returns
-    ///
-    /// Maximum offset value (0 if buffer smaller than viewport).
     #[inline]
     pub fn max_offset(total_lines: usize, viewport_rows: usize) -> usize {
         total_lines.saturating_sub(viewport_rows)
     }
 
     /// Clamps a scroll offset to valid range.
-    ///
-    /// # Arguments
-    ///
-    /// * `offset` - Proposed offset
-    /// * `total_lines` - Total lines in buffer
-    /// * `viewport_rows` - Number of visible rows
-    ///
-    /// # Returns
-    ///
-    /// Clamped offset value.
     #[inline]
     pub fn clamp_offset(offset: usize, total_lines: usize, viewport_rows: usize) -> usize {
         offset.min(Self::max_offset(total_lines, viewport_rows))
@@ -1289,6 +899,10 @@ impl ScrollViewer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{SymbolSet, ThemePreset};
+    use crate::scrollback::{CommandRecord, SeparatorRegistry};
+    use std::path::PathBuf;
+    use std::time::Duration;
 
     fn create_test_buffer(lines: &[&str]) -> ScrollbackBuffer {
         let mut buffer = ScrollbackBuffer::with_capacity(100, 1000);
@@ -1315,11 +929,8 @@ mod tests {
 
     #[test]
     fn test_clamp_offset_various_behaviors_returns_expected() {
-        // Within range
         assert_eq!(ScrollViewer::clamp_offset(50, 100, 10), 50);
-        // Above max
         assert_eq!(ScrollViewer::clamp_offset(95, 100, 10), 90);
-        // At max
         assert_eq!(ScrollViewer::clamp_offset(90, 100, 10), 90);
     }
 
@@ -1327,12 +938,11 @@ mod tests {
     fn test_render_to_buffer_with_three_lines_renders_three() {
         let buffer = create_test_buffer(&["line1", "line2", "line3"]);
         let mut output = Vec::new();
-        let options = RenderOptions::default();
 
-        let stats = ScrollViewer::render(&mut output, &buffer, 0, 80, 3, &options, None).unwrap();
+        let stats =
+            ScrollViewer::render(&mut output, &buffer, 0, 80, 3, &RenderConfig::default()).unwrap();
         assert_eq!(stats.lines_rendered, 3);
 
-        // Output should contain the lines
         let output_str = String::from_utf8_lossy(&output);
         assert!(output_str.contains("line1"));
         assert!(output_str.contains("line2"));
@@ -1343,14 +953,12 @@ mod tests {
     fn test_render_with_offset_offset2_shows_expected_lines() {
         let buffer = create_test_buffer(&["line1", "line2", "line3", "line4", "line5"]);
         let mut output = Vec::new();
-        let options = RenderOptions::default();
 
-        // Offset 2 from bottom, show 2 lines
-        let stats = ScrollViewer::render(&mut output, &buffer, 2, 80, 2, &options, None).unwrap();
+        let stats =
+            ScrollViewer::render(&mut output, &buffer, 2, 80, 2, &RenderConfig::default()).unwrap();
         assert_eq!(stats.lines_rendered, 2);
 
         let output_str = String::from_utf8_lossy(&output);
-        // Should show line2 and line3 (offset 2 from bottom with 2 rows)
         assert!(output_str.contains("line2"));
         assert!(output_str.contains("line3"));
     }
@@ -1361,24 +969,22 @@ mod tests {
         let mut output = Vec::new();
 
         // 5 total rows, row 1 reserved for topbar, so 4 content rows
-        let stats = ScrollViewer::render_with_chrome(
+        let stats = ScrollViewer::render(
             &mut output,
             &buffer,
             0,
             80,
-            5,
-            false,
-            false,
-            false,
-            None,
-            &[],
+            4, // content rows (rows - 1 for topbar)
+            &RenderConfig {
+                start_row: 2,
+                ..Default::default()
+            },
         )
         .unwrap();
         assert_eq!(stats.lines_rendered, 4);
-        assert_eq!(stats.first_visible_line, 2); // lines 2,3,4,5 visible (offset 0)
+        assert_eq!(stats.first_visible_line, 2);
 
         let output_str = String::from_utf8_lossy(&output);
-        // Should start at row 2
         assert!(output_str.contains("\x1b[2;1H"));
     }
 
@@ -1387,24 +993,23 @@ mod tests {
         let buffer = create_test_buffer(&["hello", "world"]);
         let mut output = Vec::new();
 
-        let stats = ScrollViewer::render_with_chrome(
+        let stats = ScrollViewer::render(
             &mut output,
             &buffer,
             0,
             80,
-            5,
-            true,
-            false,
-            false,
-            None,
-            &[],
+            4,
+            &RenderConfig {
+                start_row: 2,
+                show_line_numbers: true,
+                ..Default::default()
+            },
         )
         .unwrap();
         assert_eq!(stats.lines_rendered, 2);
 
         let output_str = String::from_utf8_lossy(&output);
-        // Should contain line numbers with dim formatting
-        assert!(output_str.contains("│")); // Gutter separator
+        assert!(output_str.contains("│"));
     }
 
     #[test]
@@ -1413,34 +1018,32 @@ mod tests {
         let mut output = Vec::new();
 
         // At bottom (offset 0), viewing 3 lines: should show lines 8,9,10
-        let stats = ScrollViewer::render_with_chrome(
+        let stats = ScrollViewer::render(
             &mut output,
             &buffer,
             0,
             80,
-            4,
-            false,
-            false,
-            false,
-            None,
-            &[],
+            3,
+            &RenderConfig {
+                start_row: 2,
+                ..Default::default()
+            },
         )
         .unwrap();
         assert_eq!(stats.first_visible_line, 8);
 
         // Scrolled up 3 lines: should show lines 5,6,7
         output.clear();
-        let stats = ScrollViewer::render_with_chrome(
+        let stats = ScrollViewer::render(
             &mut output,
             &buffer,
             3,
             80,
-            4,
-            false,
-            false,
-            false,
-            None,
-            &[],
+            3,
+            &RenderConfig {
+                start_row: 2,
+                ..Default::default()
+            },
         )
         .unwrap();
         assert_eq!(stats.first_visible_line, 5);
@@ -1451,18 +1054,18 @@ mod tests {
         let buffer = create_test_buffer(&["line1", "line2"]);
         let mut output = Vec::new();
 
-        // Buffer smaller than viewport (2 lines in 5 rows), at bottom - should show END
-        let stats = ScrollViewer::render_with_chrome(
+        // Buffer smaller than viewport (2 lines in 4 rows), at bottom - should show END
+        let stats = ScrollViewer::render(
             &mut output,
             &buffer,
             0,
             80,
-            5,
-            false,
-            false,
-            true,
-            None,
-            &[],
+            4,
+            &RenderConfig {
+                start_row: 2,
+                boundary_markers: true,
+                ..Default::default()
+            },
         )
         .unwrap();
         assert_eq!(stats.lines_rendered, 2);
@@ -1472,23 +1075,22 @@ mod tests {
 
         // At top (max offset), should show BEGIN
         output.clear();
-        let max_off = ScrollViewer::max_offset(2, 4); // 0 since buffer < viewport
-        let _stats = ScrollViewer::render_with_chrome(
+        let max_off = ScrollViewer::max_offset(2, 4);
+        let _stats = ScrollViewer::render(
             &mut output,
             &buffer,
             max_off,
             80,
-            5,
-            false,
-            false,
-            true,
-            None,
-            &[],
+            4,
+            &RenderConfig {
+                start_row: 2,
+                boundary_markers: true,
+                ..Default::default()
+            },
         )
         .unwrap();
 
         let output_str = String::from_utf8_lossy(&output);
-        // When buffer is smaller than viewport, BEGIN should show at top
         assert!(output_str.contains("BEGIN"), "Should contain BEGIN marker");
     }
 
@@ -1503,35 +1105,25 @@ mod tests {
 
     #[test]
     fn test_ansi_aware_truncate_skips_ansi_sequences() {
-        // "\x1b[31m" (red) + "hi" + "\x1b[0m" (reset) = 2 display cols
         let content = b"\x1b[31mhi\x1b[0m";
-        // Truncating to 2 display cols should include everything
         assert_eq!(ansi_aware_truncate(content, 2), content.len());
-        // Truncating to 1 display col should include the ANSI intro + "h"
         let len = ansi_aware_truncate(content, 1);
         assert_eq!(&content[..len], b"\x1b[31mh");
     }
 
     #[test]
     fn test_ansi_aware_truncate_wide_chars() {
-        // "你好" = 6 bytes, 4 display cols
         let content = "你好".as_bytes();
         assert_eq!(ansi_aware_truncate(content, 4), 6);
-        // Truncating to 3 cols should only include "你" (2 cols, 3 bytes)
         assert_eq!(ansi_aware_truncate(content, 3), 3);
-        // Truncating to 2 cols exactly fits "你"
         assert_eq!(ansi_aware_truncate(content, 2), 3);
-        // Truncating to 1 col can't fit "你" (width 2), so 0 bytes
         assert_eq!(ansi_aware_truncate(content, 1), 0);
     }
 
     #[test]
     fn test_ansi_aware_truncate_mixed_ansi_and_wide() {
-        // "\x1b[31m" + "你" + "\x1b[0m" + "a" = 3 display cols
         let content = "\x1b[31m你\x1b[0ma".as_bytes();
-        // All 3 cols
         assert_eq!(ansi_aware_truncate(content, 3), content.len());
-        // 2 cols = ANSI + "你" + reset
         assert_eq!(ansi_aware_truncate(content, 2), "\x1b[31m你\x1b[0m".len());
     }
 
@@ -1605,10 +1197,203 @@ mod tests {
     fn test_render_with_cjk_content_no_panic() {
         let buffer = create_test_buffer(&["hello", "你好世界", "mixed混合content"]);
         let mut output = Vec::new();
-        let options = RenderOptions::default();
 
-        // Should not panic even with narrow viewport
-        let stats = ScrollViewer::render(&mut output, &buffer, 0, 10, 3, &options, None).unwrap();
+        let stats =
+            ScrollViewer::render(&mut output, &buffer, 0, 10, 3, &RenderConfig::default()).unwrap();
         assert_eq!(stats.lines_rendered, 3);
+    }
+
+    #[test]
+    fn test_gutter_widths_no_gutters() {
+        let (ln, ts, total) = ScrollViewer::gutter_widths(false, false, 100);
+        assert_eq!(ln, 0);
+        assert_eq!(ts, 0);
+        assert_eq!(total, 0);
+    }
+
+    #[test]
+    fn test_gutter_widths_line_numbers_only() {
+        let (ln, ts, total) = ScrollViewer::gutter_widths(true, false, 100);
+        assert!(ln > 0);
+        assert_eq!(ts, 0);
+        assert_eq!(total, ln);
+    }
+
+    #[test]
+    fn test_gutter_widths_both() {
+        let (ln, ts, total) = ScrollViewer::gutter_widths(true, true, 100);
+        assert!(ln > 0);
+        assert_eq!(ts, 7);
+        assert_eq!(total, ln + ts);
+    }
+
+    #[test]
+    fn test_render_sticky_header_when_separator_offscreen_renders_separator_once() {
+        let buffer = create_test_buffer(&[
+            "l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8", "l9", "l10", "l11", "l12",
+        ]);
+        let mut output = Vec::new();
+        let theme = crate::chrome::theme::Theme::for_preset(ThemePreset::Amber);
+        let symbols = crate::chrome::symbols::Symbols::for_set(SymbolSet::Fallback);
+        let registry = SeparatorRegistry::with_defaults();
+        let records = vec![CommandRecord {
+            output_start: 2,
+            prompt_line: Some(10),
+            command_text: Some("build".to_string()),
+            exit_code: Some(0),
+            duration: Some(Duration::from_secs(2)),
+            cwd: Some(PathBuf::from("/tmp")),
+            ..Default::default()
+        }];
+
+        let stats = ScrollViewer::render(
+            &mut output,
+            &buffer,
+            2,
+            80,
+            4,
+            &RenderConfig {
+                boundary_lines: &[2],
+                records: &records,
+                sticky_header: true,
+                separator_registry: Some(&registry),
+                symbols: Some(symbols),
+                theme: Some(theme),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let rendered = String::from_utf8_lossy(&output);
+        assert_eq!(rendered.matches("build").count(), 1);
+        assert!(rendered.contains('╌'));
+        assert!(stats.first_visible_line > 2 && stats.first_visible_line < 10);
+    }
+
+    #[test]
+    fn test_render_sticky_header_when_separator_visible_avoids_duplication() {
+        let buffer = create_test_buffer(&[
+            "l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8", "l9", "l10", "l11", "l12",
+        ]);
+        let mut output = Vec::new();
+        let theme = crate::chrome::theme::Theme::for_preset(ThemePreset::Amber);
+        let symbols = crate::chrome::symbols::Symbols::for_set(SymbolSet::Fallback);
+        let registry = SeparatorRegistry::with_defaults();
+        let records = vec![CommandRecord {
+            output_start: 2,
+            prompt_line: Some(10),
+            command_text: Some("build".to_string()),
+            exit_code: Some(0),
+            ..Default::default()
+        }];
+
+        ScrollViewer::render(
+            &mut output,
+            &buffer,
+            1,
+            80,
+            4,
+            &RenderConfig {
+                boundary_lines: &[2],
+                records: &records,
+                sticky_header: true,
+                separator_registry: Some(&registry),
+                symbols: Some(symbols),
+                theme: Some(theme),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let rendered = String::from_utf8_lossy(&output);
+        assert_eq!(rendered.matches("build").count(), 1);
+    }
+
+    #[test]
+    fn test_render_folded_viewport_when_offset_clamped_keeps_lines_visible() {
+        let buffer = create_test_buffer(&[
+            "l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8", "l9", "l10", "l11", "l12",
+        ]);
+        let mut output = Vec::new();
+        let records = vec![CommandRecord {
+            output_start: 2,
+            prompt_line: Some(10),
+            folded: true,
+            ..Default::default()
+        }];
+
+        let total = buffer.len();
+        let folded_count = records[0]
+            .prompt_line
+            .unwrap_or(0)
+            .saturating_sub(records[0].output_start.saturating_add(1));
+        let visible_total = total.saturating_sub(folded_count);
+        let clamped_offset = ScrollViewer::clamp_offset(8, visible_total, 4);
+
+        let stats = ScrollViewer::render(
+            &mut output,
+            &buffer,
+            clamped_offset,
+            80,
+            4,
+            &RenderConfig {
+                records: &records,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let rendered = String::from_utf8_lossy(&output);
+        assert!(rendered.contains("l1"));
+        assert!(rendered.contains("l2"));
+        assert!(!rendered.contains("l4"));
+        assert!(stats.lines_rendered > 0);
+        assert_eq!(stats.first_visible_line, 1);
+    }
+
+    #[test]
+    fn test_render_separator_when_duplicate_output_start_prefers_active_record_for_line() {
+        let buffer = create_test_buffer(&["l1", "l2", "l3", "l4", "l5", "l6"]);
+        let mut output = Vec::new();
+        let theme = crate::chrome::theme::Theme::for_preset(ThemePreset::Amber);
+        let symbols = crate::chrome::symbols::Symbols::for_set(SymbolSet::Fallback);
+        let registry = SeparatorRegistry::with_defaults();
+        let records = vec![
+            CommandRecord {
+                output_start: 2,
+                prompt_line: Some(4),
+                command_text: Some("older".to_string()),
+                exit_code: Some(0),
+                ..Default::default()
+            },
+            CommandRecord {
+                output_start: 2,
+                prompt_line: Some(6),
+                command_text: Some("newer".to_string()),
+                exit_code: Some(0),
+                ..Default::default()
+            },
+        ];
+
+        ScrollViewer::render(
+            &mut output,
+            &buffer,
+            0,
+            120,
+            6,
+            &RenderConfig {
+                boundary_lines: &[2],
+                records: &records,
+                separator_registry: Some(&registry),
+                symbols: Some(symbols),
+                theme: Some(theme),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let rendered = String::from_utf8_lossy(&output);
+        assert!(rendered.contains("newer"));
+        assert!(!rendered.contains("older"));
     }
 }

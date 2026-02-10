@@ -120,6 +120,9 @@ pub struct Chrome {
     /// Symbols for icons.
     symbols: &'static Symbols,
 
+    /// Symbol set enum for passing to sub-components.
+    symbol_set: crate::config::SymbolSet,
+
     /// Last rendered minute (0-59) for efficient clock updates.
     last_rendered_minute: Option<u8>,
 
@@ -146,6 +149,7 @@ impl Chrome {
             notifications: VecDeque::new(),
             theme,
             symbols,
+            symbol_set: config.symbol_set,
             last_rendered_minute: None,
             registry,
         }
@@ -159,6 +163,11 @@ impl Chrome {
     /// Returns the symbols used by this Chrome instance.
     pub fn symbols(&self) -> &'static Symbols {
         self.symbols
+    }
+
+    /// Returns the symbol set used by this Chrome instance.
+    pub fn symbol_set(&self) -> crate::config::SymbolSet {
+        self.symbol_set
     }
 
     /// Checks if the clock should be updated based on the current minute.
@@ -594,12 +603,16 @@ impl Chrome {
         let stdout = io::stdout();
         let mut out = stdout.lock();
 
-        // Set scroll region from panel_height + 1 to total_rows
-        // Panels occupy rows 1 through height, content is height+1 to total_rows
+        // Set scroll region: panels occupy rows 1..height, PTY content is height+1..total_rows
         let top_row = height + 1;
-        write!(out, "\x1b[{};{}r", top_row, total_rows)?;
+        if top_row > total_rows {
+            // Fullscreen: panel covers entire terminal, reset scroll region
+            write!(out, "\x1b[r")?;
+        } else {
+            write!(out, "\x1b[{};{}r", top_row, total_rows)?;
+        }
 
-        // Position cursor at bottom of scroll region
+        // Position cursor at bottom of terminal
         write!(out, "\x1b[{};1H", total_rows)?;
 
         out.flush()?;
@@ -657,6 +670,59 @@ impl Chrome {
         self.position_cursor_in_scroll_region()?;
 
         debug!(old_height, "Panel collapsed");
+
+        Ok(())
+    }
+
+    /// Resizes an already-expanded panel to a new height.
+    ///
+    /// More efficient than collapse + expand as it updates the scroll region
+    /// in-place without restoring the chrome scroll region in between.
+    ///
+    /// # Arguments
+    ///
+    /// * `new_height` - The new panel height
+    /// * `new_total_rows` - The new total terminal height
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if escape sequences cannot be written to stdout.
+    pub fn resize_panel(&mut self, new_height: u16, new_total_rows: u16) -> io::Result<()> {
+        let old_height = match self.panel_state {
+            PanelState::Expanded { height } => height,
+            PanelState::Collapsed => return self.expand_panel(new_height, new_total_rows),
+        };
+
+        self.panel_state = PanelState::Expanded { height: new_height };
+
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
+
+        // Clear rows that changed (freed if shrank, new if grew)
+        let (clear_start, clear_end) = if new_height < old_height {
+            (new_height + 1, old_height)
+        } else {
+            (old_height + 1, new_height)
+        };
+        for row in clear_start..=clear_end {
+            write!(out, "\x1b[{};1H\x1b[2K", row)?;
+        }
+
+        // Update scroll region
+        let top_row = new_height + 1;
+        if top_row > new_total_rows {
+            // Fullscreen: panel covers entire terminal, reset scroll region
+            write!(out, "\x1b[r")?;
+        } else {
+            write!(out, "\x1b[{};{}r", top_row, new_total_rows)?;
+        }
+
+        // Position cursor at bottom of terminal
+        write!(out, "\x1b[{};1H", new_total_rows)?;
+
+        out.flush()?;
+
+        debug!(old_height, new_height, new_total_rows, "Panel resized");
 
         Ok(())
     }

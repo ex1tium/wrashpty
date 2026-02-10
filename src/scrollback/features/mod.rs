@@ -11,6 +11,8 @@ mod yank;
 
 pub use filter::FilterState;
 pub use goto::GoToLineState;
-pub use help::HelpBar;
+pub use help::LegendBar;
+#[deprecated(note = "renamed to LegendBar")]
+pub use help::LegendBar as HelpBar;
 pub use search::{SearchDirection, SearchMatch, SearchState};
 pub use yank::{SelectionMode, YankState};
