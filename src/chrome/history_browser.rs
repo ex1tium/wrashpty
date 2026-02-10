@@ -13,11 +13,11 @@ use ratatui_core::layout::{Constraint, Layout, Rect};
 use ratatui_core::style::{Color, Modifier, Style};
 use ratatui_core::text::{Line, Span};
 use ratatui_core::widgets::Widget;
-use ratatui_widgets::paragraph::{Paragraph, Wrap};
+use ratatui_widgets::paragraph::Paragraph;
 use tracing::{debug, warn};
 
 use super::command_edit::{
-    CommandEditState, CommandToken, TokenType, superscript_number, token_type_style,
+    CommandEditState, CommandToken, TokenType, compute_edit_mode_layout, render_edit_mode_shared,
 };
 use super::panel::{Panel, PanelResult};
 use super::theme::Theme;
@@ -226,21 +226,10 @@ impl HistoryBrowserPanel {
             return;
         }
 
-        // Layout with three-row depth UI - 12 rows to match file browser
-        let chunks = Layout::vertical([
-            Constraint::Length(1), // 0: Title with original command
-            Constraint::Length(1), // 1: Separator
-            Constraint::Length(1), // 2: Previous suggestion row (dim)
-            Constraint::Length(1), // 3: Current token strip (highlighted)
-            Constraint::Length(1), // 4: Next suggestion row (dim)
-            Constraint::Length(1), // 5: Spacer
-            Constraint::Length(1), // 6: Edit input line
-            Constraint::Length(1), // 7: Spacer before result
-            Constraint::Min(2),    // 8: Result preview (wraps to multiple lines)
-            Constraint::Length(1), // 9: Border
-            Constraint::Length(1), // 10: Keybind hints
-        ])
-        .split(area);
+        // Compute adaptive layout (returns None if area too small)
+        let Some(layout) = compute_edit_mode_layout(area) else {
+            return;
+        };
 
         // Title with suggestion count and unsafe indicator
         let mut title_spans = vec![Span::styled(
@@ -264,8 +253,7 @@ impl HistoryBrowserPanel {
                     .add_modifier(Modifier::BOLD),
             ));
         }
-        let title = Line::from(title_spans);
-        Paragraph::new(title).render(chunks[0], buffer);
+        Paragraph::new(Line::from(title_spans)).render(layout.title, buffer);
 
         // Separator with original command hint
         let border_style = Style::default().fg(self.theme.panel_border);
@@ -273,16 +261,13 @@ impl HistoryBrowserPanel {
         let max_hint_width = (area.width as usize).saturating_sub(4);
         let truncated_hint: String =
             crate::ui::text_width::truncate_to_width(&orig_hint, max_hint_width).into_owned();
-        // Collect chars for cell-by-cell rendering
         let hint_chars: Vec<char> = truncated_hint.chars().collect();
 
-        // Track display column as we write hint chars into cells
         let mut hint_idx = 0;
         let mut col_offset: usize = 0;
-        for x in chunks[1].x..chunks[1].x + chunks[1].width {
-            if let Some(cell) = buffer.cell_mut((x, chunks[1].y)) {
+        for x in layout.separator.x..layout.separator.x + layout.separator.width {
+            if let Some(cell) = buffer.cell_mut((x, layout.separator.y)) {
                 if col_offset > 0 {
-                    // Skip continuation cell(s) from previous wide char.
                     col_offset -= 1;
                     continue;
                 }
@@ -293,7 +278,6 @@ impl HistoryBrowserPanel {
                     cell.set_char(ch);
                     cell.set_style(Style::default().fg(self.theme.text_secondary));
                     hint_idx += 1;
-                    // For wide characters, skip continuation cells.
                     col_offset = ch_w.saturating_sub(1);
                 } else {
                     cell.set_char('─');
@@ -302,203 +286,8 @@ impl HistoryBrowserPanel {
             }
         }
 
-        // Calculate the x-position where the selected token starts and ends
-        // Token format: "   " + for each token: superscript(1-2 chars) + "⟦" + text + "⟧" + "   "
-        let mut selected_x_start: usize = 3; // Initial padding
-        let mut selected_x_end: usize = 3;
-        for (i, token) in edit_state.tokens.iter().enumerate() {
-            let display_text = if i == edit_state.selected {
-                if edit_state.edit_buffer.is_empty() {
-                    "_"
-                } else {
-                    &edit_state.edit_buffer
-                }
-            } else if token.text.is_empty() {
-                "_"
-            } else {
-                &token.text
-            };
-            // superscript (n digits) + ⟦ (1) + text + ⟧ (1) + spacing (3)
-            let slot_num = i + 1;
-            let superscript_len = slot_num.to_string().len(); // Number of digits
-            let text_display_width = crate::ui::text_width::display_width(display_text);
-            let token_width = superscript_len + 1 + text_display_width + 1 + 3;
-
-            if i == edit_state.selected {
-                selected_x_end = selected_x_start + superscript_len + 1 + text_display_width + 1;
-                break;
-            }
-            selected_x_start += token_width;
-        }
-        // Add superscript + opening bracket to get to content start
-        let superscript_len = (edit_state.selected + 1).to_string().len();
-        let selected_x_offset = selected_x_start + superscript_len + 1;
-
-        // Calculate horizontal scroll offset to keep selected token visible
-        let viewport_width = chunks[3].width as usize;
-        let left_context = viewport_width / 3; // Show ~1/3 of viewport with previous tokens
-        let right_margin = 8; // Small margin on right edge
-        let scroll_offset = if selected_x_end > viewport_width.saturating_sub(right_margin) {
-            // Selected token is past right edge - scroll right, keeping previous tokens visible
-            selected_x_start.saturating_sub(left_context)
-        } else {
-            0
-        };
-
-        // Previous suggestion row (dim, aligned under selected token, accounting for scroll)
-        if let Some(prev_sugg) = edit_state.prev_suggestion() {
-            let adjusted_offset = selected_x_offset.saturating_sub(scroll_offset);
-            let padding = " ".repeat(adjusted_offset);
-            let prev_line = Line::from(vec![
-                Span::styled(padding, Style::default()),
-                Span::styled(prev_sugg, Style::default().fg(self.theme.text_secondary)),
-            ]);
-            Paragraph::new(prev_line).render(chunks[2], buffer);
-        }
-
-        // Current token strip with double brackets and superscript numbers
-        let mut spans = Vec::new();
-        spans.push(Span::styled("   ", Style::default()));
-
-        let bracket_style = Style::default().fg(self.theme.text_secondary);
-        let bracket_selected_style = Style::default().fg(self.theme.header_fg);
-
-        for (i, token) in edit_state.tokens.iter().enumerate() {
-            let is_selected = i == edit_state.selected;
-            let slot_num = i + 1;
-
-            // Superscript number
-            let num_style = if is_selected {
-                Style::default()
-                    .fg(self.theme.text_highlight)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(self.theme.text_secondary)
-            };
-            spans.push(Span::styled(superscript_number(slot_num), num_style));
-
-            // Opening bracket
-            let bstyle = if is_selected {
-                bracket_selected_style
-            } else {
-                bracket_style
-            };
-            spans.push(Span::styled("⟦", bstyle));
-
-            // Token text with type-aware styling
-            let base_style = token_type_style(token.token_type, self.theme);
-            let token_style = if is_selected {
-                base_style.add_modifier(Modifier::BOLD)
-            } else {
-                base_style
-            };
-
-            // Show edit buffer for selected token, original text for others
-            let display_text = if is_selected {
-                if edit_state.edit_buffer.is_empty() {
-                    "_".to_string()
-                } else {
-                    edit_state.edit_buffer.clone()
-                }
-            } else if token.text.is_empty() {
-                "_".to_string()
-            } else {
-                token.text.clone()
-            };
-            spans.push(Span::styled(display_text, token_style));
-
-            // Closing bracket
-            spans.push(Span::styled("⟧", bstyle));
-
-            // Spacing between tokens
-            spans.push(Span::raw("   "));
-        }
-
-        let token_line = Line::from(spans);
-        Paragraph::new(token_line)
-            .scroll((0, scroll_offset as u16))
-            .render(chunks[3], buffer);
-
-        // Next suggestion row (dim, aligned under selected token, accounting for scroll)
-        if let Some(next_sugg) = edit_state.next_suggestion() {
-            let adjusted_offset = selected_x_offset.saturating_sub(scroll_offset);
-            let padding = " ".repeat(adjusted_offset);
-            let next_line = Line::from(vec![
-                Span::styled(padding, Style::default()),
-                Span::styled(next_sugg, Style::default().fg(self.theme.text_secondary)),
-            ]);
-            Paragraph::new(next_line).render(chunks[4], buffer);
-        }
-
-        // Edit input line with type hint and cycling indicator
-        let type_hint = edit_state.type_hint();
-        let cycling_indicator = if edit_state.suggestion_index.is_some() {
-            format!(
-                " [{}/{}]",
-                edit_state.suggestion_index.unwrap_or(0) + 1,
-                edit_state.suggestions.len()
-            )
-        } else {
-            String::new()
-        };
-        let edit_label = format!(
-            "   {} {} > ",
-            superscript_number(edit_state.selected + 1),
-            type_hint
-        );
-        let edit_line = Line::from(vec![
-            Span::styled(edit_label, Style::default().fg(self.theme.git_fg)),
-            Span::styled(
-                &edit_state.edit_buffer,
-                Style::default()
-                    .fg(self.theme.text_primary)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("█", Style::default().fg(self.theme.header_fg)),
-            Span::styled(
-                cycling_indicator,
-                Style::default().fg(self.theme.text_secondary),
-            ),
-        ]);
-        Paragraph::new(edit_line).render(chunks[6], buffer);
-
-        // Build and show result preview
-        let result_preview: String = edit_state
-            .tokens
-            .iter()
-            .enumerate()
-            .map(|(i, t)| {
-                if i == edit_state.selected {
-                    edit_state.edit_buffer.clone()
-                } else {
-                    t.text.clone()
-                }
-            })
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        let preview_changed = result_preview != edit_state.original;
-        let preview_style = if preview_changed {
-            Style::default().fg(self.theme.semantic_success)
-        } else {
-            Style::default().fg(self.theme.text_primary)
-        };
-        let preview_line = Line::from(vec![
-            Span::styled("  Result: ", Style::default().fg(self.theme.text_secondary)),
-            Span::styled(&result_preview, preview_style),
-        ]);
-        Paragraph::new(preview_line)
-            .wrap(Wrap { trim: false })
-            .render(chunks[8], buffer);
-
-        // Border
-        for x in chunks[9].x..chunks[9].x + chunks[9].width {
-            if let Some(cell) = buffer.cell_mut((x, chunks[9].y)) {
-                cell.set_char('─');
-                cell.set_style(border_style);
-            }
-        }
+        // Render shared elements (token strip, suggestions, edit input, result, border)
+        render_edit_mode_shared(buffer, self.theme, edit_state, &layout);
 
         // Keybind hints
         let key_style = Style::default().fg(self.theme.text_highlight);
@@ -526,7 +315,7 @@ impl HistoryBrowserPanel {
             Span::styled("Esc", key_style),
             Span::styled(" Back", label_style),
         ]);
-        Paragraph::new(hints).render(chunks[10], buffer);
+        Paragraph::new(hints).render(layout.keybinds, buffer);
     }
 
     /// Renders the danger confirmation dialog.
@@ -1132,7 +921,7 @@ impl Panel for HistoryBrowserPanel {
     }
 
     fn render(&mut self, buffer: &mut Buffer, area: Rect) {
-        if area.height < 6 || area.width < 30 {
+        if area.height < 6 || area.width < 20 {
             return;
         }
 

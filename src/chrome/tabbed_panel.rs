@@ -18,6 +18,7 @@ use super::help_panel::HelpPanel;
 use super::history_browser::HistoryBrowserPanel;
 use super::panel::{Panel, PanelResult};
 use super::theme::Theme;
+use crate::config::SymbolSet;
 use crate::history_store::HistoryStore;
 
 // Tab indices for type-based access
@@ -41,10 +42,10 @@ pub struct TabbedPanel {
 
 impl TabbedPanel {
     /// Creates a new tabbed panel with all panel types.
-    pub fn new(theme: &'static Theme) -> Self {
+    pub fn new(theme: &'static Theme, symbol_set: SymbolSet) -> Self {
         let tabs: Vec<Box<dyn Panel>> = vec![
             Box::new(HistoryBrowserPanel::new(theme)),
-            Box::new(FileBrowserPanel::new(theme)),
+            Box::new(FileBrowserPanel::new(theme, symbol_set)),
             Box::new(CommandPalettePanel::new(theme)),
             Box::new(HelpPanel::new(theme)),
         ];
@@ -299,14 +300,14 @@ mod tests {
 
     #[test]
     fn test_tabbed_panel_new() {
-        let panel = TabbedPanel::new(&AMBER_THEME);
+        let panel = TabbedPanel::new(&AMBER_THEME, SymbolSet::NerdFont);
         assert_eq!(panel.tab_count(), 4);
         assert_eq!(panel.active_tab(), 0);
     }
 
     #[test]
     fn test_tabbed_panel_next_tab() {
-        let mut panel = TabbedPanel::new(&AMBER_THEME);
+        let mut panel = TabbedPanel::new(&AMBER_THEME, SymbolSet::NerdFont);
         assert_eq!(panel.active_tab(), 0);
         panel.next_tab();
         assert_eq!(panel.active_tab(), 1);
@@ -321,7 +322,7 @@ mod tests {
 
     #[test]
     fn test_tabbed_panel_prev_tab() {
-        let mut panel = TabbedPanel::new(&AMBER_THEME);
+        let mut panel = TabbedPanel::new(&AMBER_THEME, SymbolSet::NerdFont);
         // Should wrap to last
         panel.prev_tab();
         assert_eq!(panel.active_tab(), 3);
@@ -331,7 +332,7 @@ mod tests {
 
     #[test]
     fn test_render_tab_hint_clears_wide_char_continuation_cell() {
-        let panel = TabbedPanel::new(&AMBER_THEME);
+        let panel = TabbedPanel::new(&AMBER_THEME, SymbolSet::NerdFont);
         let sep_area = Rect::new(0, 0, 12, 1);
         let mut buffer = Buffer::empty(sep_area);
 

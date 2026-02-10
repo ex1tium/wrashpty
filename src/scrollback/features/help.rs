@@ -1,83 +1,199 @@
-//! Help bar content for scroll viewer modes.
+//! Legend bar content for scroll viewer modes.
 //!
-//! Provides context-sensitive help text displayed at the bottom of the screen.
+//! Provides context-sensitive key legends displayed on the bottom row.
 
 use std::io::{self, Write};
 
 use crate::chrome::theme::Theme;
-use crate::scrollback::mode::ScrollViewMode;
+use crate::scrollback::mode::HelpContext;
+use crate::scrollback::state::DisplaySettings;
+use crate::ui::text_width;
 
-/// Help bar content for different modes.
-pub struct HelpBar;
+/// One legend binding entry.
+pub struct LegendEntry {
+    /// Key chord text, e.g. "^S", "PgUp/Dn", "Esc".
+    pub key: &'static str,
+    /// Human label, e.g. "Search", "Scroll", "Exit".
+    pub label: &'static str,
+    /// Optional toggle state.
+    pub active: Option<bool>,
+}
 
-impl HelpBar {
-    /// Returns help text for the given mode.
-    pub fn text_for_mode(mode: &ScrollViewMode) -> &'static str {
-        match mode {
-            ScrollViewMode::Normal => {
-                "PgUp/Dn:scroll  Home/End:top/bot  Ctrl+S:search  Ctrl+F:filter  Ctrl+G:goto  Ctrl+L:lines  Ctrl+T:time  ?:hide"
-            }
-            ScrollViewMode::Search(_) => {
-                "Enter:confirm  Esc:cancel  Up/Down:prev/next match  Ctrl+F:filter"
-            }
-            ScrollViewMode::Filter(_) => {
-                "Enter:confirm  Esc:cancel  Ctrl+S:search  PgUp/Dn:scroll  Home/End:top/bot"
-            }
-            ScrollViewMode::Yank(_) => "v:toggle line  y/Enter:copy  Esc:cancel  Arrows:move",
-            ScrollViewMode::GoToLine(_) => "Enter:go  Esc:cancel",
+/// Legend bar for different viewer contexts.
+pub struct LegendBar;
+
+impl LegendBar {
+    fn entries_for_context(ctx: HelpContext, display: &DisplaySettings) -> Vec<LegendEntry> {
+        match ctx {
+            HelpContext::Normal => vec![
+                LegendEntry {
+                    key: "PgUp/Dn",
+                    label: "Scroll",
+                    active: None,
+                },
+                LegendEntry {
+                    key: "^P/N",
+                    label: "Cmd",
+                    active: None,
+                },
+                LegendEntry {
+                    key: "^S",
+                    label: "Search",
+                    active: None,
+                },
+                LegendEntry {
+                    key: "^F",
+                    label: "Filter",
+                    active: None,
+                },
+                LegendEntry {
+                    key: "^G",
+                    label: "Goto",
+                    active: None,
+                },
+                LegendEntry {
+                    key: "^L",
+                    label: "Lines",
+                    active: Some(display.line_numbers),
+                },
+                LegendEntry {
+                    key: "^T",
+                    label: "Time",
+                    active: Some(display.timestamps),
+                },
+                LegendEntry {
+                    key: "^B",
+                    label: "Sep",
+                    active: Some(display.command_separators),
+                },
+                LegendEntry {
+                    key: "z",
+                    label: "Fold",
+                    active: None,
+                },
+                LegendEntry {
+                    key: "x",
+                    label: "Unfold",
+                    active: None,
+                },
+                LegendEntry {
+                    key: "X",
+                    label: "UnfoldAll",
+                    active: None,
+                },
+                LegendEntry {
+                    key: "?",
+                    label: "Help",
+                    active: Some(display.help_bar),
+                },
+                LegendEntry {
+                    key: "Esc",
+                    label: "Exit",
+                    active: None,
+                },
+            ],
+            HelpContext::Search => vec![
+                LegendEntry {
+                    key: "Enter",
+                    label: "Confirm",
+                    active: None,
+                },
+                LegendEntry {
+                    key: "Esc",
+                    label: "Cancel",
+                    active: None,
+                },
+                LegendEntry {
+                    key: "↑/↓",
+                    label: "Prev/Next",
+                    active: None,
+                },
+                LegendEntry {
+                    key: "^F",
+                    label: "Filter",
+                    active: None,
+                },
+            ],
+            HelpContext::Filter => vec![
+                LegendEntry {
+                    key: "Enter",
+                    label: "Confirm",
+                    active: None,
+                },
+                LegendEntry {
+                    key: "Esc",
+                    label: "Cancel",
+                    active: None,
+                },
+                LegendEntry {
+                    key: "^S",
+                    label: "Search",
+                    active: None,
+                },
+                LegendEntry {
+                    key: "PgUp/Dn",
+                    label: "Scroll",
+                    active: None,
+                },
+            ],
+            HelpContext::GoToLine => vec![
+                LegendEntry {
+                    key: "Enter",
+                    label: "Go",
+                    active: None,
+                },
+                LegendEntry {
+                    key: "Esc",
+                    label: "Cancel",
+                    active: None,
+                },
+            ],
         }
     }
 
-    /// Renders the help bar at the bottom row of the terminal.
-    ///
-    /// # Arguments
-    ///
-    /// * `out` - Writer to render to
-    /// * `mode` - Current scroll viewer mode
-    /// * `cols` - Terminal width
-    /// * `rows` - Terminal height
-    /// * `theme` - Theme for colors
+    /// Renders the legend bar at the bottom row of the terminal.
     pub fn render<W: Write>(
         out: &mut W,
-        mode: &ScrollViewMode,
+        ctx: HelpContext,
+        display: &DisplaySettings,
         cols: u16,
         rows: u16,
         theme: &Theme,
     ) -> io::Result<()> {
         use crate::chrome::segments::{color_to_bg_ansi, color_to_fg_ansi};
 
-        let text = Self::text_for_mode(mode);
+        let entries = Self::entries_for_context(ctx, display);
         let bg = color_to_bg_ansi(theme.help_bar_bg);
         let fg = color_to_fg_ansi(theme.help_bar_fg);
         let key_fg = color_to_fg_ansi(theme.help_bar_key);
+        let active_fg = color_to_fg_ansi(theme.semantic_success);
         let reset = "\x1b[0m";
 
-        // Move to last row and clear
         write!(out, "\x1b[{};1H\x1b[2K", rows)?;
-
-        // Apply background to entire row
         write!(out, "{}{:width$}{}", bg, "", reset, width = cols as usize)?;
-        write!(out, "\x1b[{};1H{}", rows, bg)?;
+        write!(out, "\x1b[{};1H{}{}", rows, bg, fg)?;
 
-        // Render help text with keys highlighted
-        // Format: "Key:action  Key:action" - highlight the key part
-        let mut chars = text.chars().peekable();
-        let mut in_key = true;
-
-        while let Some(c) = chars.next() {
-            if c == ':' {
-                write!(out, "{}{}", fg, c)?;
-                in_key = false;
-            } else if c == ' ' && chars.peek() == Some(&' ') {
-                // Double space indicates separator between bindings
-                write!(out, "  ")?;
-                chars.next(); // consume second space
-                in_key = true;
-            } else if in_key {
-                write!(out, "{}{}", key_fg, c)?;
-            } else {
-                write!(out, "{}{}", fg, c)?;
+        let mut used = 0usize;
+        let max_cols = cols as usize;
+        for entry in entries {
+            let entry_width =
+                text_width::display_width(entry.key) + 1 + text_width::display_width(entry.label);
+            let separator_width = if used == 0 { 0 } else { 2 };
+            if used + separator_width + entry_width > max_cols {
+                break;
             }
+
+            if separator_width > 0 {
+                write!(out, "  ")?;
+                used += separator_width;
+            }
+
+            write!(out, "{}{} ", key_fg, entry.key)?;
+            match entry.active {
+                Some(true) => write!(out, "{}\x1b[1m{}\x1b[22m{}", active_fg, entry.label, fg)?,
+                _ => write!(out, "{}{}", fg, entry.label)?,
+            }
+            used += entry_width;
         }
 
         write!(out, "{}", reset)?;
@@ -88,16 +204,37 @@ impl HelpBar {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scrollback::features::SearchState;
 
     #[test]
-    fn test_help_text_for_modes() {
-        let normal_help = HelpBar::text_for_mode(&ScrollViewMode::Normal);
-        assert!(normal_help.contains("PgUp"));
-        assert!(normal_help.contains("Ctrl+S"));
+    fn test_entries_for_context_when_normal_contains_expected_bindings() {
+        let display = DisplaySettings::new();
+        let entries = LegendBar::entries_for_context(HelpContext::Normal, &display);
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.key == "^S" && entry.label == "Search")
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.key == "z" && entry.label == "Fold")
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.key == "x" && entry.label == "Unfold")
+        );
+        assert!(
+            entries
+                .iter()
+                .any(|entry| entry.key == "X" && entry.label == "UnfoldAll")
+        );
+    }
 
-        let search_help = HelpBar::text_for_mode(&ScrollViewMode::Search(SearchState::default()));
-        assert!(search_help.contains("Up/Down"));
-        assert!(search_help.contains("Esc"));
+    #[test]
+    fn test_entries_for_context_when_search_contains_prev_next_binding() {
+        let display = DisplaySettings::new();
+        let entries = LegendBar::entries_for_context(HelpContext::Search, &display);
+        assert!(entries.iter().any(|entry| entry.key == "↑/↓"));
     }
 }

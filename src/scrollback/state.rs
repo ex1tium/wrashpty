@@ -1,8 +1,10 @@
 //! Unified scroll view state centered on [`ViewerState`].
-//! Keeps mode, display toggles, and command boundary metadata together.
+//! Keeps display toggles and command boundary metadata together.
+
+use std::collections::HashSet;
 
 use super::boundaries::CommandBoundaries;
-use super::mode::ScrollViewMode;
+use super::separator::SeparatorRegistry;
 
 /// Display settings that persist across mode changes.
 #[derive(Debug, Clone, Default)]
@@ -13,18 +15,18 @@ pub struct DisplaySettings {
     pub timestamps: bool,
     /// Show help bar at bottom of screen (? or F1 toggle).
     pub help_bar: bool,
-    /// Enable URL highlighting (default: true).
-    pub url_highlighting: bool,
     /// Show horizontal rule separators at command boundaries (Ctrl+B toggle).
     pub command_separators: bool,
+    /// Show sticky command headers when scrolling through command output.
+    pub sticky_headers: bool,
 }
 
 impl DisplaySettings {
     /// Creates new settings with defaults.
     pub fn new() -> Self {
         Self {
-            url_highlighting: true,   // On by default
             command_separators: true, // On by default
+            sticky_headers: true,
             ..Default::default()
         }
     }
@@ -32,13 +34,10 @@ impl DisplaySettings {
 
 /// Complete state for the scroll viewer.
 ///
-/// This struct consolidates all scroll viewer state that was previously
-/// scattered across multiple fields in App. It owns the modal state,
-/// display settings, and optional command boundary index.
+/// This struct consolidates all scroll viewer state: display settings,
+/// command boundary index, and cached search results for filter mode.
 #[derive(Debug, Default)]
 pub struct ViewerState {
-    /// Current modal mode (Normal, Search, Filter, etc.).
-    pub mode: ScrollViewMode,
     /// Display toggle settings.
     pub display: DisplaySettings,
     /// Command boundary index for Ctrl+P/N navigation.
@@ -47,6 +46,12 @@ pub struct ViewerState {
     /// Cached search result line indices from last search.
     /// Used by filter mode to show only search result lines.
     pub last_search_lines: Option<Vec<usize>>,
+    /// Registry for rich command separator rendering.
+    pub separator_registry: SeparatorRegistry,
+    /// Collapsed command indices (reserved for future external fold controls).
+    pub collapsed_commands: HashSet<usize>,
+    /// Last rendered first visible buffer line index (0-based) in normal mode.
+    pub last_first_visible_line_idx: Option<usize>,
 }
 
 impl ViewerState {
@@ -54,24 +59,14 @@ impl ViewerState {
     pub fn new() -> Self {
         Self {
             display: DisplaySettings::new(),
+            separator_registry: SeparatorRegistry::with_defaults(),
             ..Default::default()
         }
-    }
-
-    /// Resets mode to Normal (called when exiting special modes).
-    pub fn reset_mode(&mut self) {
-        self.mode = ScrollViewMode::Normal;
     }
 
     /// Returns true if line numbers are currently shown.
     pub fn is_line_numbers_shown(&self) -> bool {
         self.display.line_numbers
-    }
-
-    /// Deprecated alias for [`Self::is_line_numbers_shown`].
-    #[deprecated(note = "Use is_line_numbers_shown() instead.")]
-    pub fn show_line_numbers(&self) -> bool {
-        self.is_line_numbers_shown()
     }
 
     /// Toggles line number display.
@@ -84,12 +79,6 @@ impl ViewerState {
         self.display.timestamps
     }
 
-    /// Deprecated alias for [`Self::is_timestamps_shown`].
-    #[deprecated(note = "Use is_timestamps_shown() instead.")]
-    pub fn show_timestamps(&self) -> bool {
-        self.is_timestamps_shown()
-    }
-
     /// Toggles timestamp display.
     pub fn toggle_timestamps(&mut self) {
         self.display.timestamps = !self.display.timestamps;
@@ -100,12 +89,6 @@ impl ViewerState {
         self.display.help_bar
     }
 
-    /// Deprecated alias for [`Self::is_help_bar_shown`].
-    #[deprecated(note = "Use is_help_bar_shown() instead.")]
-    pub fn show_help_bar(&self) -> bool {
-        self.is_help_bar_shown()
-    }
-
     /// Toggles help bar display.
     pub fn toggle_help_bar(&mut self) {
         self.display.help_bar = !self.display.help_bar;
@@ -114,12 +97,6 @@ impl ViewerState {
     /// Returns true if command separators are currently shown.
     pub fn is_command_separators_shown(&self) -> bool {
         self.display.command_separators
-    }
-
-    /// Deprecated alias for [`Self::is_command_separators_shown`].
-    #[deprecated(note = "Use is_command_separators_shown() instead.")]
-    pub fn show_command_separators(&self) -> bool {
-        self.is_command_separators_shown()
     }
 
     /// Toggles command separator display.
@@ -138,8 +115,8 @@ mod tests {
         assert!(!settings.line_numbers);
         assert!(!settings.timestamps);
         assert!(!settings.help_bar);
-        assert!(settings.url_highlighting); // On by default
         assert!(settings.command_separators); // On by default
+        assert!(settings.sticky_headers);
     }
 
     #[test]
@@ -158,16 +135,5 @@ mod tests {
         assert!(!state.is_timestamps_shown());
         state.toggle_timestamps();
         assert!(state.is_timestamps_shown());
-    }
-
-    #[test]
-    fn test_reset_mode_from_search_returns_normal() {
-        use super::super::features::SearchState;
-
-        let mut state = ViewerState::new();
-        state.mode = ScrollViewMode::Search(SearchState::default());
-
-        state.reset_mode();
-        assert!(matches!(state.mode, ScrollViewMode::Normal));
     }
 }

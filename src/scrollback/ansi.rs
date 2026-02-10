@@ -85,7 +85,7 @@ pub(crate) fn skip_st_terminated(content: &[u8], mut pos: usize) -> usize {
 /// - **Strips**: Other 2-byte escape sequences
 /// - **Strips**: Control characters except TAB (0x09)
 /// - **Preserves**: Printable ASCII, valid UTF-8, and TAB
-pub(crate) fn sanitize_for_display(content: &[u8]) -> Vec<u8> {
+pub fn sanitize_for_display(content: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(content.len());
     let mut i = 0;
 
