@@ -207,12 +207,23 @@ mod full {
                 debug!(command = schema.command, "Persisted new schema to cs_* tables");
                 Ok(())
             }
-            Err(_) => {
-                // Command already exists — update it
-                query.update_schema(schema)
-                    .map_err(|e| CIError::Internal(e.to_string()))?;
-                debug!(command = schema.command, "Updated existing schema in cs_* tables");
-                Ok(())
+            Err(e) => {
+                // Only fall back to update for unique-constraint violations (duplicate command).
+                // Any other error is unexpected and should propagate.
+                let is_constraint = matches!(
+                    &e,
+                    command_schema_sqlite::SqliteError::DatabaseError(
+                        rusqlite::Error::SqliteFailure(err, _)
+                    ) if err.code == rusqlite::ErrorCode::ConstraintViolation
+                );
+                if is_constraint {
+                    query.update_schema(schema)
+                        .map_err(|e| CIError::Internal(e.to_string()))?;
+                    debug!(command = schema.command, "Updated existing schema in cs_* tables");
+                    Ok(())
+                } else {
+                    Err(CIError::Internal(e.to_string()))
+                }
             }
         }
     }
