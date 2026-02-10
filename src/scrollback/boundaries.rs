@@ -198,11 +198,9 @@ impl CommandBoundaries {
 
     /// Looks up the command record associated with a prompt boundary line.
     pub fn record_for_prompt_line(&self, prompt_line: usize) -> Option<&CommandRecord> {
-        let idx = self
-            .records
-            .binary_search_by(|record| record.prompt_line.unwrap_or(usize::MAX).cmp(&prompt_line))
-            .ok()?;
-        self.records.get(idx)
+        self.records
+            .iter()
+            .find(|record| record.prompt_line == Some(prompt_line))
     }
 
     /// Looks up the command record active for a given buffer line index.

@@ -170,8 +170,10 @@ impl AltScreenGuard {
 impl Drop for AltScreenGuard {
     fn drop(&mut self) {
         if self.active {
-            let _ = write!(std::io::stdout(), "\x1b[?1049l");
-            let _ = std::io::stdout().flush();
+            let _ = crossterm::execute!(
+                std::io::stdout(),
+                crossterm::terminal::LeaveAlternateScreen
+            );
         }
     }
 }

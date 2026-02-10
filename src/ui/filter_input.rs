@@ -13,6 +13,8 @@ use crate::chrome::theme::Theme;
 pub struct FilterInput {
     /// Current filter text.
     text: String,
+    /// Lowercased version of `text`, cached for efficient matching.
+    text_lower: String,
     /// Whether the filter is currently active (accepting input).
     active: bool,
 }
@@ -22,6 +24,7 @@ impl FilterInput {
     pub fn new() -> Self {
         Self {
             text: String::new(),
+            text_lower: String::new(),
             active: false,
         }
     }
@@ -54,22 +57,30 @@ impl FilterInput {
     /// Deactivates and clears the filter text.
     pub fn clear_and_deactivate(&mut self) {
         self.text.clear();
+        self.text_lower.clear();
         self.active = false;
     }
 
     /// Clears the filter text without changing active state.
     pub fn clear(&mut self) {
         self.text.clear();
+        self.text_lower.clear();
     }
 
     /// Types a character into the filter.
     pub fn type_char(&mut self, c: char) {
         self.text.push(c);
+        // Extend the cached lowercase with the lowercased char
+        for lc in c.to_lowercase() {
+            self.text_lower.push(lc);
+        }
     }
 
     /// Deletes the last character. Returns true if text is now empty.
     pub fn backspace(&mut self) -> bool {
         self.text.pop();
+        // Rebuild the cache (pop doesn't map 1:1 for multi-byte lowercase)
+        self.text_lower = self.text.to_lowercase();
         self.text.is_empty()
     }
 
@@ -80,8 +91,7 @@ impl FilterInput {
         if self.text.is_empty() {
             return true;
         }
-        let filter_lower = self.text.to_lowercase();
-        text.to_lowercase().contains(&filter_lower)
+        text.to_lowercase().contains(&self.text_lower)
     }
 
     /// Returns styled spans for rendering the filter bar.

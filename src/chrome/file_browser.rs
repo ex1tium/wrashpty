@@ -1156,13 +1156,12 @@ fn format_date_compact(time: Option<SystemTime>) -> String {
     } else if days < 7 {
         format!("{}d", days)
     } else if days < 365 {
-        let months = [
-            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-        ];
-        let day_of_year = (days % 365) as usize;
-        let month_idx = (day_of_year / 30).min(11);
-        let day = (day_of_year % 30) + 1;
-        format!("{} {:2}", months[month_idx], day)
+        let months = days / 30;
+        if months < 1 {
+            format!("{}d", days)
+        } else {
+            format!("{}mo", months)
+        }
     } else {
         format!("{}y", days / 365)
     }
