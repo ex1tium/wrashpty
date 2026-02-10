@@ -25,7 +25,7 @@ mod tests {
     fn test_dim_style_adds_modifier() {
         let base = Style::default().fg(Color::Red);
         let dimmed = dim_style(base);
-        assert!(dimmed.add_modifier == Modifier::DIM);
+        assert!(dimmed.add_modifier.contains(Modifier::DIM));
     }
 
     #[test]

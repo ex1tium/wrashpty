@@ -1152,18 +1152,24 @@ impl App {
     }
 
     /// Returns the viewport height for scroll calculations.
+    ///
+    /// Accounts for rows reserved by the topbar (when scrolled) and the
+    /// legend/help bar (when visible).
     pub(super) fn viewport_height(&self) -> usize {
-        match TerminalGuard::get_size() {
-            Ok((_, rows)) => {
-                // Reserve 1 row for topbar when scrolled (scroll info shown in topbar)
-                if self.scroll_state.is_scrolled() {
-                    (rows as usize).saturating_sub(1)
-                } else {
-                    rows as usize
-                }
-            }
+        let rows = match TerminalGuard::get_size() {
+            Ok((_, rows)) => rows as usize,
             Err(_) => 24, // Fallback
+        };
+        let mut reserved = 0;
+        // Reserve 1 row for topbar when scrolled (scroll info shown in topbar)
+        if self.scroll_state.is_scrolled() {
+            reserved += 1;
         }
+        // Reserve 1 row for the legend/help bar when visible
+        if self.viewer_state.is_help_bar_shown() {
+            reserved += 1;
+        }
+        rows.saturating_sub(reserved)
     }
 
     /// Creates a TopbarState with current environment and UI state.
@@ -1492,16 +1498,16 @@ impl App {
     /// in Edit mode. Enters the alternate screen buffer so the main screen
     /// (prompt, previous output) is preserved and restored on exit.
     pub(super) fn run_scroll_view(&mut self) -> Result<()> {
-        use std::io::Write;
-
         // Ensure raw mode is active - reedline may have toggled terminal modes
         self.terminal_guard
             .ensure_raw_mode()
             .context("Failed to ensure raw mode for scroll view")?;
 
         // Enter alternate screen — saves main screen atomically
-        write!(std::io::stdout(), "\x1b[?1049h")?;
-        std::io::stdout().flush()?;
+        crossterm::execute!(
+            std::io::stdout(),
+            crossterm::terminal::EnterAlternateScreen
+        )?;
         let mut alt_guard = super::AltScreenGuard::new();
         alt_guard.active = true;
 

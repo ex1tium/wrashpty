@@ -1008,22 +1008,34 @@ impl CommandEditState {
 // Adaptive Edit Mode Layout
 // ============================================================================
 
-/// Layout areas for the adaptive edit mode UI.
+/// Layout rectangles for the adaptive edit mode UI.
 ///
 /// The edit mode progressively drops optional elements based on available height:
 /// - Height >= 11: Full layout (spacers + prev/next suggestions)
 /// - Height 9-10: Drop spacer rows
 /// - Height 7-8: Also drop prev/next suggestion rows
 /// - Height < 7: Too small for edit mode (returns None)
+///
+/// Optional fields (`prev_suggestion`, `next_suggestion`) are `None` when
+/// the terminal is too short to display them.
 pub struct EditModeLayout {
+    /// Title row showing the edit mode header.
     pub title: Rect,
+    /// Horizontal separator below the title.
     pub separator: Rect,
+    /// Row for the previous suggestion hint (hidden when height < 9).
     pub prev_suggestion: Option<Rect>,
+    /// Scrollable token strip showing bracketed command tokens.
     pub token_strip: Rect,
+    /// Row for the next suggestion hint (hidden when height < 9).
     pub next_suggestion: Option<Rect>,
+    /// Text input area for editing the selected token.
     pub edit_input: Rect,
+    /// Preview of the assembled command result.
     pub result_preview: Rect,
+    /// Bottom border row.
     pub border: Rect,
+    /// Key-binding hints row.
     pub keybinds: Rect,
 }
 
@@ -1225,8 +1237,9 @@ pub fn render_edit_mode_shared(
     }
 
     let token_line = Line::from(spans);
+    let scroll_offset_u16 = (scroll_offset.min(u16::MAX as usize)) as u16;
     Paragraph::new(token_line)
-        .scroll((0, scroll_offset as u16))
+        .scroll((0, scroll_offset_u16))
         .render(layout.token_strip, buffer);
 
     // Next suggestion row

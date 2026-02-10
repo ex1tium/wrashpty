@@ -265,17 +265,22 @@ impl ScrollViewer {
 
                 // Content: with search highlights if available, otherwise plain
                 if let Some(search) = config.search {
-                    let line_matches: Vec<_> = search.matches_on_line(*original_idx).collect();
-                    if !line_matches.is_empty() {
-                        Self::render_line_with_highlights(
-                            out,
-                            line.content(),
-                            content_cols,
-                            *original_idx,
-                            &line_matches,
-                            current_match,
-                            config.theme.expect("search requires theme"),
-                        )?;
+                    if let Some(theme) = config.theme {
+                        let line_matches: Vec<_> =
+                            search.matches_on_line(*original_idx).collect();
+                        if !line_matches.is_empty() {
+                            Self::render_line_with_highlights(
+                                out,
+                                line.content(),
+                                content_cols,
+                                *original_idx,
+                                &line_matches,
+                                current_match,
+                                theme,
+                            )?;
+                        } else {
+                            write_truncated_content(out, line.content(), content_cols)?;
+                        }
                     } else {
                         write_truncated_content(out, line.content(), content_cols)?;
                     }
@@ -454,17 +459,22 @@ impl ScrollViewer {
 
                 // Content: with search highlights if available
                 if let Some(search) = config.search {
-                    let line_matches: Vec<_> = search.matches_on_line(line_index).collect();
-                    if !line_matches.is_empty() {
-                        Self::render_line_with_highlights(
-                            out,
-                            line.content(),
-                            content_cols,
-                            line_index,
-                            &line_matches,
-                            current_match,
-                            config.theme.expect("search requires theme"),
-                        )?;
+                    if let Some(theme) = config.theme {
+                        let line_matches: Vec<_> =
+                            search.matches_on_line(line_index).collect();
+                        if !line_matches.is_empty() {
+                            Self::render_line_with_highlights(
+                                out,
+                                line.content(),
+                                content_cols,
+                                line_index,
+                                &line_matches,
+                                current_match,
+                                theme,
+                            )?;
+                        } else {
+                            write_truncated_content(out, line.content(), content_cols)?;
+                        }
                     } else {
                         write_truncated_content(out, line.content(), content_cols)?;
                     }

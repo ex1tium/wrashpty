@@ -76,7 +76,7 @@ pub fn tree_chars_for_set(set: SymbolSet) -> &'static TreeChars {
 ///
 /// # Display width
 ///
-/// For depth > 0, the display width is always `(depth * 3) + 1` columns.
+/// For depth > 0, the display width is always `depth * 3` columns.
 /// For depth 0 (root-level items), only the expand indicator is shown (1 column).
 pub fn tree_prefix(line: &TreeLine, chars: &TreeChars) -> String {
     let mut result = String::new();

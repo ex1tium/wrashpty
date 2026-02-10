@@ -921,7 +921,7 @@ impl Panel for HistoryBrowserPanel {
     }
 
     fn render(&mut self, buffer: &mut Buffer, area: Rect) {
-        if area.height < 3 || area.width < 20 {
+        if area.height < 6 || area.width < 20 {
             return;
         }
 
