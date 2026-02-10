@@ -905,6 +905,11 @@ impl HistoryStore {
             .and_then(|ci| ci.expand_alias(text))
     }
 
+    /// Returns a reference to the schema provider, if intelligence is available.
+    pub fn schema_provider(&self) -> Option<&dyn crate::intelligence::SchemaProvider> {
+        self.intelligence.as_ref().map(|ci| ci.schema_provider())
+    }
+
     /// Returns whether intelligence is available and enabled.
     pub fn is_intelligence_enabled(&self) -> bool {
         self.intelligence
@@ -913,10 +918,23 @@ impl HistoryStore {
             .unwrap_or(false)
     }
 
-    /// Returns whether intelligence is available and enabled.
-    #[deprecated(note = "Use is_intelligence_enabled() instead")]
-    pub fn has_intelligence(&self) -> bool {
-        self.is_intelligence_enabled()
+    /// Returns the current schema mode from persistent settings.
+    pub fn get_schema_mode(&self) -> crate::intelligence::SchemaMode {
+        match self.get_setting("intelligence.schema_mode") {
+            Ok(Some(value)) => crate::intelligence::SchemaMode::from_setting(&value),
+            _ => crate::intelligence::SchemaMode::default(),
+        }
+    }
+
+    /// Sets the schema mode and persists it.
+    pub fn set_schema_mode(&mut self, mode: crate::intelligence::SchemaMode) {
+        if let Err(e) = self.set_setting("intelligence.schema_mode", mode.as_setting()) {
+            warn!("Failed to persist intelligence.schema_mode setting: {}", e);
+        }
+
+        if let Some(ref mut ci) = self.intelligence {
+            ci.set_schema_mode(mode);
+        }
     }
 
     /// Enables or disables intelligence.

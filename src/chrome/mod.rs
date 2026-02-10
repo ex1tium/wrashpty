@@ -6,12 +6,14 @@
 pub mod buffer_convert;
 pub mod command_edit;
 pub mod command_palette;
+pub mod commands_panel;
 pub mod core;
 pub mod file_browser;
 pub mod file_tree;
 pub mod help_panel;
 pub mod history_browser;
 pub mod panel;
+pub mod schema_browser;
 pub mod segments;
 pub mod symbols;
 pub mod tabbed_panel;

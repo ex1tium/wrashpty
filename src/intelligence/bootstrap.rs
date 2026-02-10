@@ -1,7 +1,7 @@
 //! Bootstrap module for seeding initial command knowledge.
 //!
-//! This module seeds the command hierarchy table from the embedded schema
-//! index on first run. After bootstrap, learned data takes over for ranking.
+//! This module seeds the command hierarchy table from the schema provider
+//! on first run. After bootstrap, learned data takes over for ranking.
 
 use rusqlite::{Connection, OptionalExtension};
 use tracing::{debug, info};
@@ -9,14 +9,14 @@ use tracing::{debug, info};
 use command_schema_core::SubcommandSchema;
 
 use super::error::CIError;
-use super::schema_index::SchemaIndex;
+use super::schema_provider::SchemaProvider;
 
-/// Seeds the command hierarchy from schema index data if bootstrap has not run.
+/// Seeds the command hierarchy from schema provider data if bootstrap has not run.
 ///
 /// This should be called during CommandIntelligence initialization.
 /// Uses `INSERT OR IGNORE` to merge bootstrap data with existing learned data
 /// without overwriting user usage patterns.
-pub fn bootstrap_if_empty(conn: &Connection, schema_index: &SchemaIndex) -> Result<(), CIError> {
+pub fn bootstrap_if_empty(conn: &Connection, provider: &dyn SchemaProvider) -> Result<(), CIError> {
     let bootstrapped: bool = conn
         .query_row(
             "SELECT value = 'true' FROM ci_sync_state WHERE key = 'bootstrap.completed'",
@@ -31,8 +31,8 @@ pub fn bootstrap_if_empty(conn: &Connection, schema_index: &SchemaIndex) -> Resu
         return Ok(());
     }
 
-    info!("Bootstrapping command hierarchy from schema index");
-    seed_command_knowledge(conn, schema_index)?;
+    info!("Bootstrapping command hierarchy from schema provider");
+    seed_command_knowledge(conn, provider)?;
 
     conn.execute(
         "INSERT OR REPLACE INTO ci_sync_state (key, value) VALUES ('bootstrap.completed', 'true')",
@@ -43,23 +43,23 @@ pub fn bootstrap_if_empty(conn: &Connection, schema_index: &SchemaIndex) -> Resu
     Ok(())
 }
 
-/// Seeds hierarchy knowledge from schema index in a single transaction.
-fn seed_command_knowledge(conn: &Connection, schema_index: &SchemaIndex) -> Result<(), CIError> {
+/// Seeds hierarchy knowledge from schema provider in a single transaction.
+fn seed_command_knowledge(conn: &Connection, provider: &dyn SchemaProvider) -> Result<(), CIError> {
     let now = chrono::Utc::now().timestamp();
 
     let tx = conn.unchecked_transaction()?;
-    seed_from_schema_index(&tx, schema_index, now)?;
+    seed_from_provider(&tx, provider, now)?;
     tx.commit()?;
     Ok(())
 }
 
-/// Seeds all known commands and nested subcommands from schema index.
-fn seed_from_schema_index(
+/// Seeds all known commands and nested subcommands from schema provider.
+fn seed_from_provider(
     conn: &Connection,
-    schema_index: &SchemaIndex,
+    provider: &dyn SchemaProvider,
     timestamp: i64,
 ) -> Result<(), CIError> {
-    let mut schemas: Vec<_> = schema_index.all_schemas().collect();
+    let mut schemas: Vec<_> = provider.all_schemas().collect();
     schemas.sort_by(|a, b| a.command.cmp(&b.command));
 
     for schema in &schemas {
@@ -69,7 +69,7 @@ fn seed_from_schema_index(
 
     debug!(
         commands = schemas.len(),
-        "Seeded hierarchy from schema index"
+        "Seeded hierarchy from schema provider"
     );
     Ok(())
 }
@@ -160,6 +160,7 @@ mod tests {
 
     use super::*;
     use crate::intelligence::db_schema;
+    use crate::intelligence::schema_provider::tests::TestSchemaProvider;
 
     fn setup_test_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
@@ -167,7 +168,7 @@ mod tests {
         conn
     }
 
-    fn sample_schema_index() -> SchemaIndex {
+    fn sample_provider() -> TestSchemaProvider {
         let mut git = CommandSchema::new("git", SchemaSource::Bootstrap);
         let mut remote = SubcommandSchema::new("remote");
         remote.subcommands = vec![
@@ -187,15 +188,15 @@ mod tests {
             SubcommandSchema::new("test"),
         ];
 
-        SchemaIndex::from_schemas(vec![git, cargo])
+        TestSchemaProvider::from_schemas(vec![git, cargo])
     }
 
     #[test]
     fn test_bootstrap_if_empty() {
         let conn = setup_test_db();
-        let schema_index = sample_schema_index();
+        let provider = sample_provider();
 
-        bootstrap_if_empty(&conn, &schema_index).unwrap();
+        bootstrap_if_empty(&conn, &provider).unwrap();
 
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM ci_command_hierarchy", [], |row| {
@@ -228,9 +229,9 @@ mod tests {
     #[test]
     fn test_bootstrap_skips_if_already_completed() {
         let conn = setup_test_db();
-        let schema_index = sample_schema_index();
+        let provider = sample_provider();
 
-        bootstrap_if_empty(&conn, &schema_index).unwrap();
+        bootstrap_if_empty(&conn, &provider).unwrap();
 
         let count_after_first: i64 = conn
             .query_row("SELECT COUNT(*) FROM ci_command_hierarchy", [], |row| {
@@ -239,7 +240,7 @@ mod tests {
             .unwrap();
         assert!(count_after_first > 0);
 
-        bootstrap_if_empty(&conn, &schema_index).unwrap();
+        bootstrap_if_empty(&conn, &provider).unwrap();
 
         let count_after_second: i64 = conn
             .query_row("SELECT COUNT(*) FROM ci_command_hierarchy", [], |row| {
@@ -252,7 +253,7 @@ mod tests {
     #[test]
     fn test_bootstrap_merges_with_existing_data() {
         let conn = setup_test_db();
-        let schema_index = sample_schema_index();
+        let provider = sample_provider();
         let now = chrono::Utc::now().timestamp();
 
         conn.execute(
@@ -265,7 +266,7 @@ mod tests {
             [now],
         ).unwrap();
 
-        bootstrap_if_empty(&conn, &schema_index).unwrap();
+        bootstrap_if_empty(&conn, &provider).unwrap();
 
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM ci_command_hierarchy", [], |row| {
@@ -287,8 +288,8 @@ mod tests {
     #[test]
     fn test_nested_commands_seeded() {
         let conn = setup_test_db();
-        let schema_index = sample_schema_index();
-        bootstrap_if_empty(&conn, &schema_index).unwrap();
+        let provider = sample_provider();
+        bootstrap_if_empty(&conn, &provider).unwrap();
 
         let remote_id: i64 = conn
             .query_row(
