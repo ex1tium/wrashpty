@@ -1174,7 +1174,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_file_browser_new() {
+    #[allow(non_snake_case)]
+    fn test_FileBrowserPanel_new_with_default_theme_and_nerdfont_shows_hidden_false_and_sorted_by_name() {
         let panel = FileBrowserPanel::new(&AMBER_THEME, SymbolSet::NerdFont);
         assert!(!panel.tree.show_hidden());
         assert_eq!(panel.tree.sort_mode(), SortMode::Name);

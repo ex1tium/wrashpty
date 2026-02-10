@@ -220,6 +220,29 @@ impl ScrollViewer {
         rows: u16,
         config: &RenderConfig,
     ) -> io::Result<RenderStats> {
+        // Hide cursor during render; restore on all exit paths (including errors)
+        crossterm::queue!(out, crossterm::cursor::Hide)?;
+        let result = Self::render_viewport(out, buffer, offset, cols, rows, config);
+        // Always restore cursor visibility, even if rendering failed
+        let _ = crossterm::queue!(out, crossterm::cursor::Show);
+        let _ = out.flush();
+        result
+    }
+
+    /// Inner rendering implementation called by `render`.
+    ///
+    /// Cursor hide/show is managed by the caller to guarantee restore on error.
+    fn render_viewport<W: Write>(
+        out: &mut W,
+        buffer: &ScrollbackBuffer,
+        offset: usize,
+        cols: u16,
+        rows: u16,
+        config: &RenderConfig,
+    ) -> io::Result<RenderStats> {
+        use crossterm::cursor::MoveTo;
+        use crossterm::terminal::{Clear, ClearType};
+
         let total = buffer.len();
         let start_row = config.start_row.max(1) as usize;
         let content_rows = rows as usize;
@@ -231,9 +254,6 @@ impl ScrollViewer {
         let content_cols = (cols as usize).saturating_sub(gutter_width);
 
         let now = std::time::Instant::now();
-
-        // Hide cursor during render
-        write!(out, "\x1b[?25l")?;
 
         let mut current_row = start_row;
         let max_row = start_row + content_rows;
@@ -251,7 +271,7 @@ impl ScrollViewer {
             for (original_idx, line) in &lines {
                 let line_number = *original_idx + 1;
 
-                write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
+                crossterm::queue!(out, MoveTo(0, (current_row - 1) as u16), Clear(ClearType::CurrentLine))?;
 
                 Self::render_gutter(
                     out,
@@ -289,7 +309,15 @@ impl ScrollViewer {
                 }
 
                 if line.is_truncated() {
-                    write!(out, "\x1b[7m>\x1b[27m")?;
+                    crossterm::queue!(
+                        out,
+                        crossterm::style::SetAttribute(crossterm::style::Attribute::Reverse)
+                    )?;
+                    write!(out, ">")?;
+                    crossterm::queue!(
+                        out,
+                        crossterm::style::SetAttribute(crossterm::style::Attribute::NoReverse)
+                    )?;
                 }
 
                 current_row += 1;
@@ -298,12 +326,9 @@ impl ScrollViewer {
 
             // Clear remaining rows
             while current_row < max_row {
-                write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
+                crossterm::queue!(out, MoveTo(0, (current_row - 1) as u16), Clear(ClearType::CurrentLine))?;
                 current_row += 1;
             }
-
-            write!(out, "\x1b[?25h")?;
-            out.flush()?;
 
             Ok(RenderStats {
                 lines_rendered: rendered,
@@ -389,7 +414,7 @@ impl ScrollViewer {
 
             // BEGIN marker
             if show_begin {
-                write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
+                crossterm::queue!(out, MoveTo(0, (current_row - 1) as u16), Clear(ClearType::CurrentLine))?;
                 Self::render_boundary_marker_styled(
                     out,
                     cols as usize,
@@ -402,7 +427,7 @@ impl ScrollViewer {
 
             if let Some(record) = sticky_record {
                 if current_row < max_row {
-                    write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
+                    crossterm::queue!(out, MoveTo(0, (current_row - 1) as u16), Clear(ClearType::CurrentLine))?;
                     Self::render_command_separator(
                         out,
                         cols as usize,
@@ -424,7 +449,7 @@ impl ScrollViewer {
                     if current_row >= max_row {
                         break;
                     }
-                    write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
+                    crossterm::queue!(out, MoveTo(0, (current_row - 1) as u16), Clear(ClearType::CurrentLine))?;
                     Self::render_command_separator(
                         out,
                         cols as usize,
@@ -445,7 +470,7 @@ impl ScrollViewer {
                     continue;
                 };
 
-                write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
+                crossterm::queue!(out, MoveTo(0, (current_row - 1) as u16), Clear(ClearType::CurrentLine))?;
 
                 Self::render_gutter(
                     out,
@@ -483,7 +508,15 @@ impl ScrollViewer {
                 }
 
                 if line.is_truncated() {
-                    write!(out, "\x1b[7m>\x1b[27m")?;
+                    crossterm::queue!(
+                        out,
+                        crossterm::style::SetAttribute(crossterm::style::Attribute::Reverse)
+                    )?;
+                    write!(out, ">")?;
+                    crossterm::queue!(
+                        out,
+                        crossterm::style::SetAttribute(crossterm::style::Attribute::NoReverse)
+                    )?;
                 }
 
                 current_row += 1;
@@ -492,7 +525,7 @@ impl ScrollViewer {
 
             // END marker
             if show_end && current_row < max_row {
-                write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
+                crossterm::queue!(out, MoveTo(0, (current_row - 1) as u16), Clear(ClearType::CurrentLine))?;
                 Self::render_boundary_marker_styled(
                     out,
                     cols as usize,
@@ -505,12 +538,9 @@ impl ScrollViewer {
 
             // Clear remaining rows
             while current_row < max_row {
-                write!(out, "\x1b[{};1H\x1b[2K", current_row)?;
+                crossterm::queue!(out, MoveTo(0, (current_row - 1) as u16), Clear(ClearType::CurrentLine))?;
                 current_row += 1;
             }
-
-            write!(out, "\x1b[?25h")?;
-            out.flush()?;
 
             Ok(RenderStats {
                 lines_rendered: rendered,
