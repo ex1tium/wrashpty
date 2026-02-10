@@ -347,6 +347,10 @@ fn count_flag_value_pairs(tokens: &[super::types::AnalyzedToken]) -> usize {
 /// (discovery, import) rather than incrementally from each command execution.
 /// The ci_* hierarchy/sequences/flags tables capture equivalent usage
 /// patterns through the learned patterns pipeline.
+///
+/// Takes `&dyn SchemaProvider` (immutable) intentionally: this function only
+/// reads from the provider (to check `is_bundled`). If future phases add
+/// incremental writes, the signature should change to `&mut dyn SchemaProvider`.
 pub(crate) fn upsert_schema_from_tokens(
     _conn: &Connection,
     tokens: &[super::types::AnalyzedToken],

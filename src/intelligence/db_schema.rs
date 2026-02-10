@@ -86,8 +86,10 @@ fn apply_migrations(conn: &Connection, from_version: i32, to_version: i32) -> Re
         // and ci_suggestion_cache (unused dead code).
         conn.execute("DROP TABLE IF EXISTS ci_command_schemas", [])?;
         conn.execute("DROP TABLE IF EXISTS ci_suggestion_cache", [])?;
+        // Indexes from ci_command_schemas
         conn.execute("DROP INDEX IF EXISTS idx_schema_command", [])?;
         conn.execute("DROP INDEX IF EXISTS idx_schema_source", [])?;
+        // Index from ci_suggestion_cache
         conn.execute("DROP INDEX IF EXISTS idx_ci_cache_expires", [])?;
         debug!("Applied schema v3 migration: dropped ci_command_schemas and ci_suggestion_cache");
     }
@@ -748,6 +750,40 @@ mod tests {
         // Create schema twice - should not error
         create_schema(&conn).unwrap();
         create_schema(&conn).unwrap();
+    }
+
+    #[test]
+    fn test_downgrade_rejected() {
+        let conn = Connection::open_in_memory().unwrap();
+
+        // Simulate a database from a newer version
+        conn.execute(
+            "CREATE TABLE ci_schema_version (
+                version INTEGER PRIMARY KEY,
+                applied_at INTEGER NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ci_schema_version (version, applied_at) VALUES (999, 0)",
+            [],
+        )
+        .unwrap();
+
+        let result = create_schema(&conn);
+        assert!(result.is_err(), "Should reject downgrade from future version");
+        let err = result.unwrap_err();
+        match err {
+            CIError::SchemaVersion {
+                expected,
+                found,
+            } => {
+                assert_eq!(expected, SCHEMA_VERSION);
+                assert_eq!(found, 999);
+            }
+            other => panic!("Expected SchemaVersion error, got: {:?}", other),
+        }
     }
 
     #[test]

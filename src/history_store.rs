@@ -918,8 +918,14 @@ impl HistoryStore {
             .unwrap_or(false)
     }
 
-    /// Returns the current schema mode from persistent settings.
+    /// Returns the current schema mode.
+    ///
+    /// Reads from the in-memory `CommandIntelligence` instance when available
+    /// (avoiding a SQLite round-trip), falling back to the persisted setting.
     pub fn get_schema_mode(&self) -> crate::intelligence::SchemaMode {
+        if let Some(ref ci) = self.intelligence {
+            return ci.schema_mode();
+        }
         match self.get_setting("intelligence.schema_mode") {
             Ok(Some(value)) => crate::intelligence::SchemaMode::from_setting(&value),
             _ => crate::intelligence::SchemaMode::default(),

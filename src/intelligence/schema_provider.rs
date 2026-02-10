@@ -62,11 +62,17 @@ impl SchemaMode {
     }
 
     /// Deserializes from a settings string.
+    ///
+    /// Unknown values fall back to `SchemaEnabled` for forward-compatibility.
     pub fn from_setting(s: &str) -> Self {
         match s {
             "history-only" => Self::HistoryOnly,
+            "schema-enabled" => Self::SchemaEnabled,
             "full-library" => Self::FullLibrary,
-            _ => Self::SchemaEnabled,
+            other => {
+                tracing::debug!(value = other, "Unknown schema mode setting, defaulting to SchemaEnabled");
+                Self::SchemaEnabled
+            }
         }
     }
 }
@@ -97,7 +103,11 @@ pub trait SchemaProvider: Send {
     /// This is a manual trigger only — never called automatically.
     fn discover(&mut self, command: &str) -> Result<CommandSchema, CIError>;
 
-    /// Stores a learned schema (e.g., from discovery or sync).
+    /// Stores a learned schema, persisting to SQLite `cs_*` tables when available.
+    ///
+    /// The `FullSchemaProvider` implementation auto-persists to the database
+    /// for cross-session durability. If persistence fails, the in-memory cache
+    /// is still updated and the error is logged.
     fn store(&mut self, schema: CommandSchema) -> Result<(), CIError>;
 
     /// Inserts or updates a schema as a runtime overlay for non-bundled commands.
@@ -138,6 +148,9 @@ mod full {
 
         /// Learned schemas populated from cs_* tables, discovery, or import.
         learned: HashMap<String, CommandSchema>,
+
+        /// Database path for automatic persistence in `store()`.
+        db_path: Option<std::path::PathBuf>,
     }
 
     impl FullSchemaProvider {
@@ -184,10 +197,13 @@ mod full {
                 None
             };
 
+            let db_path = conn.path().map(std::path::PathBuf::from);
+
             Ok(Self {
                 #[cfg(feature = "bundled-schemas")]
                 bundled,
                 learned,
+                db_path,
             })
         }
     }
@@ -320,14 +336,22 @@ mod full {
                 }
             }
 
-            // Sort: command name matches first, then by confidence
-            results.sort_by(|a, b| {
-                let a_exact = a.command.to_lowercase().starts_with(&query_lower);
-                let b_exact = b.command.to_lowercase().starts_with(&query_lower);
-                b_exact
-                    .cmp(&a_exact)
+            // Pre-compute prefix matches to avoid O(N log N) allocations in the comparator
+            let mut tagged: Vec<(bool, SchemaSearchResult)> = results
+                .into_iter()
+                .map(|r| {
+                    let is_prefix = r.command.to_lowercase().starts_with(&query_lower);
+                    (is_prefix, r)
+                })
+                .collect();
+
+            // Sort: prefix matches first, then by confidence
+            tagged.sort_by(|(a_prefix, a), (b_prefix, b)| {
+                b_prefix
+                    .cmp(a_prefix)
                     .then(b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal))
             });
+            results = tagged.into_iter().map(|(_, r)| r).collect();
 
             results
         }
@@ -361,7 +385,21 @@ mod full {
         }
 
         fn store(&mut self, schema: CommandSchema) -> Result<(), CIError> {
-            // Store in learned cache
+            // Persist to SQLite cs_* tables for cross-session durability
+            if let Some(ref path) = self.db_path {
+                match Connection::open(path) {
+                    Ok(persist_conn) => {
+                        if let Err(e) = persist_schema(&persist_conn, &schema) {
+                            debug!(command = schema.command, error = %e, "Failed to persist schema (in-memory cache still updated)");
+                        }
+                    }
+                    Err(e) => {
+                        debug!(error = %e, "Failed to open connection for schema persistence");
+                    }
+                }
+            }
+
+            // Always update in-memory cache
             self.learned.insert(schema.command.clone(), schema);
             Ok(())
         }
@@ -369,6 +407,7 @@ mod full {
         fn add_overlay(&mut self, schema: CommandSchema) {
             // Skip if this command is bundled (bundled schemas are authoritative for structure)
             if self.is_bundled(&schema.command) {
+                debug!(command = schema.command, "Skipping overlay for bundled command");
                 return;
             }
             self.learned.insert(schema.command.clone(), schema);
@@ -552,7 +591,12 @@ pub(crate) mod tests {
             let query_lower = query.to_lowercase();
             self.schemas
                 .values()
-                .filter(|s| s.command.to_lowercase().contains(&query_lower))
+                .filter(|s| {
+                    s.command.to_lowercase().contains(&query_lower)
+                        || s.description
+                            .as_ref()
+                            .is_some_and(|d| d.to_lowercase().contains(&query_lower))
+                })
                 .map(|s| SchemaSearchResult {
                     command: s.command.clone(),
                     description: s.description.clone(),

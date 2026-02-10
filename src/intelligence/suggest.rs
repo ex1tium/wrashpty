@@ -273,6 +273,13 @@ fn template_token_for_context(preview: &str, context: &SuggestionContext) -> Opt
         .map(ToString::to_string)
 }
 
+/// Score multiplier applied to schema-sourced suggestions.
+///
+/// Schema suggestions are slightly deprioritized relative to learned hierarchy
+/// suggestions (which have real frequency/recency data) to avoid overwhelming
+/// the user with schema entries they've never used.
+const SCHEMA_SCORE_FACTOR: f64 = 0.9;
+
 /// Suggests from stored command schemas.
 ///
 /// This integrates extracted/bootstrapped command schemas into the same
@@ -368,6 +375,8 @@ fn suggest_from_schema(provider: &dyn SchemaProvider, context: &SuggestionContex
                 }
             }
         }
+        // AfterPipe is handled by the early return above; this arm is
+        // unreachable but required for exhaustiveness.
         PositionType::AfterPipe => {}
     }
 
@@ -385,7 +394,7 @@ fn schema_suggestion(
         text,
         source: SuggestionSource::Schema,
         score: scoring::compute_score(1, last_seen, None, context_match, SuggestionSource::Schema)
-            * 0.9,
+            * SCHEMA_SCORE_FACTOR,
         metadata: SuggestionMetadata {
             frequency: 1,
             last_seen: Some(last_seen),
@@ -1142,6 +1151,43 @@ mod tests {
                 .iter()
                 .map(|s| (&s.text, s.source))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_history_only_mode_suppresses_schema_suggestions() {
+        let conn = setup_test_db();
+
+        let mut schema = command_schema_core::CommandSchema::new("mytool", SchemaSource::Bootstrap);
+        schema
+            .subcommands
+            .push(SubcommandSchema::new("schema-only-sub"));
+        let provider = TestSchemaProvider::from_schemas(vec![schema]);
+
+        let context = SuggestionContext {
+            preceding_tokens: vec![AnalyzedToken::new(
+                "mytool",
+                crate::chrome::command_edit::TokenType::Command,
+                0,
+            )],
+            position: PositionType::Subcommand,
+            ..Default::default()
+        };
+
+        // With SchemaEnabled, schema suggestions should appear
+        let enabled = suggest(&conn, &provider, SchemaMode::SchemaEnabled, &context, 10);
+        assert!(
+            enabled.iter().any(|s| s.text == "schema-only-sub"),
+            "SchemaEnabled should include schema suggestions, got: {:?}",
+            enabled.iter().map(|s| &s.text).collect::<Vec<_>>()
+        );
+
+        // With HistoryOnly, schema suggestions should be suppressed
+        let history_only = suggest(&conn, &provider, SchemaMode::HistoryOnly, &context, 10);
+        assert!(
+            !history_only.iter().any(|s| s.text == "schema-only-sub"),
+            "HistoryOnly should suppress schema suggestions, got: {:?}",
+            history_only.iter().map(|s| &s.text).collect::<Vec<_>>()
         );
     }
 
