@@ -246,14 +246,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_commands_panel_new() {
+    fn test_commands_panel_new_initializes_active_sub_and_title() {
         let panel = CommandsPanel::new(&AMBER_THEME, GlyphTier::NerdFont);
         assert_eq!(panel.active_sub, SUB_DISCOVER);
         assert_eq!(panel.title(), "Commands");
     }
 
     #[test]
-    fn test_commands_panel_sub_tab_switching() {
+    fn test_commands_panel_next_prev_sub_wraps_correctly() {
         let mut panel = CommandsPanel::new(&AMBER_THEME, GlyphTier::NerdFont);
         assert_eq!(panel.active_sub, SUB_DISCOVER);
 
@@ -268,7 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn test_commands_panel_tab_key_switches() {
+    fn test_commands_panel_handle_input_tab_and_backtab_switches_subs() {
         let mut panel = CommandsPanel::new(&AMBER_THEME, GlyphTier::NerdFont);
         assert_eq!(panel.active_sub, SUB_DISCOVER);
 
@@ -284,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn test_commands_panel_preferred_height_includes_inner_tabs() {
+    fn test_commands_panel_preferred_height_includes_subpanel_and_tabs() {
         let panel = CommandsPanel::new(&AMBER_THEME, GlyphTier::NerdFont);
         // Should be sub-panel height + 2 (tab bar + separator)
         let discover_height = panel.discover.preferred_height();
