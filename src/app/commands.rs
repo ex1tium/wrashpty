@@ -484,7 +484,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dispatch_panel_alias() {
+    fn test_dispatch_panel_alias_open_panel() {
         let mut registry = CommandRegistry::new();
         let mut chrome = make_test_chrome();
         let store = make_test_store();
@@ -526,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dispatch_case_insensitive() {
+    fn test_dispatch_case_insensitive_open_panel() {
         let mut registry = CommandRegistry::new();
         let mut chrome = make_test_chrome();
         let store = make_test_store();
@@ -537,7 +537,7 @@ mod tests {
     }
 
     #[test]
-    fn test_confirmation_flow_wipe() {
+    fn test_dispatch_wipe_confirmation_executes_handled() {
         let mut registry = CommandRegistry::new();
         let mut chrome = make_test_chrome();
         let store = make_test_store();
@@ -570,7 +570,7 @@ mod tests {
     }
 
     #[test]
-    fn test_glyph_tier_persisted() {
+    fn test_dispatch_glyph_emoji_persists_setting() {
         let mut registry = CommandRegistry::new();
         let mut chrome = make_test_chrome();
         let store = make_test_store();
@@ -586,7 +586,7 @@ mod tests {
     }
 
     #[test]
-    fn test_command_list() {
+    fn test_command_list_contains_expected_entries() {
         let registry = CommandRegistry::new();
         let list = registry.command_list();
         assert!(list.iter().any(|(name, _, _)| *name == "panel"));
@@ -617,7 +617,7 @@ mod tests {
     }
 
     #[test]
-    fn test_help_alias_question_mark() {
+    fn test_dispatch_help_alias_question_mark_handled() {
         let mut registry = CommandRegistry::new();
         let mut chrome = make_test_chrome();
         let store = make_test_store();

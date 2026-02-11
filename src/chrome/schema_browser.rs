@@ -210,7 +210,7 @@ impl SchemaBrowserPanel {
             TreeNode::Subcommand { name, depth, .. } => {
                 // Find the parent command name by walking backwards
                 let parent_name = self.find_parent_command_name(node_idx);
-                let flags = self.collect_flags_for_subcommand(name);
+                let flags = self.collect_flags_for_subcommand(node_idx);
                 let cmd = parent_name.as_deref().unwrap_or(name);
                 let mut state = CommandEditState::for_schema(cmd, Some(name), flags);
                 if let Some(store) = &self.history_store {
@@ -280,22 +280,23 @@ impl SchemaBrowserPanel {
         flags
     }
 
-    /// Collects flag canonical names for a subcommand from the schema provider.
-    fn collect_flags_for_subcommand(&self, subcommand: &str) -> Vec<String> {
-        // Walk the nodes to find flags that are children of this subcommand
+    /// Collects flag canonical names for a subcommand starting at a known node index.
+    ///
+    /// Uses the explicit node index to locate the exact subcommand instance,
+    /// avoiding ambiguity when identical subcommand names exist under different parents.
+    fn collect_flags_for_subcommand(&self, node_idx: usize) -> Vec<String> {
+        let sub_depth = match &self.nodes[node_idx] {
+            TreeNode::Subcommand { depth, .. } => *depth,
+            _ => return Vec::new(),
+        };
+
         let mut flags = Vec::new();
-        let mut found = false;
-        for node in &self.nodes {
+        for node in &self.nodes[node_idx + 1..] {
             match node {
-                TreeNode::Subcommand { name, .. } if name == subcommand => {
-                    found = true;
-                }
-                TreeNode::Subcommand { .. } | TreeNode::Command { .. } if found => {
-                    break; // Next sibling or parent
-                }
-                TreeNode::Flag {
-                    long, short, depth, ..
-                } if found && *depth > 0 => {
+                // Stop at any node at the same or shallower depth (sibling/parent).
+                TreeNode::Subcommand { depth, .. } if *depth <= sub_depth => break,
+                TreeNode::Command { .. } => break,
+                TreeNode::Flag { long, short, .. } => {
                     if let Some(l) = long {
                         flags.push(l.clone());
                     } else if let Some(s) = short {
@@ -2036,8 +2037,15 @@ mod tests {
     #[test]
     fn test_collect_flags_for_subcommand() {
         let panel = panel_with_nodes();
-        // "commit" has one flag: --message / -m
-        let flags = panel.collect_flags_for_subcommand("commit");
+        // "commit" is node index 3 and has one flag: --message / -m
+        let commit_idx = panel
+            .nodes
+            .iter()
+            .position(|n| {
+                matches!(n, TreeNode::Subcommand { name, .. } if name == "commit")
+            })
+            .unwrap();
+        let flags = panel.collect_flags_for_subcommand(commit_idx);
         assert_eq!(flags.len(), 1);
         assert_eq!(flags[0], "--message");
     }
