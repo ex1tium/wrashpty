@@ -8,6 +8,7 @@ use ratatui_core::layout::Rect;
 
 use super::footer_bar::FooterEntry;
 use super::glyphs::GlyphTier;
+use super::theme::Theme;
 
 /// Result of handling panel input.
 #[derive(Debug, Clone)]
@@ -68,4 +69,9 @@ pub trait Panel {
     ///
     /// Default is a no-op. Override in panels that cache glyph references.
     fn set_glyph_tier(&mut self, _tier: GlyphTier) {}
+
+    /// Updates the theme for runtime switching.
+    ///
+    /// Default is a no-op. Override in panels that cache theme references.
+    fn set_theme(&mut self, _theme: &'static Theme) {}
 }

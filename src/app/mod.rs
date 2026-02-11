@@ -49,6 +49,7 @@ use ratatui_core::layout::Rect;
 use tracing::{debug, info, warn};
 
 use crate::chrome::panel::{Panel, PanelResult};
+use crate::chrome::settings_view::SettingAction;
 use crate::chrome::tabbed_panel::TabbedPanel;
 use crate::chrome::{Chrome, NotificationStyle, SizeCheckResult};
 use crate::config::Config;
@@ -884,6 +885,10 @@ impl App {
                             self.open_panel()?;
                             return Ok(());
                         }
+                        commands::CommandAction::OpenSettingsHelp => {
+                            self.open_panel_settings_help()?;
+                            return Ok(());
+                        }
                         commands::CommandAction::Exit => {
                             self.transition_to_terminating();
                             return Ok(());
@@ -1520,6 +1525,7 @@ impl App {
                 debug!(command = %cmd, "Panel executing command");
                 // Use the same restore flow as Dismiss - this properly clears the panel
                 // and restores terminal state. Then inject the command.
+                self.apply_pending_setting_actions(&mut panel);
                 self.restore_after_panel()?;
 
                 // Save to history (both SQLite and bash_history) since panel bypasses reedline
@@ -1535,18 +1541,89 @@ impl App {
             PanelResult::InsertText(text) => {
                 // Pre-fill the reedline buffer with the selected text
                 debug!(text = %text, "Panel requested text insertion, pre-filling buffer");
+                self.apply_pending_setting_actions(&mut panel);
                 self.restore_after_panel()?;
                 // Insert the text into reedline's buffer before the next read_line call
                 self.editor.prefill_buffer(&text);
             }
             PanelResult::Dismiss | PanelResult::Continue => {
                 debug!("Panel dismissed, restoring chrome");
+                self.apply_pending_setting_actions(&mut panel);
                 // Return to editing - redraw context bar and restore terminal state
                 self.restore_after_panel()?;
             }
         }
 
         Ok(())
+    }
+
+    /// Opens panels with the Settings tab on the Help subtab.
+    pub fn open_panel_settings_help(&mut self) -> Result<()> {
+        let mut panel = TabbedPanel::new(self.chrome.theme(), self.chrome.glyph_tier());
+        panel.set_history_store(Arc::clone(&self.history_store));
+        panel.load_context(&self.current_cwd);
+        panel.switch_to_settings_help();
+
+        match self.run_panel_mode(&mut panel)? {
+            PanelResult::Execute(cmd) => {
+                debug!(command = %cmd, "Panel executing command");
+                self.apply_pending_setting_actions(&mut panel);
+                self.restore_after_panel()?;
+                if let Ok(mut store) = self.history_store.lock() {
+                    if let Err(e) = store.save_command(&cmd, Some(&self.current_cwd)) {
+                        warn!("Failed to save panel command to history: {}", e);
+                    }
+                }
+                self.pending_command = Some(cmd);
+                self.inject_pending_command()?;
+            }
+            PanelResult::InsertText(text) => {
+                debug!(text = %text, "Panel requested text insertion");
+                self.apply_pending_setting_actions(&mut panel);
+                self.restore_after_panel()?;
+                self.editor.prefill_buffer(&text);
+            }
+            PanelResult::Dismiss | PanelResult::Continue => {
+                debug!("Panel dismissed, restoring chrome");
+                self.apply_pending_setting_actions(&mut panel);
+                self.restore_after_panel()?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Applies any pending setting actions from the panel to Chrome and app state.
+    fn apply_pending_setting_actions(&mut self, panel: &mut TabbedPanel) {
+        for action in panel.take_pending_actions() {
+            match action {
+                SettingAction::SetGlyphTier(tier) => {
+                    debug!(?tier, "Applying glyph tier from settings panel");
+                    self.chrome.set_glyph_tier(tier);
+                }
+                SettingAction::SetTheme(preset) => {
+                    debug!(?preset, "Applying theme from settings panel");
+                    let theme = crate::chrome::theme::Theme::for_preset(preset);
+                    self.chrome.set_theme(theme);
+                }
+                SettingAction::SetScrollbackEnabled(enabled) => {
+                    debug!(enabled, "Applying scrollback enabled from settings panel");
+                    if enabled {
+                        self.scrollback_buffer.resume_capture();
+                    } else {
+                        self.scrollback_buffer.suspend_capture();
+                    }
+                }
+                SettingAction::SetScrollbackMaxLines(n) => {
+                    debug!(max_lines = n, "Applying scrollback max lines from settings panel");
+                    self.scrollback_buffer.set_max_lines(n);
+                }
+                SettingAction::SetScrollbackMaxLineBytes(n) => {
+                    debug!(max_line_bytes = n, "Applying scrollback max line bytes from settings panel");
+                    self.scrollback_buffer.set_max_line_bytes(n);
+                }
+            }
+        }
     }
 
     /// Restores terminal state after panel closes without executing a command.

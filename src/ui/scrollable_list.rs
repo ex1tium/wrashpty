@@ -105,6 +105,15 @@ impl ScrollableList {
     }
 }
 
+impl Clone for ScrollableList {
+    fn clone(&self) -> Self {
+        Self {
+            selection: self.selection,
+            scroll_offset: self.scroll_offset,
+        }
+    }
+}
+
 impl Default for ScrollableList {
     fn default() -> Self {
         Self::new()

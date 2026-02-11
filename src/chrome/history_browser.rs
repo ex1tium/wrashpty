@@ -1095,6 +1095,10 @@ impl Panel for HistoryBrowserPanel {
     fn set_glyph_tier(&mut self, tier: super::glyphs::GlyphTier) {
         self.glyphs = super::glyphs::GlyphSet::for_tier(tier);
     }
+
+    fn set_theme(&mut self, theme: &'static super::theme::Theme) {
+        self.theme = theme;
+    }
 }
 
 #[cfg(test)]

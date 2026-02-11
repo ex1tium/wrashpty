@@ -63,6 +63,11 @@ impl CommandsPanel {
         self.discover.load_commands(cwd);
     }
 
+    /// Returns a reference to the discovered command items from the Discover sub-panel.
+    pub fn discovered_items(&self) -> &[super::command_palette::CommandItem] {
+        self.discover.items()
+    }
+
     /// Sets the history store for the Schema browser sub-panel.
     pub fn set_history_store(&mut self, store: Arc<Mutex<HistoryStore>>) {
         self.schema.set_history_store(store);
@@ -237,6 +242,12 @@ impl Panel for CommandsPanel {
     fn set_glyph_tier(&mut self, tier: super::glyphs::GlyphTier) {
         self.glyphs = super::glyphs::GlyphSet::for_tier(tier);
         self.schema.set_glyph_tier(tier);
+    }
+
+    fn set_theme(&mut self, theme: &'static super::theme::Theme) {
+        self.theme = theme;
+        self.discover.set_theme(theme);
+        self.schema.set_theme(theme);
     }
 }
 

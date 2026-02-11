@@ -260,6 +260,23 @@ impl ScrollbackBuffer {
         tracing::debug!("Scrollback capture resumed");
     }
 
+    /// Sets the maximum number of lines, truncating oldest lines if needed.
+    pub fn set_max_lines(&mut self, max_lines: usize) {
+        self.max_lines = max_lines;
+        // Truncate if current content exceeds new limit
+        while self.lines.len() > self.max_lines {
+            self.lines.pop_front();
+            self.dropped_count += 1;
+        }
+        tracing::debug!(max_lines, "Scrollback max lines updated");
+    }
+
+    /// Sets the maximum bytes per line (applies to future lines only).
+    pub fn set_max_line_bytes(&mut self, max_line_bytes: usize) {
+        self.max_line_bytes = max_line_bytes;
+        tracing::debug!(max_line_bytes, "Scrollback max line bytes updated");
+    }
+
     /// Adds a line to the buffer.
     ///
     /// If capture is suspended, the line is silently discarded.
@@ -505,5 +522,42 @@ mod tests {
         buffer.set_terminal_width(40);
         assert_eq!(buffer.current_terminal_width(), 40);
         assert_eq!(buffer.terminal_width(), 40);
+    }
+
+    #[test]
+    fn test_set_max_lines_truncates_excess() {
+        let mut buffer = ScrollbackBuffer::with_capacity(100, 4096);
+        for i in 0..50 {
+            buffer.push_line(format!("line {}", i).into_bytes());
+        }
+        assert_eq!(buffer.len(), 50);
+
+        // Reduce capacity - should truncate oldest lines
+        buffer.set_max_lines(20);
+        assert_eq!(buffer.len(), 20);
+        // Oldest remaining should be "line 30"
+        assert_eq!(buffer.get(0).unwrap().content(), b"line 30");
+    }
+
+    #[test]
+    fn test_set_max_lines_no_truncation_needed() {
+        let mut buffer = ScrollbackBuffer::with_capacity(100, 4096);
+        for i in 0..5 {
+            buffer.push_line(format!("line {}", i).into_bytes());
+        }
+        buffer.set_max_lines(50);
+        assert_eq!(buffer.len(), 5); // No truncation
+    }
+
+    #[test]
+    fn test_set_max_line_bytes_applies_to_future_lines() {
+        let mut buffer = ScrollbackBuffer::with_capacity(100, 4096);
+        buffer.push_line(b"short".to_vec());
+        buffer.set_max_line_bytes(10);
+        // Future line exceeding new limit should be truncated
+        buffer.push_line(b"this line is longer than ten bytes".to_vec());
+        assert_eq!(buffer.len(), 2);
+        assert!(buffer.get(1).unwrap().is_truncated());
+        assert!(buffer.get(1).unwrap().content().len() <= 10);
     }
 }

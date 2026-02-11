@@ -15,9 +15,10 @@ use ratatui_widgets::tabs::Tabs;
 use super::commands_panel::CommandsPanel;
 use super::file_browser::FileBrowserPanel;
 use super::footer_bar::{BorderLine, FooterBar};
-use super::help_panel::HelpPanel;
 use super::history_browser::HistoryBrowserPanel;
 use super::panel::{Panel, PanelResult};
+use super::settings_panel::SettingsPanel;
+use super::settings_view::SettingAction;
 use super::theme::Theme;
 use super::glyphs::{GlyphSet, GlyphTier};
 use crate::history_store::HistoryStore;
@@ -26,8 +27,7 @@ use crate::history_store::HistoryStore;
 const TAB_HISTORY_BROWSER: usize = 0;
 const TAB_FILE_BROWSER: usize = 1;
 const TAB_COMMAND_PALETTE: usize = 2;
-#[allow(dead_code)]
-const TAB_HELP: usize = 3;
+const TAB_SETTINGS: usize = 3;
 
 /// A tabbed container for multiple panels.
 pub struct TabbedPanel {
@@ -37,6 +37,8 @@ pub struct TabbedPanel {
     active_tab: usize,
     /// Reference to history store for settings persistence.
     history_store: Option<Arc<Mutex<HistoryStore>>>,
+    /// Pending runtime actions from settings changes.
+    pending_actions: Vec<SettingAction>,
     /// Theme for rendering.
     theme: &'static Theme,
     /// Unified glyph set for the current tier.
@@ -51,13 +53,14 @@ impl TabbedPanel {
             Box::new(HistoryBrowserPanel::new(theme, glyphs)),
             Box::new(FileBrowserPanel::new(theme, glyph_tier)),
             Box::new(CommandsPanel::new(theme, glyph_tier)),
-            Box::new(HelpPanel::new(theme)),
+            Box::new(SettingsPanel::new(theme, glyph_tier)),
         ];
 
         Self {
             tabs,
             active_tab: 0,
             history_store: None,
+            pending_actions: Vec::new(),
             theme,
             glyphs,
         }
@@ -96,7 +99,14 @@ impl TabbedPanel {
         // Pass store to commands panel (for schema browser)
         if let Some(panel) = self.tabs.get_mut(TAB_COMMAND_PALETTE) {
             if let Some(cmd_panel) = panel.as_any_mut().downcast_mut::<CommandsPanel>() {
-                cmd_panel.set_history_store(store);
+                cmd_panel.set_history_store(Arc::clone(&store));
+            }
+        }
+
+        // Pass store to settings panel (for persistence)
+        if let Some(panel) = self.tabs.get_mut(TAB_SETTINGS) {
+            if let Some(settings_panel) = panel.as_any_mut().downcast_mut::<SettingsPanel>() {
+                settings_panel.set_history_store(store);
             }
         }
     }
@@ -112,10 +122,23 @@ impl TabbedPanel {
 
     /// Loads context for all panels based on the current working directory.
     pub fn load_context(&mut self, cwd: &Path) {
-        // Load commands for commands panel (Discover sub-tab)
+        // Load commands for commands panel (Discover sub-tab) and collect discovered items
+        let mut discovered = Vec::new();
         if let Some(panel) = self.tabs.get_mut(TAB_COMMAND_PALETTE) {
             if let Some(cmd_panel) = panel.as_any_mut().downcast_mut::<CommandsPanel>() {
                 cmd_panel.load_commands(cwd);
+                discovered = cmd_panel.discovered_items().to_vec();
+            }
+        }
+
+        // Auto-load colon command docs and project commands into Settings>Help
+        if let Some(panel) = self.tabs.get_mut(TAB_SETTINGS) {
+            if let Some(settings_panel) = panel.as_any_mut().downcast_mut::<SettingsPanel>() {
+                let cmd_list = crate::app::commands::CommandRegistry::new().command_list();
+                settings_panel.load_command_docs(cmd_list);
+                if !discovered.is_empty() {
+                    settings_panel.load_project_commands(&discovered);
+                }
             }
         }
 
@@ -133,6 +156,31 @@ impl TabbedPanel {
                 hist_panel.load_history();
             }
         }
+    }
+
+    /// Loads command documentation into the settings panel's help view.
+    pub fn load_command_docs(&mut self, commands: Vec<(&str, &[&str], &str)>) {
+        if let Some(panel) = self.tabs.get_mut(TAB_SETTINGS) {
+            if let Some(settings_panel) = panel.as_any_mut().downcast_mut::<SettingsPanel>() {
+                settings_panel.load_command_docs(commands);
+            }
+        }
+    }
+
+    /// Switches to the Settings tab on the Help subtab.
+    pub fn switch_to_settings_help(&mut self) {
+        self.active_tab = TAB_SETTINGS;
+        self.save_active_tab();
+        if let Some(panel) = self.tabs.get_mut(TAB_SETTINGS) {
+            if let Some(settings_panel) = panel.as_any_mut().downcast_mut::<SettingsPanel>() {
+                settings_panel.switch_to_help();
+            }
+        }
+    }
+
+    /// Takes any pending runtime actions from settings changes, draining the queue.
+    pub fn take_pending_actions(&mut self) -> Vec<SettingAction> {
+        std::mem::take(&mut self.pending_actions)
     }
 
     /// Returns the number of tabs.
@@ -325,11 +373,40 @@ impl Panel for TabbedPanel {
         }
 
         // Delegate all other keys to active panel
-        if let Some(panel) = self.tabs.get_mut(self.active_tab) {
+        let result = if let Some(panel) = self.tabs.get_mut(self.active_tab) {
             panel.handle_input(key)
         } else {
             PanelResult::Dismiss
+        };
+
+        // Drain setting actions from SettingsPanel and apply visual changes immediately
+        if let Some(panel) = self.tabs.get_mut(TAB_SETTINGS) {
+            if let Some(settings_panel) = panel.as_any_mut().downcast_mut::<SettingsPanel>() {
+                for action in settings_panel.take_pending_actions() {
+                    match &action {
+                        SettingAction::SetGlyphTier(tier) => {
+                            // Apply glyph tier to all tabs immediately for visual feedback
+                            self.glyphs = GlyphSet::for_tier(*tier);
+                            for tab in &mut self.tabs {
+                                tab.set_glyph_tier(*tier);
+                            }
+                        }
+                        SettingAction::SetTheme(preset) => {
+                            // Apply theme to all tabs immediately for visual feedback
+                            let theme = super::theme::Theme::for_preset(*preset);
+                            self.theme = theme;
+                            for tab in &mut self.tabs {
+                                tab.set_theme(theme);
+                            }
+                        }
+                        _ => {}
+                    }
+                    self.pending_actions.push(action);
+                }
+            }
         }
+
+        result
     }
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
@@ -340,6 +417,13 @@ impl Panel for TabbedPanel {
         self.glyphs = GlyphSet::for_tier(tier);
         for tab in &mut self.tabs {
             tab.set_glyph_tier(tier);
+        }
+    }
+
+    fn set_theme(&mut self, theme: &'static Theme) {
+        self.theme = theme;
+        for tab in &mut self.tabs {
+            tab.set_theme(theme);
         }
     }
 }
