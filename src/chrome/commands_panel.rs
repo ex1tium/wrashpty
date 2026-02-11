@@ -186,17 +186,20 @@ impl Panel for CommandsPanel {
     }
 
     fn handle_input(&mut self, key: KeyEvent) -> PanelResult {
-        // Tab / Shift+Tab switch inner sub-tabs
-        match key.code {
-            KeyCode::Tab => {
-                self.next_sub();
-                return PanelResult::Continue;
+        // Tab / Shift+Tab switch inner sub-tabs (unless schema browser is in edit mode)
+        let in_edit = self.active_sub == SUB_SCHEMA && self.schema.in_edit_mode();
+        if !in_edit {
+            match key.code {
+                KeyCode::Tab => {
+                    self.next_sub();
+                    return PanelResult::Continue;
+                }
+                KeyCode::BackTab => {
+                    self.prev_sub();
+                    return PanelResult::Continue;
+                }
+                _ => {}
             }
-            KeyCode::BackTab => {
-                self.prev_sub();
-                return PanelResult::Continue;
-            }
-            _ => {}
         }
 
         // Delegate to active sub-panel
