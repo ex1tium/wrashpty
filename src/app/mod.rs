@@ -873,7 +873,13 @@ impl App {
                     &self.history_store,
                 ) {
                     match action {
-                        commands::CommandAction::Handled => return Ok(()),
+                        commands::CommandAction::Handled => {
+                            // Immediate re-render so the user sees the effect
+                            // (notification or updated glyphs) without waiting
+                            // for the next prompt cycle.
+                            self.render_context_bar_now();
+                            return Ok(());
+                        }
                         commands::CommandAction::OpenPanel => {
                             self.open_panel()?;
                             return Ok(());
@@ -1573,6 +1579,25 @@ impl App {
         }
 
         Ok(())
+    }
+
+    /// Immediately re-renders the context bar.
+    ///
+    /// Used after colon commands so the user sees the effect (notification
+    /// or updated glyphs) without waiting for the next prompt cycle.
+    fn render_context_bar_now(&mut self) {
+        if self.chrome.is_active() {
+            if let Ok((cols, _rows)) = TerminalGuard::get_size() {
+                let timestamp = chrono::Local::now().format("%H:%M").to_string();
+                let state = self.topbar_state(&timestamp);
+                if let Err(e) = self
+                    .chrome
+                    .render_context_bar_with_notifications(cols, &state)
+                {
+                    warn!("Failed to re-render context bar after command: {}", e);
+                }
+            }
+        }
     }
 
     /// Injects the pending command into the PTY.

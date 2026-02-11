@@ -421,9 +421,6 @@ fn cmd_help(ctx: &mut CommandContext) -> CommandAction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chrome::glyphs::GlyphSet;
-    use crate::config::ThemePreset;
-    use crate::chrome::theme::Theme;
 
     fn make_test_chrome() -> Chrome {
         // Chrome::new requires a Config — use a minimal approach
@@ -566,9 +563,9 @@ mod tests {
         registry.dispatch(":wipe", &mut chrome, &store);
         assert!(registry.has_pending_confirmation());
 
-        // Wrong word clears pending (returns Some because it consumed the confirmation slot)
-        let result = registry.dispatch("nope", &mut chrome, &store);
-        // "nope" doesn't start with ':' so dispatch returns None after clearing pending
+        // Wrong word clears pending (returns None because it's not a colon command,
+        // but the pending confirmation is consumed by the attempt)
+        let _ = registry.dispatch("nope", &mut chrome, &store);
         assert!(!registry.has_pending_confirmation());
     }
 
