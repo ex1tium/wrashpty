@@ -61,6 +61,7 @@ use crate::signals::SignalHandler;
 use crate::terminal::TerminalGuard;
 use crate::types::{ChromeMode, MarkerEvent, Mode};
 
+pub mod commands;
 mod drain;
 mod scroll_view;
 mod transitions;
@@ -224,14 +225,8 @@ pub struct App {
     /// Command pending injection after transitioning to Injecting mode.
     pending_command: Option<String>,
 
-    /// Whether we're waiting for wipe confirmation (after `:wipe` was entered).
-    pending_wipe_confirmation: bool,
-
-    /// Whether we're waiting for dedupe confirmation (after `:dedupe` was entered).
-    pending_dedupe_confirmation: bool,
-
-    /// Whether we're waiting for wipe-ci confirmation (after `:wipe-ci` was entered).
-    pending_wipe_ci_confirmation: bool,
+    /// Built-in colon command registry and dispatcher.
+    command_registry: commands::CommandRegistry,
 
     /// Timestamp when injection started (for timeout).
     injection_start: Option<Instant>,
@@ -380,9 +375,7 @@ impl App {
             editor,
             history_store,
             pending_command: None,
-            pending_wipe_confirmation: false,
-            pending_dedupe_confirmation: false,
-            pending_wipe_ci_confirmation: false,
+            command_registry: commands::CommandRegistry::new(),
             injection_start: None,
             injection_echo_guard: None,
             current_cwd,
@@ -425,6 +418,13 @@ impl App {
             store.start_intelligence_session(&session_id);
             // Initial sync with history
             store.sync_intelligence();
+
+            // Restore persisted glyph tier preference
+            if let Ok(Some(tier_str)) = store.get_setting("glyph_tier") {
+                if let Some(tier) = crate::chrome::glyphs::GlyphTier::from_label(&tier_str) {
+                    self.chrome.set_glyph_tier(tier);
+                }
+            }
         }
 
         loop {
@@ -857,151 +857,36 @@ impl App {
         // Handle the editor result
         match editor_result {
             EditorResult::Command(line) => {
-                // Check for built-in commands
                 let trimmed = line.trim();
 
-                // Exit command
+                // Exit command (not a colon command — shell built-in)
                 if trimmed == "exit" || trimmed.starts_with("exit ") {
                     info!("User typed 'exit' command");
                     self.transition_to_terminating();
                     return Ok(());
                 }
 
-                // Panel command - opens the command palette
-                if trimmed == ":panel" || trimmed == ":p" {
-                    debug!("User requested panel via command");
-                    self.open_panel()?;
-                    return Ok(());
-                }
-
-                // History wipe command - sets pending confirmation flag
-                if trimmed == ":wipe" {
-                    self.pending_wipe_confirmation = true;
-                    self.chrome.notify(
-                        "Type 'wipe' to confirm history deletion",
-                        NotificationStyle::Warning,
-                        Duration::from_secs(10),
-                    );
-                    return Ok(());
-                }
-
-                // Handle wipe confirmation (only if :wipe was entered first)
-                if trimmed == "wipe" && self.pending_wipe_confirmation {
-                    self.pending_wipe_confirmation = false;
-                    self.chrome.clear_notifications();
-                    if let Ok(store) = self.history_store.lock() {
-                        match store.wipe("wipe") {
-                            Ok(()) => {
-                                self.chrome.notify(
-                                    "History database deleted",
-                                    NotificationStyle::Success,
-                                    Duration::from_secs(3),
-                                );
-                            }
-                            Err(e) => {
-                                self.chrome.notify(
-                                    format!("Failed to delete history: {}", e),
-                                    NotificationStyle::Error,
-                                    Duration::from_secs(5),
-                                );
-                            }
+                // Dispatch through the command registry
+                if let Some(action) = self.command_registry.dispatch(
+                    trimmed,
+                    &mut self.chrome,
+                    &self.history_store,
+                ) {
+                    match action {
+                        commands::CommandAction::Handled => return Ok(()),
+                        commands::CommandAction::OpenPanel => {
+                            self.open_panel()?;
+                            return Ok(());
+                        }
+                        commands::CommandAction::Exit => {
+                            self.transition_to_terminating();
+                            return Ok(());
                         }
                     }
-                    return Ok(());
                 }
 
-                // Clear pending wipe confirmation if user enters anything else
-                if self.pending_wipe_confirmation && trimmed != "wipe" {
-                    self.pending_wipe_confirmation = false;
-                }
-
-                // History dedupe command - sets pending confirmation flag
-                if trimmed == ":dedupe" {
-                    self.pending_dedupe_confirmation = true;
-                    self.chrome.notify(
-                        "Type 'dedupe' to confirm removing duplicate history entries",
-                        NotificationStyle::Warning,
-                        Duration::from_secs(10),
-                    );
-                    return Ok(());
-                }
-
-                // Handle dedupe confirmation (only if :dedupe was entered first)
-                if trimmed == "dedupe" && self.pending_dedupe_confirmation {
-                    self.pending_dedupe_confirmation = false;
-                    self.chrome.clear_notifications();
-                    if let Ok(store) = self.history_store.lock() {
-                        match store.dedupe_all() {
-                            Ok((sqlite_removed, bash_removed)) => {
-                                let msg = format!(
-                                    "Removed {} duplicates (SQLite: {}, bash_history: {})",
-                                    sqlite_removed + bash_removed,
-                                    sqlite_removed,
-                                    bash_removed
-                                );
-                                self.chrome.notify(
-                                    msg,
-                                    NotificationStyle::Success,
-                                    Duration::from_secs(5),
-                                );
-                            }
-                            Err(e) => {
-                                self.chrome.notify(
-                                    format!("Failed to dedupe history: {}", e),
-                                    NotificationStyle::Error,
-                                    Duration::from_secs(5),
-                                );
-                            }
-                        }
-                    }
-                    return Ok(());
-                }
-
-                // Clear pending dedupe confirmation if user enters anything else
-                if self.pending_dedupe_confirmation && trimmed != "dedupe" {
-                    self.pending_dedupe_confirmation = false;
-                }
-
-                // Intelligence wipe command - sets pending confirmation flag
-                if trimmed == ":wipe-ci" {
-                    self.pending_wipe_ci_confirmation = true;
-                    self.chrome.notify(
-                        "Type 'wipe' to confirm intelligence database reset",
-                        NotificationStyle::Warning,
-                        Duration::from_secs(10),
-                    );
-                    return Ok(());
-                }
-
-                // Handle wipe-ci confirmation (only if :wipe-ci was entered first)
-                if trimmed == "wipe" && self.pending_wipe_ci_confirmation {
-                    self.pending_wipe_ci_confirmation = false;
-                    self.chrome.clear_notifications();
-                    if let Ok(mut store) = self.history_store.lock() {
-                        match store.reset_intelligence() {
-                            Ok(()) => {
-                                self.chrome.notify(
-                                    "Intelligence database reset",
-                                    NotificationStyle::Success,
-                                    Duration::from_secs(3),
-                                );
-                            }
-                            Err(e) => {
-                                self.chrome.notify(
-                                    format!("Failed to reset intelligence: {}", e),
-                                    NotificationStyle::Error,
-                                    Duration::from_secs(5),
-                                );
-                            }
-                        }
-                    }
-                    return Ok(());
-                }
-
-                // Clear pending wipe-ci confirmation if user enters anything else
-                if self.pending_wipe_ci_confirmation && trimmed != "wipe" {
-                    self.pending_wipe_ci_confirmation = false;
-                }
+                // Clear any pending confirmation if user typed something else
+                self.command_registry.clear_pending();
 
                 // Skip empty commands
                 if trimmed.is_empty() {
