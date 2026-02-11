@@ -958,6 +958,25 @@ impl HistoryStore {
         }
     }
 
+    /// Discovers a command's schema by running `--help` and parsing the output.
+    ///
+    /// Uses the schema provider's `discover()` + `store()` methods to extract
+    /// and persist the schema. This is a manual trigger only.
+    pub fn discover_schema(&mut self, command: &str) -> Result<(), HistoryStoreError> {
+        let ci = self
+            .intelligence
+            .as_mut()
+            .ok_or_else(|| HistoryStoreError::internal("Intelligence not available"))?;
+        let schema = ci
+            .schema_provider_mut()
+            .discover(command)
+            .map_err(|e| HistoryStoreError::internal(format!("Discovery failed: {e}")))?;
+        ci.schema_provider_mut()
+            .store(schema)
+            .map_err(|e| HistoryStoreError::internal(format!("Store failed: {e}")))?;
+        Ok(())
+    }
+
     /// Resets the intelligence database, deleting all learned patterns.
     ///
     /// This drops and recreates all `ci_*` tables, giving a clean slate.

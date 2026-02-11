@@ -19,6 +19,7 @@ use super::command_edit::{
     CommandEditState, CommandToken, TokenType, compute_edit_mode_layout, render_edit_mode_shared,
 };
 use super::file_tree::{FileTreeState, FlatEntry};
+use super::footer_bar::FooterEntry;
 use super::panel::{Panel, PanelResult};
 use super::symbols::Symbols;
 use super::theme::Theme;
@@ -237,33 +238,6 @@ impl FileBrowserPanel {
         }
 
         render_edit_mode_shared(buffer, self.theme, edit_state, &layout);
-
-        // Keybindings
-        let key_style = Style::default().fg(self.theme.text_highlight);
-        let label_style = Style::default().fg(self.theme.text_secondary);
-        let hints = Line::from(vec![
-            Span::styled("↑↓", key_style),
-            Span::styled(" Cycle", label_style),
-            Span::raw("  "),
-            Span::styled("←→", key_style),
-            Span::styled(" Nav", label_style),
-            Span::raw("  "),
-            Span::styled("^A", key_style),
-            Span::styled(" Add", label_style),
-            Span::raw("  "),
-            Span::styled("^D", key_style),
-            Span::styled(" Del", label_style),
-            Span::raw("  "),
-            Span::styled("^Z", key_style),
-            Span::styled(" Undo", label_style),
-            Span::raw("  "),
-            Span::styled("Enter", key_style),
-            Span::styled(" Run", label_style),
-            Span::raw("  "),
-            Span::styled("Esc", key_style),
-            Span::styled(" Back", label_style),
-        ]);
-        Paragraph::new(hints).render(layout.keybinds, buffer);
     }
 
     /// Renders the path header with git summary.
@@ -787,7 +761,7 @@ impl FileBrowserPanel {
 
 impl Panel for FileBrowserPanel {
     fn preferred_height(&self) -> u16 {
-        if self.edit_mode.is_some() { 13 } else { 14 }
+        if self.edit_mode.is_some() { 11 } else { 12 }
     }
 
     fn title(&self) -> &str {
@@ -824,8 +798,7 @@ impl Panel for FileBrowserPanel {
         if filter_active {
             constraints.push(Constraint::Length(1)); // Filter bar
         }
-        constraints.push(Constraint::Length(1)); // Border
-        constraints.push(Constraint::Length(1)); // Keybind hints
+        // Border + keybind hints are rendered externally by TabbedPanel's footer compositor.
 
         let chunks = Layout::vertical(constraints).split(area);
         let mut chunk_idx = 0;
@@ -867,7 +840,6 @@ impl Panel for FileBrowserPanel {
         // Filter bar
         if filter_active {
             let filter_area = chunks[chunk_idx];
-            chunk_idx += 1;
 
             let filter_spans = self.filter.render_spans(self.theme);
             let mut spans = Vec::new();
@@ -882,79 +854,6 @@ impl Panel for FileBrowserPanel {
             }
             Paragraph::new(Line::from(spans)).render(filter_area, buffer);
         }
-
-        // Border line
-        let border_area = chunks[chunk_idx];
-        chunk_idx += 1;
-        let border_style = Style::default().fg(self.theme.panel_border);
-        for x in border_area.x..border_area.x + border_area.width {
-            if let Some(cell) = buffer.cell_mut((x, border_area.y)) {
-                cell.set_char('─');
-                cell.set_style(border_style);
-            }
-        }
-
-        // Status info in border (sort mode + depth)
-        let sort_label = self.tree.sort_mode().label();
-        let depth_label = match self.tree.max_depth() {
-            0 => "∞".to_string(),
-            d => d.to_string(),
-        };
-        let spotlight_indicator = if self.tree.spotlight() { " ◉" } else { "" };
-        let info = format!(
-            " sort:{} depth:{}{} ",
-            sort_label, depth_label, spotlight_indicator
-        );
-        let info_width = crate::ui::text_width::display_width(&info) as u16;
-        let info_start = border_area.x + border_area.width.saturating_sub(info_width + 1);
-        for (i, ch) in info.chars().enumerate() {
-            let x = info_start + i as u16;
-            if x < border_area.x + border_area.width {
-                if let Some(cell) = buffer.cell_mut((x, border_area.y)) {
-                    cell.set_char(ch);
-                    cell.set_style(Style::default().fg(self.theme.text_secondary));
-                }
-            }
-        }
-
-        // Keybind hints
-        let hints_area = chunks[chunk_idx];
-        let key_style = Style::default().fg(self.theme.text_highlight);
-        let label_style = Style::default().fg(self.theme.text_secondary);
-        let active_label = Style::default()
-            .fg(self.theme.semantic_success)
-            .add_modifier(Modifier::BOLD);
-
-        let hints = Line::from(vec![
-            Span::styled("^E", key_style),
-            Span::styled(" Edit", label_style),
-            Span::raw("  "),
-            Span::styled("Space", key_style),
-            Span::styled(" Expand", label_style),
-            Span::raw("  "),
-            Span::styled("/", key_style),
-            Span::styled(" Filter", label_style),
-            Span::raw("  "),
-            Span::styled(".", key_style),
-            Span::styled(
-                " Hidden",
-                if self.tree.show_hidden() {
-                    active_label
-                } else {
-                    label_style
-                },
-            ),
-            Span::raw("  "),
-            Span::styled("s", key_style),
-            Span::styled(" Sort", label_style),
-            Span::raw("  "),
-            Span::styled("Enter", key_style),
-            Span::styled(" Open", label_style),
-            Span::raw("  "),
-            Span::styled("Esc", key_style),
-            Span::styled(" Close", label_style),
-        ]);
-        Paragraph::new(hints).render(hints_area, buffer);
     }
 
     fn handle_input(&mut self, key: KeyEvent) -> PanelResult {
@@ -1066,6 +965,45 @@ impl Panel for FileBrowserPanel {
 
             _ => PanelResult::Continue,
         }
+    }
+
+    fn footer_entries(&self) -> Vec<FooterEntry> {
+        if self.edit_mode.is_some() {
+            return vec![
+                FooterEntry::action("↑↓", "Cycle"),
+                FooterEntry::action("←→", "Nav"),
+                FooterEntry::action("^A", "Add"),
+                FooterEntry::action("^D", "Del"),
+                FooterEntry::action("^Z", "Undo"),
+                FooterEntry::action("Enter", "Run"),
+                FooterEntry::action("Esc", "Back"),
+            ];
+        }
+        vec![
+            FooterEntry::action("^E", "Edit"),
+            FooterEntry::action("Space", "Expand"),
+            FooterEntry::action("/", "Filter"),
+            FooterEntry::toggle(".", "Hidden", self.tree.show_hidden()),
+            FooterEntry::action("s", "Sort"),
+            FooterEntry::action("Enter", "Open"),
+            FooterEntry::action("Esc", "Close"),
+        ]
+    }
+
+    fn border_info(&self) -> Option<String> {
+        if self.edit_mode.is_some() {
+            return None;
+        }
+        let sort_label = self.tree.sort_mode().label();
+        let depth_label = match self.tree.max_depth() {
+            0 => "∞".to_string(),
+            d => d.to_string(),
+        };
+        let spotlight = if self.tree.spotlight() { " ◉" } else { "" };
+        Some(format!(
+            "sort:{} depth:{}{}",
+            sort_label, depth_label, spotlight
+        ))
     }
 
     fn as_any_mut(&mut self) -> &mut dyn Any {

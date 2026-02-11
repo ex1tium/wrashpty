@@ -294,7 +294,9 @@ fn suggest_from_schema(provider: &dyn SchemaProvider, context: &SuggestionContex
 
     match &context.position {
         PositionType::Command => {
-            for command in provider.commands().take(40) {
+            let mut commands: Vec<&str> = provider.commands().collect();
+            commands.sort_unstable();
+            for command in commands.into_iter().take(40) {
                 suggestions.push(schema_suggestion(
                     command.to_string(),
                     ContextMatch::Generic,

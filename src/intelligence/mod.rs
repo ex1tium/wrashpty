@@ -196,6 +196,7 @@ impl CommandIntelligence {
     pub fn set_schema_mode(&mut self, mode: SchemaMode) {
         let needs_rebuild =
             (mode == SchemaMode::FullLibrary) != (self.schema_mode == SchemaMode::FullLibrary);
+        let prev = self.schema_mode;
         self.schema_mode = mode;
 
         if needs_rebuild {
@@ -209,7 +210,12 @@ impl CommandIntelligence {
                     );
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "Failed to rebuild schema provider on mode change");
+                    self.schema_mode = prev;
+                    tracing::warn!(
+                        error = %e,
+                        reverted_to = ?prev,
+                        "Failed to rebuild schema provider on mode change, reverting"
+                    );
                 }
             }
         }

@@ -14,6 +14,7 @@ use ratatui_widgets::tabs::Tabs;
 
 use super::commands_panel::CommandsPanel;
 use super::file_browser::FileBrowserPanel;
+use super::footer_bar::{BorderLine, FooterBar};
 use super::help_panel::HelpPanel;
 use super::history_browser::HistoryBrowserPanel;
 use super::panel::{Panel, PanelResult};
@@ -199,10 +200,18 @@ impl TabbedPanel {
 
 impl Panel for TabbedPanel {
     fn preferred_height(&self) -> u16 {
-        // Active panel height + 4 for tab bar and outer border
+        // Active panel height + 2 for tab bar/separator
+        // + 2 for border/footer if panel has footer entries
         self.tabs
             .get(self.active_tab)
-            .map(|p| p.preferred_height() + 4)
+            .map(|p| {
+                let footer_rows = if p.footer_entries().is_empty() {
+                    0
+                } else {
+                    2
+                };
+                p.preferred_height() + 2 + footer_rows
+            })
             .unwrap_or(14)
     }
 
@@ -265,9 +274,33 @@ impl Panel for TabbedPanel {
             self.render_tab_hint(buffer, sep_area, hint);
         }
 
-        // Render active panel content
+        // Render active panel content + footer (compositor role)
         if let Some(panel) = self.tabs.get_mut(self.active_tab) {
-            panel.render(buffer, chunks[1]);
+            let entries = panel.footer_entries();
+
+            if entries.is_empty() {
+                panel.render(buffer, chunks[1]);
+            } else {
+                let content_chunks = Layout::vertical([
+                    Constraint::Min(1),    // Panel content
+                    Constraint::Length(1), // Border
+                    Constraint::Length(1), // Footer
+                ])
+                .split(chunks[1]);
+
+                panel.render(buffer, content_chunks[0]);
+
+                // Compose border widget with optional info
+                let border_info = panel.border_info();
+                let border = match border_info {
+                    Some(ref info) => BorderLine::new(self.theme).with_info(info),
+                    None => BorderLine::new(self.theme),
+                };
+                border.render(content_chunks[1], buffer);
+
+                // Compose footer widget
+                FooterBar::new(&entries, self.theme).render(content_chunks[2], buffer);
+            }
         }
     }
 

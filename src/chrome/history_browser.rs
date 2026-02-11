@@ -19,6 +19,7 @@ use tracing::{debug, warn};
 use super::command_edit::{
     CommandEditState, CommandToken, TokenType, compute_edit_mode_layout, render_edit_mode_shared,
 };
+use super::footer_bar::FooterEntry;
 use super::panel::{Panel, PanelResult};
 use super::theme::Theme;
 use crate::history_store::{FilterMode, HistoryRecord, HistoryStore, SortMode};
@@ -286,36 +287,8 @@ impl HistoryBrowserPanel {
             }
         }
 
-        // Render shared elements (token strip, suggestions, edit input, result, border)
+        // Render shared elements (token strip, suggestions, edit input, result preview)
         render_edit_mode_shared(buffer, self.theme, edit_state, &layout);
-
-        // Keybind hints
-        let key_style = Style::default().fg(self.theme.text_highlight);
-        let label_style = Style::default().fg(self.theme.text_secondary);
-
-        let hints = Line::from(vec![
-            Span::styled("←→", key_style),
-            Span::styled(" Nav", label_style),
-            Span::raw("  "),
-            Span::styled("↑↓", key_style),
-            Span::styled(" Cycle", label_style),
-            Span::raw("  "),
-            Span::styled("^D", key_style),
-            Span::styled(" Del", label_style),
-            Span::raw("  "),
-            Span::styled("^A/I", key_style),
-            Span::styled(" Ins", label_style),
-            Span::raw("  "),
-            Span::styled("^Q", key_style),
-            Span::styled(" Quote", label_style),
-            Span::raw("  "),
-            Span::styled("Enter", key_style),
-            Span::styled(" Run", label_style),
-            Span::raw("  "),
-            Span::styled("Esc", key_style),
-            Span::styled(" Back", label_style),
-        ]);
-        Paragraph::new(hints).render(layout.keybinds, buffer);
     }
 
     /// Renders the danger confirmation dialog.
@@ -325,13 +298,13 @@ impl HistoryBrowserPanel {
         area: Rect,
         edit_state: &CommandEditState,
     ) {
+        // Border and keybind hints are rendered externally by TabbedPanel's
+        // footer compositor — footer_entries() returns confirm-mode entries.
         let chunks = Layout::vertical([
             Constraint::Length(1), // Warning header
             Constraint::Length(1), // Warning message
             Constraint::Length(1), // Command
             Constraint::Min(1),    // Spacer
-            Constraint::Length(1), // Border
-            Constraint::Length(1), // Keybind hints
         ])
         .split(area);
 
@@ -373,27 +346,6 @@ impl HistoryBrowserPanel {
             Span::styled(cmd, Style::default().fg(self.theme.text_primary)),
         ]);
         Paragraph::new(cmd_line).render(chunks[2], buffer);
-
-        // Border
-        let border_style = Style::default().fg(self.theme.panel_border);
-        for x in chunks[4].x..chunks[4].x + chunks[4].width {
-            if let Some(cell) = buffer.cell_mut((x, chunks[4].y)) {
-                cell.set_char('─');
-                cell.set_style(border_style);
-            }
-        }
-
-        // Keybind hints
-        let key_style = Style::default().fg(self.theme.text_highlight);
-        let label_style = Style::default().fg(self.theme.text_secondary);
-        let hints = Line::from(vec![
-            Span::styled("Enter", key_style),
-            Span::styled(" Confirm & Run", label_style),
-            Span::raw("  "),
-            Span::styled("Esc", key_style),
-            Span::styled(" Cancel", label_style),
-        ]);
-        Paragraph::new(hints).render(chunks[5], buffer);
     }
 
     /// Handles input in edit mode.
@@ -913,7 +865,7 @@ impl HistoryBrowserPanel {
 
 impl Panel for HistoryBrowserPanel {
     fn preferred_height(&self) -> u16 {
-        15
+        13
     }
 
     fn title(&self) -> &str {
@@ -931,14 +883,13 @@ impl Panel for HistoryBrowserPanel {
             return;
         }
 
-        // Layout: filter (1) + header (1) + separator (1) + list (n) + border (1) + keybinds (1)
+        // Layout: filter (1) + header (1) + separator (1) + list (n)
+        // Border + keybinds are rendered externally by TabbedPanel's footer compositor.
         let chunks = Layout::vertical([
             Constraint::Length(1), // Filter input
             Constraint::Length(1), // Table header
             Constraint::Length(1), // Separator line
             Constraint::Min(1),    // Table body
-            Constraint::Length(1), // Border line
-            Constraint::Length(1), // Keybind hints bar
         ])
         .split(area);
 
@@ -1009,67 +960,6 @@ impl Panel for HistoryBrowserPanel {
             self.render_row(buffer, row_area, record, &cols, is_selected);
         }
 
-        // Render border line above keybind bar
-        let border_style = Style::default().fg(self.theme.panel_border);
-        for x in chunks[4].x..chunks[4].x + chunks[4].width {
-            if let Some(cell) = buffer.cell_mut((x, chunks[4].y)) {
-                cell.set_char('─');
-                cell.set_style(border_style);
-            }
-        }
-
-        // Render keybind bar
-        let key_style = Style::default().fg(self.theme.text_highlight);
-        let label_style = Style::default().fg(self.theme.text_secondary);
-        let active_label = Style::default()
-            .fg(self.theme.semantic_success)
-            .add_modifier(Modifier::BOLD);
-        let sort_style = Style::default().fg(self.theme.header_fg);
-
-        let hints = Line::from(vec![
-            Span::styled("^E", key_style),
-            Span::styled(" Edit", label_style),
-            Span::raw("  "),
-            Span::styled("^D", key_style),
-            Span::styled(
-                " Dedupe",
-                if self.filter_mode.dedupe {
-                    active_label
-                } else {
-                    label_style
-                },
-            ),
-            Span::raw("  "),
-            Span::styled("^G", key_style),
-            Span::styled(
-                " CurDir",
-                if self.filter_mode.current_dir_only {
-                    active_label
-                } else {
-                    label_style
-                },
-            ),
-            Span::raw("  "),
-            Span::styled("^X", key_style),
-            Span::styled(
-                " Failed",
-                if self.filter_mode.failed_only {
-                    active_label
-                } else {
-                    label_style
-                },
-            ),
-            Span::raw("  "),
-            Span::styled("^S", key_style),
-            Span::styled(format!(" {}", self.sort_mode.name()), sort_style),
-            Span::raw("  "),
-            Span::styled("Enter", key_style),
-            Span::styled(" Run", label_style),
-            Span::raw("  "),
-            Span::styled("Esc", key_style),
-            Span::styled(" Close", label_style),
-        ]);
-        Paragraph::new(hints).render(chunks[5], buffer);
     }
 
     fn handle_input(&mut self, key: KeyEvent) -> PanelResult {
@@ -1163,6 +1053,35 @@ impl Panel for HistoryBrowserPanel {
             }
             _ => PanelResult::Continue,
         }
+    }
+
+    fn footer_entries(&self) -> Vec<FooterEntry> {
+        if let Some(ref edit_state) = self.edit_mode {
+            if edit_state.is_confirming() {
+                return vec![
+                    FooterEntry::action("Enter", "Confirm & Run"),
+                    FooterEntry::action("Esc", "Cancel"),
+                ];
+            }
+            return vec![
+                FooterEntry::action("←→", "Nav"),
+                FooterEntry::action("↑↓", "Cycle"),
+                FooterEntry::action("^D", "Del"),
+                FooterEntry::action("^A/I", "Ins"),
+                FooterEntry::action("^Q", "Quote"),
+                FooterEntry::action("Enter", "Run"),
+                FooterEntry::action("Esc", "Back"),
+            ];
+        }
+        vec![
+            FooterEntry::action("^E", "Edit"),
+            FooterEntry::toggle("^D", "Dedupe", self.filter_mode.dedupe),
+            FooterEntry::toggle("^G", "CurDir", self.filter_mode.current_dir_only),
+            FooterEntry::toggle("^X", "Failed", self.filter_mode.failed_only),
+            FooterEntry::value("^S", self.sort_mode.name().to_string()),
+            FooterEntry::action("Enter", "Run"),
+            FooterEntry::action("Esc", "Close"),
+        ]
     }
 
     fn as_any_mut(&mut self) -> &mut dyn Any {

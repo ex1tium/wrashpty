@@ -15,6 +15,7 @@ use ratatui_widgets::paragraph::Paragraph;
 use regex::Regex;
 use tracing::debug;
 
+use super::footer_bar::FooterEntry;
 use super::panel::{Panel, PanelResult};
 use super::theme::Theme;
 
@@ -503,6 +504,13 @@ impl Panel for CommandPalettePanel {
             }
             _ => PanelResult::Continue,
         }
+    }
+
+    fn footer_entries(&self) -> Vec<FooterEntry> {
+        vec![
+            FooterEntry::action("Enter", "Run"),
+            FooterEntry::action("Esc", "Close"),
+        ]
     }
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
