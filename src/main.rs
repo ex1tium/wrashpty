@@ -134,7 +134,7 @@ fn main() -> Result<()> {
 
     // Load configuration from environment (theme, nerdfonts detection)
     let config = Config::from_env();
-    info!(symbol_set = ?config.symbol_set, theme = ?config.theme, "Config loaded from environment");
+    info!(glyph_tier = ?config.glyph_tier, theme = ?config.theme, "Config loaded from environment");
 
     // Validate bash is available
     validate_bash_version()?;

@@ -1620,7 +1620,7 @@ impl App {
     ///
     /// Returns an error if terminal operations fail.
     pub fn open_panel(&mut self) -> Result<()> {
-        let mut panel = TabbedPanel::new(self.chrome.theme(), self.chrome.symbol_set());
+        let mut panel = TabbedPanel::new(self.chrome.theme(), self.chrome.glyph_tier());
         panel.set_history_store(Arc::clone(&self.history_store));
         panel.load_context(&self.current_cwd);
 

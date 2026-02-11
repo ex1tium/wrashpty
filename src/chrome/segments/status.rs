@@ -7,7 +7,7 @@ use unicode_width::UnicodeWidthStr;
 use super::{
     RenderedSegment, SegmentAlign, TopbarSegment, TopbarState, color_to_bg_ansi, color_to_fg_ansi,
 };
-use crate::chrome::symbols::Symbols;
+use crate::chrome::glyphs::GlyphSet;
 use crate::chrome::theme::Theme;
 
 /// Segment displaying command exit status.
@@ -26,15 +26,15 @@ impl TopbarSegment for StatusSegment {
         &self,
         state: &TopbarState,
         theme: &Theme,
-        symbols: &Symbols,
+        glyphs: &GlyphSet,
         _separator: &str,
     ) -> Option<RenderedSegment> {
         let bar_bg = color_to_bg_ansi(theme.bar_bg);
 
         let (icon, color) = if state.exit_code == 0 {
-            (symbols.success, color_to_fg_ansi(theme.success_fg))
+            (glyphs.indicator.success, color_to_fg_ansi(theme.success_fg))
         } else {
-            (symbols.failure, color_to_fg_ansi(theme.failure_fg))
+            (glyphs.indicator.failure, color_to_fg_ansi(theme.failure_fg))
         };
 
         let icon_width = icon.width();
@@ -53,7 +53,8 @@ impl TopbarSegment for StatusSegment {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{SymbolSet, ThemePreset};
+    use crate::chrome::glyphs::GlyphSet;
+    use crate::config::ThemePreset;
 
     fn test_state() -> TopbarState {
         TopbarState {
@@ -70,28 +71,28 @@ mod tests {
     #[test]
     fn test_status_segment_success() {
         let theme = Theme::for_preset(ThemePreset::Amber);
-        let symbols = Symbols::for_set(SymbolSet::Fallback);
+        let glyphs = GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode);
         let state = test_state();
 
-        let rendered = StatusSegment.render(&state, theme, symbols, "");
+        let rendered = StatusSegment.render(&state, theme, glyphs, "");
         assert!(rendered.is_some());
 
         let segment = rendered.unwrap();
         assert_eq!(segment.priority, 0);
-        assert!(segment.content.contains(symbols.success));
+        assert!(segment.content.contains(glyphs.indicator.success));
     }
 
     #[test]
     fn test_status_segment_failure() {
         let theme = Theme::for_preset(ThemePreset::Amber);
-        let symbols = Symbols::for_set(SymbolSet::Fallback);
+        let glyphs = GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode);
         let mut state = test_state();
         state.exit_code = 1;
 
-        let rendered = StatusSegment.render(&state, theme, symbols, "");
+        let rendered = StatusSegment.render(&state, theme, glyphs, "");
         assert!(rendered.is_some());
 
         let segment = rendered.unwrap();
-        assert!(segment.content.contains(symbols.failure));
+        assert!(segment.content.contains(glyphs.indicator.failure));
     }
 }

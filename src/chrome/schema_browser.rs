@@ -24,8 +24,8 @@ use super::theme::Theme;
 use crate::history_store::HistoryStore;
 use crate::ui::filter_input::FilterInput;
 use crate::ui::tree_state::{TreeItem, TreeViewState};
-use crate::config::SymbolSet;
-use crate::ui::tree_view::{tree_chars_for_set, tree_prefix, TreeChars};
+use super::glyphs::{GlyphSet, GlyphTier};
+use crate::ui::tree_view::tree_prefix;
 
 /// A node in the schema tree view.
 #[derive(Debug, Clone)]
@@ -157,15 +157,15 @@ pub struct SchemaBrowserPanel {
     history_store: Option<Arc<Mutex<HistoryStore>>>,
     /// Theme.
     theme: &'static Theme,
-    /// Tree drawing characters (Unicode or ASCII fallback).
-    tree_chars: &'static TreeChars,
+    /// Unified glyph set for the current tier.
+    glyphs: &'static GlyphSet,
     /// Status message shown in border info.
     status: Option<String>,
 }
 
 impl SchemaBrowserPanel {
     /// Creates a new schema browser panel.
-    pub fn new(theme: &'static Theme, symbol_set: SymbolSet) -> Self {
+    pub fn new(theme: &'static Theme, glyph_tier: GlyphTier) -> Self {
         Self {
             nodes: Vec::new(),
             tree: TreeViewState::new(),
@@ -175,7 +175,7 @@ impl SchemaBrowserPanel {
             edit_command_name: None,
             history_store: None,
             theme,
-            tree_chars: tree_chars_for_set(symbol_set),
+            glyphs: GlyphSet::for_tier(glyph_tier),
             status: None,
         }
     }
@@ -437,12 +437,12 @@ impl SchemaBrowserPanel {
         let border_style = Style::default().fg(self.theme.panel_border);
         for x in layout.separator.x..layout.separator.x + layout.separator.width {
             if let Some(cell) = buffer.cell_mut((x, layout.separator.y)) {
-                cell.set_char('─');
+                cell.set_char(self.glyphs.border.horizontal);
                 cell.set_style(border_style);
             }
         }
 
-        render_edit_mode_shared(buffer, self.theme, edit_state, &layout);
+        render_edit_mode_shared(buffer, self.theme, self.glyphs, edit_state, &layout);
     }
 
     /// Loads all schemas from the provider into the tree view.
@@ -829,7 +829,7 @@ impl Panel for SchemaBrowserPanel {
 
         // Render filter bar
         if let Some(fa) = filter_area {
-            let spans = self.filter.render_spans(self.theme);
+            let spans = self.filter.render_spans(self.theme, self.glyphs);
             Paragraph::new(Line::from(spans)).render(fa, buffer);
         }
 
@@ -889,7 +889,7 @@ impl Panel for SchemaBrowserPanel {
                 let tree_line = self.tree.tree_line_at(vis_idx).unwrap();
                 let is_selected = vis_idx == self.tree.scroll().selection();
 
-                let prefix = tree_prefix(tree_line, self.tree_chars);
+                let prefix = tree_prefix(tree_line, &self.glyphs.tree);
                 let name = node.display_name();
 
                 let desc = match node {
@@ -1081,6 +1081,10 @@ impl Panel for SchemaBrowserPanel {
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
+
+    fn set_glyph_tier(&mut self, tier: super::glyphs::GlyphTier) {
+        self.glyphs = super::glyphs::GlyphSet::for_tier(tier);
+    }
 }
 
 #[cfg(test)]
@@ -1089,11 +1093,12 @@ mod tests {
 
     use super::super::theme::AMBER_THEME;
     use super::*;
-    use crate::ui::tree_view::{tree_prefix_width, UNICODE_TREE_CHARS};
+    use crate::chrome::glyphs::GlyphTier;
+    use crate::ui::tree_view::tree_prefix_width;
 
     /// Creates a panel pre-populated with test nodes.
     fn panel_with_nodes() -> SchemaBrowserPanel {
-        let mut panel = SchemaBrowserPanel::new(&AMBER_THEME, SymbolSet::NerdFont);
+        let mut panel = SchemaBrowserPanel::new(&AMBER_THEME, GlyphTier::NerdFont);
         panel.nodes = vec![
             TreeNode::Command {
                 name: "git".into(),
@@ -1161,7 +1166,7 @@ mod tests {
 
     #[test]
     fn test_schema_browser_new_initial_state() {
-        let panel = SchemaBrowserPanel::new(&AMBER_THEME, SymbolSet::NerdFont);
+        let panel = SchemaBrowserPanel::new(&AMBER_THEME, GlyphTier::NerdFont);
         assert!(panel.nodes.is_empty());
         assert_eq!(panel.tree.visible_count(), 0);
         assert!(!panel.filter.has_filter());
@@ -1169,13 +1174,13 @@ mod tests {
 
     #[test]
     fn test_schema_browser_title() {
-        let panel = SchemaBrowserPanel::new(&AMBER_THEME, SymbolSet::NerdFont);
+        let panel = SchemaBrowserPanel::new(&AMBER_THEME, GlyphTier::NerdFont);
         assert_eq!(panel.title(), "Browser");
     }
 
     #[test]
     fn test_schema_browser_preferred_height() {
-        let panel = SchemaBrowserPanel::new(&AMBER_THEME, SymbolSet::NerdFont);
+        let panel = SchemaBrowserPanel::new(&AMBER_THEME, GlyphTier::NerdFont);
         assert_eq!(panel.preferred_height(), 8);
     }
 
@@ -1685,7 +1690,7 @@ mod tests {
         // All visible items should have valid tree_line metadata
         for vi in 0..panel.tree.visible_count() {
             let tl = panel.tree.tree_line_at(vi).unwrap();
-            let prefix = tree_prefix(tl, &UNICODE_TREE_CHARS);
+            let prefix = tree_prefix(tl, &crate::chrome::glyphs::UNICODE_GLYPHS.tree);
             let expected_width = tree_prefix_width(tl.depth);
 
             use unicode_width::UnicodeWidthStr;
@@ -1717,7 +1722,7 @@ mod tests {
             .expect("--verbose should be visible");
 
         let tl = panel.tree.tree_line_at(flag_vis).unwrap();
-        let prefix = tree_prefix(tl, &UNICODE_TREE_CHARS);
+        let prefix = tree_prefix(tl, &crate::chrome::glyphs::UNICODE_GLYPHS.tree);
         assert!(
             prefix.starts_with('│'),
             "Depth-2 flag under non-last depth-1 parent should have │ guide rail, got: {:?}",
@@ -1767,7 +1772,7 @@ mod tests {
             .expect("--message should be visible");
 
         let tl = panel.tree.tree_line_at(msg_vis).unwrap();
-        let prefix = tree_prefix(tl, &UNICODE_TREE_CHARS);
+        let prefix = tree_prefix(tl, &crate::chrome::glyphs::UNICODE_GLYPHS.tree);
         assert!(
             prefix.starts_with('│'),
             "--message under non-last commit should have │, got: {:?}",

@@ -21,7 +21,7 @@ use super::footer_bar::FooterEntry;
 use super::panel::{Panel, PanelResult};
 use super::schema_browser::SchemaBrowserPanel;
 use super::theme::Theme;
-use crate::config::SymbolSet;
+use super::glyphs::{GlyphSet, GlyphTier};
 use crate::history_store::HistoryStore;
 
 /// Inner sub-tab indices.
@@ -42,16 +42,19 @@ pub struct CommandsPanel {
     active_sub: usize,
     /// Theme for rendering.
     theme: &'static Theme,
+    /// Unified glyph set for the current tier.
+    glyphs: &'static GlyphSet,
 }
 
 impl CommandsPanel {
     /// Creates a new commands panel.
-    pub fn new(theme: &'static Theme, symbol_set: SymbolSet) -> Self {
+    pub fn new(theme: &'static Theme, glyph_tier: GlyphTier) -> Self {
         Self {
             discover: CommandPalettePanel::new(theme),
-            schema: SchemaBrowserPanel::new(theme, symbol_set),
+            schema: SchemaBrowserPanel::new(theme, glyph_tier),
             active_sub: SUB_DISCOVER,
             theme,
+            glyphs: GlyphSet::for_tier(glyph_tier),
         }
     }
 
@@ -172,7 +175,7 @@ impl Panel for CommandsPanel {
         // Render separator with hint
         for x in chunks[1].x..chunks[1].x + chunks[1].width {
             if let Some(cell) = buffer.cell_mut((x, chunks[1].y)) {
-                cell.set_char('─');
+                cell.set_char(self.glyphs.border.horizontal);
                 cell.set_style(Style::default().fg(self.theme.panel_border));
             }
         }
@@ -230,6 +233,11 @@ impl Panel for CommandsPanel {
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
+
+    fn set_glyph_tier(&mut self, tier: super::glyphs::GlyphTier) {
+        self.glyphs = super::glyphs::GlyphSet::for_tier(tier);
+        self.schema.set_glyph_tier(tier);
+    }
 }
 
 #[cfg(test)]
@@ -239,14 +247,14 @@ mod tests {
 
     #[test]
     fn test_commands_panel_new() {
-        let panel = CommandsPanel::new(&AMBER_THEME, SymbolSet::NerdFont);
+        let panel = CommandsPanel::new(&AMBER_THEME, GlyphTier::NerdFont);
         assert_eq!(panel.active_sub, SUB_DISCOVER);
         assert_eq!(panel.title(), "Commands");
     }
 
     #[test]
     fn test_commands_panel_sub_tab_switching() {
-        let mut panel = CommandsPanel::new(&AMBER_THEME, SymbolSet::NerdFont);
+        let mut panel = CommandsPanel::new(&AMBER_THEME, GlyphTier::NerdFont);
         assert_eq!(panel.active_sub, SUB_DISCOVER);
 
         panel.next_sub();
@@ -261,7 +269,7 @@ mod tests {
 
     #[test]
     fn test_commands_panel_tab_key_switches() {
-        let mut panel = CommandsPanel::new(&AMBER_THEME, SymbolSet::NerdFont);
+        let mut panel = CommandsPanel::new(&AMBER_THEME, GlyphTier::NerdFont);
         assert_eq!(panel.active_sub, SUB_DISCOVER);
 
         let tab_key = KeyEvent::from(KeyCode::Tab);
@@ -277,7 +285,7 @@ mod tests {
 
     #[test]
     fn test_commands_panel_preferred_height_includes_inner_tabs() {
-        let panel = CommandsPanel::new(&AMBER_THEME, SymbolSet::NerdFont);
+        let panel = CommandsPanel::new(&AMBER_THEME, GlyphTier::NerdFont);
         // Should be sub-panel height + 2 (tab bar + separator)
         let discover_height = panel.discover.preferred_height();
         assert_eq!(panel.preferred_height(), discover_height + 2);

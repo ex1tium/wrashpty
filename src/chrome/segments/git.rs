@@ -5,7 +5,7 @@
 use unicode_width::UnicodeWidthStr;
 
 use super::{RenderedSegment, SegmentAlign, TopbarSegment, TopbarState, color_to_fg_ansi};
-use crate::chrome::symbols::Symbols;
+use crate::chrome::glyphs::GlyphSet;
 use crate::chrome::theme::Theme;
 
 /// Segment displaying git branch and dirty status.
@@ -23,16 +23,16 @@ impl TopbarSegment for GitSegment {
         &self,
         state: &TopbarState,
         theme: &Theme,
-        symbols: &Symbols,
+        glyphs: &GlyphSet,
         separator: &str,
     ) -> Option<RenderedSegment> {
         let branch = state.git.branch.as_ref()?;
 
         let sep_fg = color_to_fg_ansi(theme.separator_fg);
         let separator_width = separator.width();
-        let git_branch_icon = symbols.git_branch;
+        let git_branch_icon = glyphs.icon.git_branch;
         let git_branch_width = git_branch_icon.width();
-        let dirty_icon = symbols.git_dirty;
+        let dirty_icon = glyphs.icon.git_dirty;
         let dirty_width = if state.git.dirty {
             dirty_icon.width()
         } else {
@@ -70,7 +70,8 @@ impl TopbarSegment for GitSegment {
 mod tests {
     use super::*;
     use crate::chrome::segments::GitInfo;
-    use crate::config::{SymbolSet, ThemePreset};
+    use crate::chrome::glyphs::GlyphSet;
+    use crate::config::ThemePreset;
 
     fn test_state() -> TopbarState {
         TopbarState::default()
@@ -84,24 +85,24 @@ mod tests {
     #[test]
     fn test_render_when_not_in_repo_is_hidden() {
         let theme = Theme::for_preset(ThemePreset::Amber);
-        let symbols = Symbols::for_set(SymbolSet::Fallback);
+        let glyphs = GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode);
         let state = test_state();
 
-        let rendered = GitSegment.render(&state, theme, symbols, "▶");
+        let rendered = GitSegment.render(&state, theme, glyphs, "▶");
         assert!(rendered.is_none());
     }
 
     #[test]
     fn test_render_when_clean_shows_branch() {
         let theme = Theme::for_preset(ThemePreset::Amber);
-        let symbols = Symbols::for_set(SymbolSet::Fallback);
+        let glyphs = GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode);
         let mut state = test_state();
         state.git = GitInfo {
             branch: Some("main".to_string()),
             dirty: false,
         };
 
-        let rendered = GitSegment.render(&state, theme, symbols, "▶");
+        let rendered = GitSegment.render(&state, theme, glyphs, "▶");
         assert!(rendered.is_some());
 
         let segment = rendered.unwrap();
@@ -112,18 +113,18 @@ mod tests {
     #[test]
     fn test_render_when_dirty_shows_branch_and_dirty_symbol() {
         let theme = Theme::for_preset(ThemePreset::Amber);
-        let symbols = Symbols::for_set(SymbolSet::Fallback);
+        let glyphs = GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode);
         let mut state = test_state();
         state.git = GitInfo {
             branch: Some("feature".to_string()),
             dirty: true,
         };
 
-        let rendered = GitSegment.render(&state, theme, symbols, "▶");
+        let rendered = GitSegment.render(&state, theme, glyphs, "▶");
         assert!(rendered.is_some());
 
         let segment = rendered.unwrap();
         assert!(segment.content.contains("feature"));
-        assert!(segment.content.contains(symbols.git_dirty));
+        assert!(segment.content.contains(glyphs.icon.git_dirty));
     }
 }

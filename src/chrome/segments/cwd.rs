@@ -5,7 +5,7 @@
 use unicode_width::UnicodeWidthStr;
 
 use super::{RenderedSegment, SegmentAlign, TopbarSegment, TopbarState, color_to_fg_ansi};
-use crate::chrome::symbols::Symbols;
+use crate::chrome::glyphs::GlyphSet;
 use crate::chrome::theme::Theme;
 
 /// Segment displaying current working directory.
@@ -22,7 +22,7 @@ impl TopbarSegment for CwdSegment {
         &self,
         state: &TopbarState,
         theme: &Theme,
-        symbols: &Symbols,
+        glyphs: &GlyphSet,
         separator: &str,
     ) -> Option<RenderedSegment> {
         let cwd_str = state
@@ -34,7 +34,7 @@ impl TopbarSegment for CwdSegment {
         let sep_fg = color_to_fg_ansi(theme.separator_fg);
         let cwd_fg = color_to_fg_ansi(theme.cwd_fg);
         let separator_width = separator.width();
-        let folder = symbols.folder;
+        let folder = glyphs.icon.folder;
         let folder_width = folder.width();
 
         let (icon_part, icon_width) = if !folder.is_empty() {
@@ -61,7 +61,8 @@ impl TopbarSegment for CwdSegment {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{SymbolSet, ThemePreset};
+    use crate::chrome::glyphs::GlyphSet;
+    use crate::config::ThemePreset;
     use std::path::PathBuf;
 
     fn test_state() -> TopbarState {
@@ -79,10 +80,10 @@ mod tests {
     #[test]
     fn test_cwd_segment_renders_with_default_state_contains_project() {
         let theme = Theme::for_preset(ThemePreset::Amber);
-        let symbols = Symbols::for_set(SymbolSet::Fallback);
+        let glyphs = GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode);
         let state = test_state();
 
-        let rendered = CwdSegment.render(&state, theme, symbols, "▶");
+        let rendered = CwdSegment.render(&state, theme, glyphs, "▶");
         assert!(rendered.is_some());
 
         let segment = rendered.unwrap();
@@ -93,11 +94,11 @@ mod tests {
     #[test]
     fn test_cwd_segment_renders_root_contains_slash() {
         let theme = Theme::for_preset(ThemePreset::Amber);
-        let symbols = Symbols::for_set(SymbolSet::Fallback);
+        let glyphs = GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode);
         let mut state = test_state();
         state.cwd = PathBuf::from("/");
 
-        let rendered = CwdSegment.render(&state, theme, symbols, "▶");
+        let rendered = CwdSegment.render(&state, theme, glyphs, "▶");
         assert!(rendered.is_some());
         assert!(rendered.unwrap().content.contains("/"));
     }

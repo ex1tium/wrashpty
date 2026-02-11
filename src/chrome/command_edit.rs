@@ -1155,6 +1155,7 @@ pub fn compute_edit_mode_layout(area: Rect) -> Option<EditModeLayout> {
 pub fn render_edit_mode_shared(
     buffer: &mut Buffer,
     theme: &Theme,
+    glyphs: &crate::chrome::glyphs::GlyphSet,
     edit_state: &CommandEditState,
     layout: &EditModeLayout,
 ) {
@@ -1303,7 +1304,10 @@ pub fn render_edit_mode_shared(
                 .fg(theme.text_primary)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("█", Style::default().fg(theme.header_fg)),
+        Span::styled(
+            String::from(glyphs.progress.block_full),
+            Style::default().fg(theme.header_fg),
+        ),
         Span::styled(cycling_indicator, Style::default().fg(theme.text_secondary)),
     ]);
     Paragraph::new(edit_line).render(layout.edit_input, buffer);

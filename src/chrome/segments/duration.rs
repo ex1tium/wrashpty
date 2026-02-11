@@ -7,7 +7,7 @@ use std::time::Duration;
 use unicode_width::UnicodeWidthStr;
 
 use super::{RenderedSegment, SegmentAlign, TopbarSegment, TopbarState, color_to_fg_ansi};
-use crate::chrome::symbols::Symbols;
+use crate::chrome::glyphs::GlyphSet;
 use crate::chrome::theme::Theme;
 
 /// Segment displaying command execution duration.
@@ -28,7 +28,7 @@ impl TopbarSegment for DurationSegment {
         &self,
         state: &TopbarState,
         theme: &Theme,
-        symbols: &Symbols,
+        glyphs: &GlyphSet,
         separator: &str,
     ) -> Option<RenderedSegment> {
         let dur = state.last_duration?;
@@ -40,7 +40,7 @@ impl TopbarSegment for DurationSegment {
         }
 
         let sep_fg = color_to_fg_ansi(theme.separator_fg);
-        let stopwatch = symbols.stopwatch;
+        let stopwatch = glyphs.icon.stopwatch;
         let stopwatch_width = stopwatch.width();
         let separator_width = separator.width();
 
@@ -88,7 +88,8 @@ pub(crate) fn format_duration(dur: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{SymbolSet, ThemePreset};
+    use crate::chrome::glyphs::GlyphSet;
+    use crate::config::ThemePreset;
 
     fn test_state() -> TopbarState {
         TopbarState::default()
@@ -102,22 +103,22 @@ mod tests {
     #[test]
     fn test_duration_render_when_fast_returns_none() {
         let theme = Theme::for_preset(ThemePreset::Amber);
-        let symbols = Symbols::for_set(SymbolSet::Fallback);
+        let glyphs = GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode);
         let mut state = test_state();
         state.last_duration = Some(Duration::from_millis(100));
 
-        let rendered = DurationSegment.render(&state, theme, symbols, "▶");
+        let rendered = DurationSegment.render(&state, theme, glyphs, "▶");
         assert!(rendered.is_none());
     }
 
     #[test]
     fn test_duration_render_when_slow_shows_segment() {
         let theme = Theme::for_preset(ThemePreset::Amber);
-        let symbols = Symbols::for_set(SymbolSet::Fallback);
+        let glyphs = GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode);
         let mut state = test_state();
         state.last_duration = Some(Duration::from_secs(1));
 
-        let rendered = DurationSegment.render(&state, theme, symbols, "▶");
+        let rendered = DurationSegment.render(&state, theme, glyphs, "▶");
         assert!(rendered.is_some());
 
         let segment = rendered.unwrap();
@@ -128,10 +129,10 @@ mod tests {
     #[test]
     fn test_duration_render_when_none_returns_none() {
         let theme = Theme::for_preset(ThemePreset::Amber);
-        let symbols = Symbols::for_set(SymbolSet::Fallback);
+        let glyphs = GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode);
         let state = test_state();
 
-        let rendered = DurationSegment.render(&state, theme, symbols, "▶");
+        let rendered = DurationSegment.render(&state, theme, glyphs, "▶");
         assert!(rendered.is_none());
     }
 

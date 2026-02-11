@@ -5,7 +5,7 @@
 use unicode_width::UnicodeWidthStr;
 
 use super::{RenderedSegment, SegmentAlign, TopbarSegment, TopbarState, color_to_fg_ansi};
-use crate::chrome::symbols::Symbols;
+use crate::chrome::glyphs::GlyphSet;
 use crate::chrome::theme::Theme;
 
 /// Segment displaying scroll mode information.
@@ -23,7 +23,7 @@ impl TopbarSegment for ScrollSegment {
         &self,
         state: &TopbarState,
         theme: &Theme,
-        _symbols: &Symbols,
+        _glyphs: &GlyphSet,
         separator: &str,
     ) -> Option<RenderedSegment> {
         let scroll_info = state.scroll.as_ref()?;
@@ -82,7 +82,8 @@ impl TopbarSegment for ScrollSegment {
 mod tests {
     use super::*;
     use crate::chrome::segments::ScrollInfo;
-    use crate::config::{SymbolSet, ThemePreset};
+    use crate::chrome::glyphs::GlyphSet;
+    use crate::config::ThemePreset;
 
     fn test_state() -> TopbarState {
         TopbarState::default()
@@ -96,17 +97,17 @@ mod tests {
     #[test]
     fn test_render_when_no_scroll_returns_none() {
         let theme = Theme::for_preset(ThemePreset::Amber);
-        let symbols = Symbols::for_set(SymbolSet::Fallback);
+        let glyphs = GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode);
         let state = test_state();
 
-        let rendered = ScrollSegment.render(&state, theme, symbols, "▶");
+        let rendered = ScrollSegment.render(&state, theme, glyphs, "▶");
         assert!(rendered.is_none());
     }
 
     #[test]
     fn test_render_when_scrolled_returns_content_with_priority_and_fields() {
         let theme = Theme::for_preset(ThemePreset::Amber);
-        let symbols = Symbols::for_set(SymbolSet::Fallback);
+        let glyphs = GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode);
         let mut state = test_state();
         state.scroll = Some(ScrollInfo {
             percentage: 45,
@@ -115,7 +116,7 @@ mod tests {
             ..Default::default()
         });
 
-        let rendered = ScrollSegment.render(&state, theme, symbols, "▶");
+        let rendered = ScrollSegment.render(&state, theme, glyphs, "▶");
         assert!(rendered.is_some());
 
         let segment = rendered.unwrap();
@@ -128,7 +129,7 @@ mod tests {
     #[test]
     fn test_render_modes_various_indicators_present() {
         let theme = Theme::for_preset(ThemePreset::Amber);
-        let symbols = Symbols::for_set(SymbolSet::Fallback);
+        let glyphs = GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode);
         let mut state = test_state();
 
         // Test search only
@@ -141,7 +142,7 @@ mod tests {
             timestamps_on: false,
             line_numbers_on: false,
         });
-        let rendered = ScrollSegment.render(&state, theme, symbols, "▶").unwrap();
+        let rendered = ScrollSegment.render(&state, theme, glyphs, "▶").unwrap();
         assert!(rendered.content.contains("[S]"));
 
         // Test filter only
@@ -150,7 +151,7 @@ mod tests {
             filter_active: true,
             ..state.scroll.unwrap()
         });
-        let rendered = ScrollSegment.render(&state, theme, symbols, "▶").unwrap();
+        let rendered = ScrollSegment.render(&state, theme, glyphs, "▶").unwrap();
         assert!(rendered.content.contains("[F]"));
 
         // Test search+filter combined
@@ -159,7 +160,7 @@ mod tests {
             filter_active: true,
             ..state.scroll.unwrap()
         });
-        let rendered = ScrollSegment.render(&state, theme, symbols, "▶").unwrap();
+        let rendered = ScrollSegment.render(&state, theme, glyphs, "▶").unwrap();
         assert!(rendered.content.contains("[S+F]"));
 
         // Test multiple modes with timestamps and line numbers
@@ -170,7 +171,7 @@ mod tests {
             line_numbers_on: true,
             ..state.scroll.unwrap()
         });
-        let rendered = ScrollSegment.render(&state, theme, symbols, "▶").unwrap();
+        let rendered = ScrollSegment.render(&state, theme, glyphs, "▶").unwrap();
         assert!(rendered.content.contains("[S, T, L]"));
     }
 }

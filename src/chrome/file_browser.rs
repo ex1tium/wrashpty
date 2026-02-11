@@ -21,16 +21,15 @@ use super::command_edit::{
 use super::file_tree::{FileTreeState, FlatEntry};
 use super::footer_bar::FooterEntry;
 use super::panel::{Panel, PanelResult};
-use super::symbols::Symbols;
+use super::glyphs::{GlyphSet, GlyphTier};
 use super::theme::Theme;
-use crate::config::SymbolSet;
 use crate::git::{CachedGitRepoStatus, GitFileStatus, get_git_repo_status_cached};
 use crate::history_store::HistoryStore;
 use crate::intelligence::FileContext;
 use crate::ui::filter_input::FilterInput;
 use crate::ui::focus_style::apply_focus;
 use crate::ui::scrollable_list::ScrollableList;
-use crate::ui::tree_view::{TreeChars, tree_chars_for_set, tree_prefix};
+use crate::ui::tree_view::tree_prefix;
 
 /// File browser panel with tree view.
 pub struct FileBrowserPanel {
@@ -48,10 +47,8 @@ pub struct FileBrowserPanel {
     edit_filename: Option<String>,
     /// Theme for rendering.
     theme: &'static Theme,
-    /// Tree connector characters.
-    tree_chars: &'static TreeChars,
-    /// Symbol set for git status markers.
-    symbols: &'static Symbols,
+    /// Unified glyph set for the current tier.
+    glyphs: &'static GlyphSet,
     /// Reference to the history store for intelligent suggestions.
     history_store: Option<Arc<Mutex<HistoryStore>>>,
     /// Cached git repo status.
@@ -60,11 +57,10 @@ pub struct FileBrowserPanel {
 
 impl FileBrowserPanel {
     /// Creates a new file browser at the current directory.
-    pub fn new(theme: &'static Theme, symbol_set: SymbolSet) -> Self {
+    pub fn new(theme: &'static Theme, glyph_tier: GlyphTier) -> Self {
         let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
         let tree = FileTreeState::new(current_dir);
-        let symbols = Symbols::for_set(symbol_set);
-        let tree_chars = tree_chars_for_set(symbol_set);
+        let glyphs = GlyphSet::for_tier(glyph_tier);
 
         Self {
             tree,
@@ -74,8 +70,7 @@ impl FileBrowserPanel {
             edit_mode: None,
             edit_filename: None,
             theme,
-            tree_chars,
-            symbols,
+            glyphs,
             history_store: None,
             git_cache: None,
         }
@@ -232,12 +227,12 @@ impl FileBrowserPanel {
         let border_style = Style::default().fg(self.theme.panel_border);
         for x in layout.separator.x..layout.separator.x + layout.separator.width {
             if let Some(cell) = buffer.cell_mut((x, layout.separator.y)) {
-                cell.set_char('─');
+                cell.set_char(self.glyphs.border.horizontal);
                 cell.set_style(border_style);
             }
         }
 
-        render_edit_mode_shared(buffer, self.theme, edit_state, &layout);
+        render_edit_mode_shared(buffer, self.theme, self.glyphs, edit_state, &layout);
     }
 
     /// Renders the path header with git summary.
@@ -311,24 +306,25 @@ impl FileBrowserPanel {
             return String::new();
         }
 
+        let icons = &self.glyphs.icon;
         let mut parts = Vec::new();
         if let Some(&count) = summary.get(&GitFileStatus::Modified) {
-            parts.push(format!("●{}", count));
+            parts.push(format!("{}{}", icons.git_modified, count));
         }
         if let Some(&count) = summary.get(&GitFileStatus::Added) {
-            parts.push(format!("+{}", count));
+            parts.push(format!("{}{}", icons.git_added, count));
         }
         if let Some(&count) = summary.get(&GitFileStatus::Deleted) {
-            parts.push(format!("x{}", count));
+            parts.push(format!("{}{}", icons.git_deleted, count));
         }
         if let Some(&count) = summary.get(&GitFileStatus::Untracked) {
-            parts.push(format!("?{}", count));
+            parts.push(format!("{}{}", icons.git_untracked, count));
         }
         if let Some(&count) = summary.get(&GitFileStatus::Renamed) {
-            parts.push(format!("r{}", count));
+            parts.push(format!("{}{}", icons.git_renamed, count));
         }
         if let Some(&count) = summary.get(&GitFileStatus::Conflict) {
-            parts.push(format!("!{}", count));
+            parts.push(format!("{}{}", icons.git_conflict, count));
         }
 
         parts.join(" ")
@@ -348,13 +344,14 @@ impl FileBrowserPanel {
         let mut spans = Vec::new();
         let mut first = true;
 
+        let icons = &self.glyphs.icon;
         let entries: Vec<(GitFileStatus, &str, ratatui_core::style::Color)> = vec![
-            (GitFileStatus::Modified, "●", self.theme.git_modified_fg),
-            (GitFileStatus::Added, "+", self.theme.git_added_fg),
-            (GitFileStatus::Deleted, "x", self.theme.git_deleted_fg),
-            (GitFileStatus::Untracked, "?", self.theme.git_untracked_fg),
-            (GitFileStatus::Renamed, "r", self.theme.git_renamed_fg),
-            (GitFileStatus::Conflict, "!", self.theme.git_conflict_fg),
+            (GitFileStatus::Modified, icons.git_modified, self.theme.git_modified_fg),
+            (GitFileStatus::Added, icons.git_added, self.theme.git_added_fg),
+            (GitFileStatus::Deleted, icons.git_deleted, self.theme.git_deleted_fg),
+            (GitFileStatus::Untracked, icons.git_untracked, self.theme.git_untracked_fg),
+            (GitFileStatus::Renamed, icons.git_renamed, self.theme.git_renamed_fg),
+            (GitFileStatus::Conflict, icons.git_conflict, self.theme.git_conflict_fg),
         ];
 
         for (status, marker, color) in entries {
@@ -403,13 +400,13 @@ impl FileBrowserPanel {
         let entry = &flat_entry.entry;
 
         // Tree prefix
-        let prefix = tree_prefix(&flat_entry.tree_line, self.tree_chars);
+        let prefix = tree_prefix(&flat_entry.tree_line, &self.glyphs.tree);
         let prefix_style = Style::default().fg(self.theme.panel_border);
 
         // Git status marker
         let (git_marker, git_color) = match flat_entry.git_status {
             Some(status) => {
-                let marker = self.symbols.git_status_marker(status);
+                let marker = self.glyphs.icon.git_status_marker(status);
                 let color = self.git_status_color(status);
                 (format!("{} ", marker), color)
             }
@@ -841,7 +838,7 @@ impl Panel for FileBrowserPanel {
         if filter_active {
             let filter_area = chunks[chunk_idx];
 
-            let filter_spans = self.filter.render_spans(self.theme);
+            let filter_spans = self.filter.render_spans(self.theme, self.glyphs);
             let mut spans = Vec::new();
             spans.extend(filter_spans);
             // Show match count
@@ -1009,6 +1006,10 @@ impl Panel for FileBrowserPanel {
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
+
+    fn set_glyph_tier(&mut self, tier: super::glyphs::GlyphTier) {
+        self.glyphs = super::glyphs::GlyphSet::for_tier(tier);
+    }
 }
 
 // ── Formatting helpers ───────────────────────────────────────────────────────
@@ -1114,7 +1115,7 @@ mod tests {
     #[test]
     #[allow(non_snake_case)]
     fn test_FileBrowserPanel_new_with_default_theme_and_nerdfont_shows_hidden_false_and_sorted_by_name() {
-        let panel = FileBrowserPanel::new(&AMBER_THEME, SymbolSet::NerdFont);
+        let panel = FileBrowserPanel::new(&AMBER_THEME, GlyphTier::NerdFont);
         assert!(!panel.tree.show_hidden());
         assert_eq!(panel.tree.sort_mode(), SortMode::Name);
     }

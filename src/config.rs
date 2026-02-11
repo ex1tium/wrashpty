@@ -1,20 +1,8 @@
 //! Application configuration loaded from environment variables.
 //!
-//! This module handles detection of nerdfont support and theme preferences.
+//! This module handles detection of glyph tier and theme preferences.
 
-/// Symbol set preference for UI rendering.
-///
-/// The `NerdFont` variant uses Unicode box-drawing characters (`│├└─▸▾`)
-/// that work in virtually all modern terminals. The `Fallback` variant
-/// uses pure ASCII (`|`, `` ` ``, `-`, `>`, `v`) for legacy terminals.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SymbolSet {
-    /// Unicode box-drawing + triangle indicators (works in all modern terminals).
-    #[default]
-    NerdFont,
-    /// Pure ASCII fallback for legacy terminals.
-    Fallback,
-}
+pub use crate::chrome::glyphs::GlyphTier;
 
 /// Theme preset for color scheme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -93,8 +81,8 @@ impl ScrollbackConfig {
 /// Application-wide configuration loaded from environment.
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Which symbol set to use for UI rendering.
-    pub symbol_set: SymbolSet,
+    /// Which glyph tier to use for UI rendering.
+    pub glyph_tier: GlyphTier,
     /// Which color theme to use.
     pub theme: ThemePreset,
     /// Scrollback buffer configuration.
@@ -104,7 +92,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            symbol_set: SymbolSet::NerdFont,
+            glyph_tier: GlyphTier::default(),
             theme: ThemePreset::Amber,
             scrollback: ScrollbackConfig::default(),
         }
@@ -116,35 +104,49 @@ impl Config {
     ///
     /// # Environment Variables
     ///
-    /// - `WRASHPTY_NERD_FONTS`: Set to `0`, `false`, or `no` for ASCII fallback.
-    ///   Unicode box-drawing characters are used by default.
+    /// - `WRASHPTY_GLYPH_TIER`: Set to `ascii`, `unicode`, `emoji`, or `nerdfont`.
+    ///   Falls back to `WRASHPTY_NERD_FONTS` for backward compatibility.
+    ///   Defaults to `unicode`.
     ///
     /// - `WRASHPTY_THEME`: Set to `amber` or `retro` for amber monochrome theme.
     ///   Set to `terminal` or `native` to use terminal's color scheme.
     ///   Defaults to `amber`.
     pub fn from_env() -> Self {
-        let symbol_set = Self::detect_symbol_set();
+        let glyph_tier = Self::detect_glyph_tier();
         let theme = Self::detect_theme();
         let scrollback = ScrollbackConfig::from_env();
         Self {
-            symbol_set,
+            glyph_tier,
             theme,
             scrollback,
         }
     }
 
-    /// Detects symbol set preference from environment.
+    /// Detects glyph tier preference from environment.
     ///
-    /// Defaults to `NerdFont` (Unicode box-drawing) since all modern terminals
-    /// support it. Set `WRASHPTY_NERD_FONTS=0` to force ASCII fallback.
-    fn detect_symbol_set() -> SymbolSet {
+    /// Checks `WRASHPTY_GLYPH_TIER` first, then falls back to the legacy
+    /// `WRASHPTY_NERD_FONTS` variable. Defaults to `Unicode`.
+    fn detect_glyph_tier() -> GlyphTier {
+        // Check new env var first
+        if let Ok(val) = std::env::var("WRASHPTY_GLYPH_TIER") {
+            match val.to_lowercase().as_str() {
+                "ascii" => return GlyphTier::Ascii,
+                "unicode" => return GlyphTier::Unicode,
+                "emoji" => return GlyphTier::Emoji,
+                "nerd" | "nerdfont" => return GlyphTier::NerdFont,
+                _ => {}
+            }
+        }
+
+        // Legacy fallback
         match std::env::var("WRASHPTY_NERD_FONTS")
             .as_deref()
             .map(str::to_lowercase)
             .as_deref()
         {
-            Ok("0") | Ok("false") | Ok("no") | Ok("off") => SymbolSet::Fallback,
-            _ => SymbolSet::NerdFont,
+            Ok("0") | Ok("false") | Ok("no") | Ok("off") => GlyphTier::Ascii,
+            Ok("1") | Ok("true") | Ok("yes") | Ok("on") => GlyphTier::NerdFont,
+            _ => GlyphTier::Unicode, // Default
         }
     }
 
@@ -169,15 +171,15 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(config.symbol_set, SymbolSet::NerdFont);
+        assert_eq!(config.glyph_tier, GlyphTier::Unicode);
         assert_eq!(config.theme, ThemePreset::Amber);
         assert!(config.scrollback.enabled);
         assert_eq!(config.scrollback.max_lines, 10_000);
     }
 
     #[test]
-    fn test_symbol_set_default() {
-        assert_eq!(SymbolSet::default(), SymbolSet::NerdFont);
+    fn test_glyph_tier_default() {
+        assert_eq!(GlyphTier::default(), GlyphTier::Unicode);
     }
 
     #[test]
