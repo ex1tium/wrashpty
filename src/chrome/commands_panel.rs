@@ -17,6 +17,7 @@ use ratatui_core::widgets::Widget;
 use ratatui_widgets::paragraph::Paragraph;
 
 use super::command_palette::CommandPalettePanel;
+use super::footer_bar::FooterEntry;
 use super::panel::{Panel, PanelResult};
 use super::schema_browser::SchemaBrowserPanel;
 use super::theme::Theme;
@@ -203,6 +204,22 @@ impl Panel for CommandsPanel {
             SUB_DISCOVER => self.discover.handle_input(key),
             SUB_SCHEMA => self.schema.handle_input(key),
             _ => PanelResult::Continue,
+        }
+    }
+
+    fn footer_entries(&self) -> Vec<FooterEntry> {
+        match self.active_sub {
+            SUB_DISCOVER => self.discover.footer_entries(),
+            SUB_SCHEMA => self.schema.footer_entries(),
+            _ => Vec::new(),
+        }
+    }
+
+    fn border_info(&self) -> Option<String> {
+        match self.active_sub {
+            SUB_DISCOVER => self.discover.border_info(),
+            SUB_SCHEMA => self.schema.border_info(),
+            _ => None,
         }
     }
 

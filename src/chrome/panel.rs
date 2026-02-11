@@ -6,6 +6,8 @@ use crossterm::event::KeyEvent;
 use ratatui_core::buffer::Buffer;
 use ratatui_core::layout::Rect;
 
+use super::footer_bar::FooterEntry;
+
 /// Result of handling panel input.
 #[derive(Debug, Clone)]
 pub enum PanelResult {
@@ -23,6 +25,11 @@ pub enum PanelResult {
 ///
 /// Panels are rendered using ratatui widgets into a buffer, which is then
 /// converted to ANSI sequences and written to the terminal.
+///
+/// Footer data is provided via `footer_entries()` and `border_info()` — the
+/// compositor (`TabbedPanel`) renders them using `FooterBar` and `BorderLine`
+/// widgets. This mirrors how `TopbarSegment::render()` provides data and
+/// `TopbarRegistry` composes it.
 pub trait Panel {
     /// Returns the preferred height for this panel.
     fn preferred_height(&self) -> u16;
@@ -40,4 +47,19 @@ pub trait Panel {
 
     /// Returns a mutable reference to self as `Any` for downcasting.
     fn as_any_mut(&mut self) -> &mut dyn Any;
+
+    /// Footer entries for this panel's current state.
+    ///
+    /// State-driven — returns different entries based on mode (edit, confirm,
+    /// normal). Empty vec means "no footer" — compositor skips footer rendering.
+    ///
+    /// Mirrors `TopbarSegment::render()` returning `None` to hide a segment.
+    fn footer_entries(&self) -> Vec<FooterEntry> {
+        Vec::new()
+    }
+
+    /// Optional right-aligned info for the border line above footer.
+    fn border_info(&self) -> Option<String> {
+        None
+    }
 }

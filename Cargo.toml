@@ -98,10 +98,10 @@ once_cell = "1.19"
 arboard = "3"
 
 # Command schema integration (core types always available; heavy crates optional)
-command-schema-core = { path = "../command-schema/core" }
-command-schema-discovery = { path = "../command-schema/discovery", optional = true }
-command-schema-sqlite = { path = "../command-schema/sqlite", optional = true }
-command-schema-db = { path = "../command-schema/db", optional = true }
+command-schema-core = { git = "https://github.com/ex1tium/command-schema.git" }
+command-schema-discovery = { git = "https://github.com/ex1tium/command-schema.git", optional = true }
+command-schema-sqlite = { git = "https://github.com/ex1tium/command-schema.git", optional = true }
+command-schema-db = { git = "https://github.com/ex1tium/command-schema.git", optional = true }
 
 [dev-dependencies]
 rexpect = "0.5"

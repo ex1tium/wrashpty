@@ -7,7 +7,7 @@
 use std::any::Any;
 use std::sync::{Arc, Mutex};
 
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui_core::buffer::Buffer;
 use ratatui_core::layout::{Constraint, Layout, Rect};
 use ratatui_core::style::{Modifier, Style};
@@ -16,6 +16,7 @@ use ratatui_core::widgets::Widget;
 use ratatui_widgets::list::{List, ListItem};
 use ratatui_widgets::paragraph::Paragraph;
 
+use super::footer_bar::FooterEntry;
 use super::panel::{Panel, PanelResult};
 use super::theme::Theme;
 use crate::history_store::HistoryStore;
@@ -227,6 +228,36 @@ impl SchemaBrowserPanel {
         self.apply_filter();
     }
 
+    /// Discovers a command schema from its --help output.
+    ///
+    /// Uses the current filter text as the command name to discover.
+    fn discover_command(&mut self) {
+        let command = self.filter.trim().to_string();
+        if command.is_empty() {
+            return;
+        }
+
+        let store = match self.history_store.clone() {
+            Some(s) => s,
+            None => return,
+        };
+
+        let mut guard = match store.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+
+        match guard.discover_schema(&command) {
+            Ok(()) => {
+                drop(guard);
+                self.load_schemas();
+            }
+            Err(e) => {
+                self.status = Some(format!("Discovery failed: {e}"));
+            }
+        }
+    }
+
     /// Recursively adds subcommands and their flags to the node list.
     fn add_subcommands_recursive(
         nodes: &mut Vec<TreeNode>,
@@ -396,7 +427,7 @@ impl SchemaBrowserPanel {
 
 impl Panel for SchemaBrowserPanel {
     fn preferred_height(&self) -> u16 {
-        10
+        8
     }
 
     fn title(&self) -> &str {
@@ -408,18 +439,10 @@ impl Panel for SchemaBrowserPanel {
             return;
         }
 
-        // Layout: filter (1 line), list (flexible), status (1 line)
-        let has_status = self.status.is_some();
-        let constraints = if has_status {
-            vec![
-                Constraint::Length(1),
-                Constraint::Min(1),
-                Constraint::Length(1),
-            ]
-        } else {
-            vec![Constraint::Length(1), Constraint::Min(1)]
-        };
-        let chunks = Layout::vertical(constraints).split(area);
+        // Layout: filter (1 line), list (flexible)
+        // Status is shown via border_info(), rendered externally by TabbedPanel.
+        let chunks =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(area);
 
         // Render filter input
         let filter_text = if self.filter.is_empty() {
@@ -449,7 +472,7 @@ impl Panel for SchemaBrowserPanel {
                     Line::from(""),
                     Line::from(vec![
                         Span::styled("Schemas are added by: ", secondary),
-                        Span::styled("s", highlight),
+                        Span::styled("^D", highlight),
                         Span::styled(" to scan a command's --help,", secondary),
                     ]),
                     Line::from(vec![
@@ -460,7 +483,7 @@ impl Panel for SchemaBrowserPanel {
                     Line::from(""),
                     Line::from(vec![
                         Span::styled("Type a command name above, then press ", secondary),
-                        Span::styled("s", highlight),
+                        Span::styled("^D", highlight),
                         Span::styled(" to discover.", secondary),
                     ]),
                 ];
@@ -567,18 +590,25 @@ impl Panel for SchemaBrowserPanel {
         }
 
         // Render status line
-        if has_status {
-            if let Some(ref status) = self.status {
-                let status_line = Line::from(Span::styled(
-                    status.as_str(),
-                    Style::default().fg(self.theme.text_secondary),
-                ));
-                Paragraph::new(status_line).render(chunks[2], buffer);
-            }
-        }
     }
 
     fn handle_input(&mut self, key: KeyEvent) -> PanelResult {
+        // Ctrl+ keybinds — checked before the main match so they don't fall
+        // through to the filter's Char(c) handler.
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('d') => {
+                    self.discover_command();
+                    return PanelResult::Continue;
+                }
+                KeyCode::Char('r') => {
+                    self.load_schemas();
+                    return PanelResult::Continue;
+                }
+                _ => {}
+            }
+        }
+
         match key.code {
             KeyCode::Esc => PanelResult::Dismiss,
             KeyCode::Up => {
@@ -676,6 +706,19 @@ impl Panel for SchemaBrowserPanel {
         }
     }
 
+    fn footer_entries(&self) -> Vec<FooterEntry> {
+        vec![
+            FooterEntry::action("^D", "Discover"),
+            FooterEntry::action("^R", "Refresh"),
+            FooterEntry::action("Enter", "Expand"),
+            FooterEntry::action("Esc", "Close"),
+        ]
+    }
+
+    fn border_info(&self) -> Option<String> {
+        self.status.clone()
+    }
+
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
@@ -754,7 +797,7 @@ mod tests {
     #[test]
     fn test_schema_browser_preferred_height() {
         let panel = SchemaBrowserPanel::new(&AMBER_THEME);
-        assert_eq!(panel.preferred_height(), 10);
+        assert_eq!(panel.preferred_height(), 8);
     }
 
     #[test]

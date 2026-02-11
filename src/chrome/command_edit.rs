@@ -1012,9 +1012,12 @@ impl CommandEditState {
 ///
 /// The edit mode progressively drops optional elements based on available height:
 /// - Height >= 11: Full layout (spacers + prev/next suggestions)
-/// - Height 9-10: Drop spacer rows
-/// - Height 7-8: Also drop prev/next suggestion rows
-/// - Height < 7: Too small for edit mode (returns None)
+/// - Height 7-8: Drop spacer rows
+/// - Height 5-6: Also drop prev/next suggestion rows
+/// - Height < 5: Too small for edit mode (returns None)
+///
+/// Border and keybind rows are rendered externally by TabbedPanel's footer
+/// compositor (FooterBar + BorderLine widgets).
 ///
 /// Optional fields (`prev_suggestion`, `next_suggestion`) are `None` when
 /// the terminal is too short to display them.
@@ -1023,32 +1026,29 @@ pub struct EditModeLayout {
     pub title: Rect,
     /// Horizontal separator below the title.
     pub separator: Rect,
-    /// Row for the previous suggestion hint (hidden when height < 9).
+    /// Row for the previous suggestion hint (hidden when height < 7).
     pub prev_suggestion: Option<Rect>,
     /// Scrollable token strip showing bracketed command tokens.
     pub token_strip: Rect,
-    /// Row for the next suggestion hint (hidden when height < 9).
+    /// Row for the next suggestion hint (hidden when height < 7).
     pub next_suggestion: Option<Rect>,
     /// Text input area for editing the selected token.
     pub edit_input: Rect,
     /// Preview of the assembled command result.
     pub result_preview: Rect,
-    /// Bottom border row.
-    pub border: Rect,
-    /// Key-binding hints row.
-    pub keybinds: Rect,
 }
 
 /// Computes the adaptive edit mode layout for the given area.
 ///
-/// Returns `None` if the area is too small (height < 7) for a usable edit mode.
+/// Returns `None` if the area is too small (height < 5) for a usable edit mode.
+/// Border and keybind rows are rendered externally by TabbedPanel's footer compositor.
 pub fn compute_edit_mode_layout(area: Rect) -> Option<EditModeLayout> {
-    if area.height < 7 {
+    if area.height < 5 {
         return None;
     }
 
-    let show_suggestions = area.height >= 9;
-    let show_spacers = area.height >= 11;
+    let show_suggestions = area.height >= 7;
+    let show_spacers = area.height >= 9;
 
     let mut constraints = Vec::new();
     constraints.push(Constraint::Length(1)); // title
@@ -1068,8 +1068,6 @@ pub fn compute_edit_mode_layout(area: Rect) -> Option<EditModeLayout> {
         constraints.push(Constraint::Length(1)); // spacer
     }
     constraints.push(Constraint::Min(1)); // result preview
-    constraints.push(Constraint::Length(1)); // border
-    constraints.push(Constraint::Length(1)); // keybinds
 
     let chunks = Layout::vertical(constraints).split(area);
 
@@ -1103,10 +1101,6 @@ pub fn compute_edit_mode_layout(area: Rect) -> Option<EditModeLayout> {
         idx += 1; // spacer
     }
     let result_preview = chunks[idx];
-    idx += 1;
-    let border = chunks[idx];
-    idx += 1;
-    let keybinds = chunks[idx];
 
     Some(EditModeLayout {
         title,
@@ -1116,24 +1110,21 @@ pub fn compute_edit_mode_layout(area: Rect) -> Option<EditModeLayout> {
         next_suggestion,
         edit_input,
         result_preview,
-        border,
-        keybinds,
     })
 }
 
 /// Renders the shared edit mode UI elements (token strip, suggestions, edit input,
-/// result preview, and border) using the computed layout.
+/// and result preview) using the computed layout.
 ///
-/// The caller is responsible for rendering the title, separator, and keybind hints,
-/// as those differ between history browser and file browser.
+/// The caller is responsible for rendering the title and separator, as those
+/// differ between history browser and file browser. Border and keybind hints
+/// are rendered externally by TabbedPanel's footer compositor.
 pub fn render_edit_mode_shared(
     buffer: &mut Buffer,
     theme: &Theme,
     edit_state: &CommandEditState,
     layout: &EditModeLayout,
 ) {
-    let border_style = Style::default().fg(theme.panel_border);
-
     // Calculate the x-position where the selected token starts and ends
     let mut selected_x_start: usize = 3; // Initial padding
     let mut selected_x_end: usize = 3;
@@ -1313,14 +1304,6 @@ pub fn render_edit_mode_shared(
     Paragraph::new(preview_line)
         .wrap(Wrap { trim: false })
         .render(layout.result_preview, buffer);
-
-    // Border line
-    for x in layout.border.x..layout.border.x + layout.border.width {
-        if let Some(cell) = buffer.cell_mut((x, layout.border.y)) {
-            cell.set_char('─');
-            cell.set_style(border_style);
-        }
-    }
 }
 
 // ============================================================================

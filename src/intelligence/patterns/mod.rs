@@ -50,6 +50,7 @@ use super::variants;
 /// * `command` - The command text to learn from
 /// * `exit_status` - Optional exit status (0 = success)
 /// * `session_db_id` - Optional database ID of the current session
+/// * `provider` - Schema provider for command metadata lookup
 pub fn learn_command(
     conn: &mut Connection,
     token_cache: &mut HashMap<String, i64>,
