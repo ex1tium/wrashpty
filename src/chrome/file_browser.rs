@@ -900,11 +900,11 @@ impl Panel for FileBrowserPanel {
             }
 
             // Navigation
-            KeyCode::Up => {
+            KeyCode::Char('k') | KeyCode::Up => {
                 self.scroll.up(count);
                 PanelResult::Continue
             }
-            KeyCode::Down => {
+            KeyCode::Char('j') | KeyCode::Down => {
                 self.scroll.down(count);
                 PanelResult::Continue
             }

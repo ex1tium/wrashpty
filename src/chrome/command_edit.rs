@@ -377,6 +377,16 @@ impl EditConfig {
             max_undo_size: 20,
         }
     }
+
+    /// Config for schema browser command crafting.
+    pub fn for_schema() -> Self {
+        Self {
+            danger_check: true,
+            enable_undo: true,
+            enable_quotes: true,
+            max_undo_size: 50,
+        }
+    }
 }
 
 // ============================================================================
@@ -532,6 +542,29 @@ impl CommandEditState {
         let mut state = Self::new(tokens, EditConfig::for_file());
         state.context = Some(filename.to_string());
         state.update_suggestions();
+        state
+    }
+
+    /// Creates edit state for schema-driven command crafting.
+    ///
+    /// Locked token(s) for the command path, an empty argument token for
+    /// user input, and schema flags pre-populated as suggestions.
+    pub fn for_schema(
+        command: &str,
+        subcommand: Option<&str>,
+        flags: Vec<String>,
+    ) -> Self {
+        let mut tokens = vec![CommandToken::locked(command)];
+        if let Some(sub) = subcommand {
+            tokens.push(CommandToken::locked(sub));
+        }
+        tokens.push(CommandToken::new(String::new(), TokenType::Argument));
+        let last_idx = tokens.len() - 1;
+        let mut state = Self::new(tokens, EditConfig::for_schema());
+        // Select the empty argument token for editing
+        state.selected = last_idx;
+        state.edit_buffer.clear();
+        state.suggestions = flags;
         state
     }
 
