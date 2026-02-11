@@ -413,8 +413,12 @@ impl FileBrowserPanel {
             None => ("  ".to_string(), self.theme.text_secondary),
         };
 
-        // Icon
-        let icon = if entry.is_dir { "📁" } else { "📄" };
+        // Icon (from glyph tier)
+        let icon = if entry.is_dir {
+            self.glyphs.icon.folder
+        } else {
+            self.glyphs.icon.file
+        };
         let icon_color = if entry.is_dir {
             self.theme.dir_color
         } else {

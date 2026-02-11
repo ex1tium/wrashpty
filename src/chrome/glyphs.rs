@@ -435,9 +435,9 @@ pub static ASCII_GLYPHS: GlyphSet = GlyphSet {
         git_untracked: "?",
         git_conflict: "!",
         git_renamed: "r",
-        folder: "",
-        file: "",
-        executable: "",
+        folder: "[D]",
+        file: "[F]",
+        executable: "[X]",
         link: "@",
         home: "~",
         search: "",
@@ -540,10 +540,10 @@ pub static UNICODE_GLYPHS: GlyphSet = GlyphSet {
         git_untracked: "?",
         git_conflict: "!",
         git_renamed: "r",
-        folder: "",
-        file: "",
-        executable: "",
-        link: "@",
+        folder: "\u{1f5c0}",  // 🗀 (file folder, text presentation)
+        file: "\u{1f5ce}",    // 🗎 (document, text presentation)
+        executable: "\u{2699}",// ⚙ (gear)
+        link: "\u{2192}",     // → (rightwards arrow)
         home: "~",
         search: "",
         history: "",
@@ -755,10 +755,14 @@ mod tests {
         let ascii = GlyphSet::for_tier(GlyphTier::Ascii);
         assert_eq!(ascii.border.horizontal, '-');
         assert_eq!(ascii.tree.vertical, "|");
+        assert_eq!(ascii.icon.folder, "[D]");
+        assert_eq!(ascii.icon.file, "[F]");
 
         let unicode = GlyphSet::for_tier(GlyphTier::Unicode);
         assert_eq!(unicode.border.horizontal, '─');
         assert_eq!(unicode.tree.vertical, "│");
+        assert_eq!(unicode.icon.folder, "\u{1f5c0}"); // 🗀
+        assert_eq!(unicode.icon.file, "\u{1f5ce}");   // 🗎
 
         let emoji = GlyphSet::for_tier(GlyphTier::Emoji);
         assert_eq!(emoji.border.horizontal, '─'); // Same as unicode
@@ -859,6 +863,20 @@ mod tests {
         ] {
             let g = GlyphSet::for_tier(tier);
             assert!(g.border.horizontal != '\0', "tier {:?}", tier);
+        }
+    }
+
+    #[test]
+    fn test_all_tiers_have_nonempty_folder_and_file_icons() {
+        for tier in [
+            GlyphTier::Ascii,
+            GlyphTier::Unicode,
+            GlyphTier::Emoji,
+            GlyphTier::NerdFont,
+        ] {
+            let g = GlyphSet::for_tier(tier);
+            assert!(!g.icon.folder.is_empty(), "tier {:?} folder", tier);
+            assert!(!g.icon.file.is_empty(), "tier {:?} file", tier);
         }
     }
 
