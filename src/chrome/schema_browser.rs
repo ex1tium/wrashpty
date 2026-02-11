@@ -24,7 +24,8 @@ use super::theme::Theme;
 use crate::history_store::HistoryStore;
 use crate::ui::filter_input::FilterInput;
 use crate::ui::tree_state::{TreeItem, TreeViewState};
-use crate::ui::tree_view::{tree_prefix, UNICODE_TREE_CHARS};
+use crate::config::SymbolSet;
+use crate::ui::tree_view::{tree_chars_for_set, tree_prefix, TreeChars};
 
 /// A node in the schema tree view.
 #[derive(Debug, Clone)]
@@ -156,13 +157,15 @@ pub struct SchemaBrowserPanel {
     history_store: Option<Arc<Mutex<HistoryStore>>>,
     /// Theme.
     theme: &'static Theme,
+    /// Tree drawing characters (Unicode or ASCII fallback).
+    tree_chars: &'static TreeChars,
     /// Status message shown in border info.
     status: Option<String>,
 }
 
 impl SchemaBrowserPanel {
     /// Creates a new schema browser panel.
-    pub fn new(theme: &'static Theme) -> Self {
+    pub fn new(theme: &'static Theme, symbol_set: SymbolSet) -> Self {
         Self {
             nodes: Vec::new(),
             tree: TreeViewState::new(),
@@ -172,6 +175,7 @@ impl SchemaBrowserPanel {
             edit_command_name: None,
             history_store: None,
             theme,
+            tree_chars: tree_chars_for_set(symbol_set),
             status: None,
         }
     }
@@ -885,7 +889,7 @@ impl Panel for SchemaBrowserPanel {
                 let tree_line = self.tree.tree_line_at(vis_idx).unwrap();
                 let is_selected = vis_idx == self.tree.scroll().selection();
 
-                let prefix = tree_prefix(tree_line, &UNICODE_TREE_CHARS);
+                let prefix = tree_prefix(tree_line, self.tree_chars);
                 let name = node.display_name();
 
                 let desc = match node {
@@ -1085,11 +1089,11 @@ mod tests {
 
     use super::super::theme::AMBER_THEME;
     use super::*;
-    use crate::ui::tree_view::tree_prefix_width;
+    use crate::ui::tree_view::{tree_prefix_width, UNICODE_TREE_CHARS};
 
     /// Creates a panel pre-populated with test nodes.
     fn panel_with_nodes() -> SchemaBrowserPanel {
-        let mut panel = SchemaBrowserPanel::new(&AMBER_THEME);
+        let mut panel = SchemaBrowserPanel::new(&AMBER_THEME, SymbolSet::NerdFont);
         panel.nodes = vec![
             TreeNode::Command {
                 name: "git".into(),
@@ -1157,7 +1161,7 @@ mod tests {
 
     #[test]
     fn test_schema_browser_new_initial_state() {
-        let panel = SchemaBrowserPanel::new(&AMBER_THEME);
+        let panel = SchemaBrowserPanel::new(&AMBER_THEME, SymbolSet::NerdFont);
         assert!(panel.nodes.is_empty());
         assert_eq!(panel.tree.visible_count(), 0);
         assert!(!panel.filter.has_filter());
@@ -1165,13 +1169,13 @@ mod tests {
 
     #[test]
     fn test_schema_browser_title() {
-        let panel = SchemaBrowserPanel::new(&AMBER_THEME);
+        let panel = SchemaBrowserPanel::new(&AMBER_THEME, SymbolSet::NerdFont);
         assert_eq!(panel.title(), "Browser");
     }
 
     #[test]
     fn test_schema_browser_preferred_height() {
-        let panel = SchemaBrowserPanel::new(&AMBER_THEME);
+        let panel = SchemaBrowserPanel::new(&AMBER_THEME, SymbolSet::NerdFont);
         assert_eq!(panel.preferred_height(), 8);
     }
 

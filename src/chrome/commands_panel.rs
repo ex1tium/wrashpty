@@ -21,6 +21,7 @@ use super::footer_bar::FooterEntry;
 use super::panel::{Panel, PanelResult};
 use super::schema_browser::SchemaBrowserPanel;
 use super::theme::Theme;
+use crate::config::SymbolSet;
 use crate::history_store::HistoryStore;
 
 /// Inner sub-tab indices.
@@ -45,10 +46,10 @@ pub struct CommandsPanel {
 
 impl CommandsPanel {
     /// Creates a new commands panel.
-    pub fn new(theme: &'static Theme) -> Self {
+    pub fn new(theme: &'static Theme, symbol_set: SymbolSet) -> Self {
         Self {
             discover: CommandPalettePanel::new(theme),
-            schema: SchemaBrowserPanel::new(theme),
+            schema: SchemaBrowserPanel::new(theme, symbol_set),
             active_sub: SUB_DISCOVER,
             theme,
         }
@@ -238,14 +239,14 @@ mod tests {
 
     #[test]
     fn test_commands_panel_new() {
-        let panel = CommandsPanel::new(&AMBER_THEME);
+        let panel = CommandsPanel::new(&AMBER_THEME, SymbolSet::NerdFont);
         assert_eq!(panel.active_sub, SUB_DISCOVER);
         assert_eq!(panel.title(), "Commands");
     }
 
     #[test]
     fn test_commands_panel_sub_tab_switching() {
-        let mut panel = CommandsPanel::new(&AMBER_THEME);
+        let mut panel = CommandsPanel::new(&AMBER_THEME, SymbolSet::NerdFont);
         assert_eq!(panel.active_sub, SUB_DISCOVER);
 
         panel.next_sub();
@@ -260,7 +261,7 @@ mod tests {
 
     #[test]
     fn test_commands_panel_tab_key_switches() {
-        let mut panel = CommandsPanel::new(&AMBER_THEME);
+        let mut panel = CommandsPanel::new(&AMBER_THEME, SymbolSet::NerdFont);
         assert_eq!(panel.active_sub, SUB_DISCOVER);
 
         let tab_key = KeyEvent::from(KeyCode::Tab);
@@ -276,7 +277,7 @@ mod tests {
 
     #[test]
     fn test_commands_panel_preferred_height_includes_inner_tabs() {
-        let panel = CommandsPanel::new(&AMBER_THEME);
+        let panel = CommandsPanel::new(&AMBER_THEME, SymbolSet::NerdFont);
         // Should be sub-panel height + 2 (tab bar + separator)
         let discover_height = panel.discover.preferred_height();
         assert_eq!(panel.preferred_height(), discover_height + 2);

@@ -47,7 +47,7 @@ impl TabbedPanel {
         let tabs: Vec<Box<dyn Panel>> = vec![
             Box::new(HistoryBrowserPanel::new(theme)),
             Box::new(FileBrowserPanel::new(theme, symbol_set)),
-            Box::new(CommandsPanel::new(theme)),
+            Box::new(CommandsPanel::new(theme, symbol_set)),
             Box::new(HelpPanel::new(theme)),
         ];
 

@@ -3,12 +3,16 @@
 //! This module handles detection of nerdfont support and theme preferences.
 
 /// Symbol set preference for UI rendering.
+///
+/// The `NerdFont` variant uses Unicode box-drawing characters (`│├└─▸▾`)
+/// that work in virtually all modern terminals. The `Fallback` variant
+/// uses pure ASCII (`|`, `` ` ``, `-`, `>`, `v`) for legacy terminals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SymbolSet {
-    /// Rich Nerd Font symbols (requires font installation).
-    NerdFont,
-    /// Safe ASCII/basic Unicode fallback.
+    /// Unicode box-drawing + triangle indicators (works in all modern terminals).
     #[default]
+    NerdFont,
+    /// Pure ASCII fallback for legacy terminals.
     Fallback,
 }
 
@@ -100,7 +104,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            symbol_set: SymbolSet::Fallback,
+            symbol_set: SymbolSet::NerdFont,
             theme: ThemePreset::Amber,
             scrollback: ScrollbackConfig::default(),
         }
@@ -112,9 +116,8 @@ impl Config {
     ///
     /// # Environment Variables
     ///
-    /// - `WRASHPTY_NERD_FONTS`: Set to `1`, `true`, or `yes` to enable nerdfonts.
-    ///   Set to `0`, `false`, or `no` to disable (overrides terminal hints).
-    ///   If unset, auto-detects based on terminal.
+    /// - `WRASHPTY_NERD_FONTS`: Set to `0`, `false`, or `no` for ASCII fallback.
+    ///   Unicode box-drawing characters are used by default.
     ///
     /// - `WRASHPTY_THEME`: Set to `amber` or `retro` for amber monochrome theme.
     ///   Set to `terminal` or `native` to use terminal's color scheme.
@@ -130,61 +133,19 @@ impl Config {
         }
     }
 
-    /// Detects whether to use nerdfonts based on environment.
+    /// Detects symbol set preference from environment.
+    ///
+    /// Defaults to `NerdFont` (Unicode box-drawing) since all modern terminals
+    /// support it. Set `WRASHPTY_NERD_FONTS=0` to force ASCII fallback.
     fn detect_symbol_set() -> SymbolSet {
-        // 1. Explicit env var takes priority
-        if let Ok(val) = std::env::var("WRASHPTY_NERD_FONTS") {
-            return match val.to_lowercase().as_str() {
-                "1" | "true" | "yes" | "on" => SymbolSet::NerdFont,
-                "0" | "false" | "no" | "off" => SymbolSet::Fallback,
-                _ => SymbolSet::Fallback,
-            };
+        match std::env::var("WRASHPTY_NERD_FONTS")
+            .as_deref()
+            .map(str::to_lowercase)
+            .as_deref()
+        {
+            Ok("0") | Ok("false") | Ok("no") | Ok("off") => SymbolSet::Fallback,
+            _ => SymbolSet::NerdFont,
         }
-
-        // 2. Terminal hints - modern terminals likely have nerdfont support
-        if Self::is_nerdfont_capable_terminal() {
-            return SymbolSet::NerdFont;
-        }
-
-        // 3. Default to fallback for safety
-        SymbolSet::Fallback
-    }
-
-    /// Checks for known nerdfont-capable terminals via environment variables.
-    fn is_nerdfont_capable_terminal() -> bool {
-        // Kitty terminal
-        if std::env::var("KITTY_WINDOW_ID").is_ok() {
-            return true;
-        }
-
-        // iTerm2 on macOS
-        if std::env::var("ITERM_SESSION_ID").is_ok() {
-            return true;
-        }
-
-        // Windows Terminal
-        if std::env::var("WT_SESSION").is_ok() {
-            return true;
-        }
-
-        // WezTerm
-        if std::env::var("WEZTERM_PANE").is_ok() {
-            return true;
-        }
-
-        // Alacritty (check TERM)
-        if let Ok(term) = std::env::var("TERM") {
-            if term.contains("alacritty") {
-                return true;
-            }
-        }
-
-        // Ghostty
-        if std::env::var("GHOSTTY_RESOURCES_DIR").is_ok() {
-            return true;
-        }
-
-        false
     }
 
     /// Detects theme preference from environment.
@@ -208,7 +169,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(config.symbol_set, SymbolSet::Fallback);
+        assert_eq!(config.symbol_set, SymbolSet::NerdFont);
         assert_eq!(config.theme, ThemePreset::Amber);
         assert!(config.scrollback.enabled);
         assert_eq!(config.scrollback.max_lines, 10_000);
@@ -216,7 +177,7 @@ mod tests {
 
     #[test]
     fn test_symbol_set_default() {
-        assert_eq!(SymbolSet::default(), SymbolSet::Fallback);
+        assert_eq!(SymbolSet::default(), SymbolSet::NerdFont);
     }
 
     #[test]
