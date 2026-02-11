@@ -315,6 +315,11 @@ impl CommandPalettePanel {
         }
     }
 
+    /// Returns a reference to all discovered command items.
+    pub fn items(&self) -> &[CommandItem] {
+        &self.items
+    }
+
     /// Applies the current filter to the item list.
     fn apply_filter(&mut self) {
         self.filtered.clear();
@@ -515,6 +520,10 @@ impl Panel for CommandPalettePanel {
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
+    }
+
+    fn set_theme(&mut self, theme: &'static super::theme::Theme) {
+        self.theme = theme;
     }
 }
 

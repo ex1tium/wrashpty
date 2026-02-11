@@ -177,6 +177,11 @@ impl Chrome {
         self.glyphs = GlyphSet::for_tier(tier);
     }
 
+    /// Sets the theme for runtime switching.
+    pub fn set_theme(&mut self, theme: &'static Theme) {
+        self.theme = theme;
+    }
+
     /// Checks if the clock should be updated based on the current minute.
     ///
     /// Returns true if the minute has changed since last render.

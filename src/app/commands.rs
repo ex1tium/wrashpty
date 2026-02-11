@@ -26,6 +26,8 @@ pub enum CommandAction {
     Handled,
     /// Open the panel browser.
     OpenPanel,
+    /// Open the Settings panel on the Help subtab.
+    OpenSettingsHelp,
     /// Exit the application.
     Exit,
 }
@@ -400,10 +402,12 @@ fn cmd_glyph_nerdfont(ctx: &mut CommandContext) -> CommandAction {
 }
 
 fn cmd_help(ctx: &mut CommandContext) -> CommandAction {
-    // Build help text showing all commands
-    // We can't access the registry from inside a handler, so we emit a
-    // notification with a condensed help summary.
-    let help = "\
+    if ctx.args.is_empty() {
+        // Open settings panel on help subtab
+        CommandAction::OpenSettingsHelp
+    } else {
+        // Show condensed help as notification with search hint
+        let help = "\
 :panel (:p)        Open command browser\n\
 :glyph-ascii       Switch to ASCII glyphs\n\
 :glyph-unicode     Switch to Unicode glyphs\n\
@@ -412,10 +416,11 @@ fn cmd_help(ctx: &mut CommandContext) -> CommandAction {
 :wipe              Delete all history\n\
 :dedupe            Remove duplicate history\n\
 :wipe-ci           Reset intelligence DB\n\
-:help (:h, :?)     Show this help";
+:help (:h, :?)     Open help panel";
 
-    ctx.chrome.notify(help, NotificationStyle::Info, Duration::from_secs(15));
-    CommandAction::Handled
+        ctx.chrome.notify(help, NotificationStyle::Info, Duration::from_secs(15));
+        CommandAction::Handled
+    }
 }
 
 #[cfg(test)]
@@ -432,9 +437,9 @@ mod tests {
     }
 
     fn make_test_store() -> Arc<Mutex<HistoryStore>> {
-        // Create an in-memory store for testing
+        // Use a unique temp file so parallel tests don't share the real history.db
         Arc::new(Mutex::new(
-            HistoryStore::new([0u8; 16]).expect("test history store"),
+            HistoryStore::new_temp().expect("test history store"),
         ))
     }
 
@@ -606,24 +611,35 @@ mod tests {
     }
 
     #[test]
-    fn test_help_returns_handled() {
+    fn test_help_no_args_opens_settings_help() {
         let mut registry = CommandRegistry::new();
         let mut chrome = make_test_chrome();
         let store = make_test_store();
         assert_eq!(
             registry.dispatch(":help", &mut chrome, &store),
+            Some(CommandAction::OpenSettingsHelp)
+        );
+    }
+
+    #[test]
+    fn test_help_with_args_returns_handled() {
+        let mut registry = CommandRegistry::new();
+        let mut chrome = make_test_chrome();
+        let store = make_test_store();
+        assert_eq!(
+            registry.dispatch(":help panel", &mut chrome, &store),
             Some(CommandAction::Handled)
         );
     }
 
     #[test]
-    fn test_dispatch_help_alias_question_mark_handled() {
+    fn test_dispatch_help_alias_question_mark_opens_settings_help() {
         let mut registry = CommandRegistry::new();
         let mut chrome = make_test_chrome();
         let store = make_test_store();
         assert_eq!(
             registry.dispatch(":?", &mut chrome, &store),
-            Some(CommandAction::Handled)
+            Some(CommandAction::OpenSettingsHelp)
         );
     }
 }

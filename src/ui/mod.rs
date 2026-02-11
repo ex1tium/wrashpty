@@ -6,6 +6,7 @@
 
 pub mod filter_input;
 pub mod focus_style;
+pub mod input_widgets;
 pub mod scrollable_list;
 pub mod text_width;
 pub mod tree_state;

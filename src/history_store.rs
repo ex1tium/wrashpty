@@ -216,6 +216,34 @@ impl HistoryStore {
         Ok(store)
     }
 
+    /// Creates a lightweight `HistoryStore` backed by a unique temporary file.
+    ///
+    /// Each call produces an isolated database so tests running in parallel
+    /// never interfere with each other (or the real `history.db`).
+    #[cfg(test)]
+    pub fn new_temp() -> Result<Self, HistoryStoreError> {
+        let tmp = tempfile::NamedTempFile::new()?;
+        let db_path = tmp.into_temp_path().to_path_buf();
+        // into_temp_path() persists the file on disk until the PathBuf is dropped,
+        // but we only need it alive for the duration of the test.
+
+        let reedline_history = SqliteBackedHistory::with_file(db_path.clone(), None, None)?;
+
+        let store = Self {
+            db_path,
+            last_command_id: None,
+            reedline_history: Some(reedline_history),
+            intelligence: None,
+            last_command_text: None,
+        };
+
+        if let Err(e) = store.create_settings_table() {
+            warn!("Failed to create settings table: {}", e);
+        }
+
+        Ok(store)
+    }
+
     /// Creates the settings table if it doesn't exist.
     fn create_settings_table(&self) -> Result<(), HistoryStoreError> {
         let conn = self.open_connection()?;
