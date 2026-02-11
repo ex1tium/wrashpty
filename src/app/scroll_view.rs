@@ -648,7 +648,7 @@ impl App {
                 records: &self.viewer_state.boundaries.records,
                 search: Some(search),
                 separator_registry: Some(&self.viewer_state.separator_registry),
-                symbols: Some(self.chrome.symbols()),
+                glyphs: Some(self.chrome.glyphs()),
                 collapsed_commands: Some(&self.viewer_state.collapsed_commands),
                 sticky_header: self.viewer_state.display.sticky_headers
                     && self.viewer_state.is_command_separators_shown(),
@@ -907,7 +907,7 @@ impl App {
                 filter: Some(filter),
                 filter_offset,
                 separator_registry: Some(&self.viewer_state.separator_registry),
-                symbols: Some(self.chrome.symbols()),
+                glyphs: Some(self.chrome.glyphs()),
                 collapsed_commands: Some(&self.viewer_state.collapsed_commands),
                 sticky_header: false,
                 ..Default::default()
@@ -1109,7 +1109,7 @@ impl App {
                 filter_offset,
                 search: Some(search),
                 separator_registry: Some(&self.viewer_state.separator_registry),
-                symbols: Some(self.chrome.symbols()),
+                glyphs: Some(self.chrome.glyphs()),
                 collapsed_commands: Some(&self.viewer_state.collapsed_commands),
                 sticky_header: false,
                 theme: Some(self.chrome.theme()),
@@ -1407,7 +1407,7 @@ impl App {
                 boundary_lines,
                 records: &self.viewer_state.boundaries.records,
                 separator_registry: Some(&self.viewer_state.separator_registry),
-                symbols: Some(self.chrome.symbols()),
+                glyphs: Some(self.chrome.glyphs()),
                 collapsed_commands: Some(&self.viewer_state.collapsed_commands),
                 sticky_header: self.viewer_state.display.sticky_headers
                     && self.viewer_state.is_command_separators_shown(),

@@ -19,7 +19,7 @@ use super::help_panel::HelpPanel;
 use super::history_browser::HistoryBrowserPanel;
 use super::panel::{Panel, PanelResult};
 use super::theme::Theme;
-use crate::config::SymbolSet;
+use super::glyphs::{GlyphSet, GlyphTier};
 use crate::history_store::HistoryStore;
 
 // Tab indices for type-based access
@@ -39,15 +39,18 @@ pub struct TabbedPanel {
     history_store: Option<Arc<Mutex<HistoryStore>>>,
     /// Theme for rendering.
     theme: &'static Theme,
+    /// Unified glyph set for the current tier.
+    glyphs: &'static GlyphSet,
 }
 
 impl TabbedPanel {
     /// Creates a new tabbed panel with all panel types.
-    pub fn new(theme: &'static Theme, symbol_set: SymbolSet) -> Self {
+    pub fn new(theme: &'static Theme, glyph_tier: GlyphTier) -> Self {
+        let glyphs = GlyphSet::for_tier(glyph_tier);
         let tabs: Vec<Box<dyn Panel>> = vec![
-            Box::new(HistoryBrowserPanel::new(theme)),
-            Box::new(FileBrowserPanel::new(theme, symbol_set)),
-            Box::new(CommandsPanel::new(theme, symbol_set)),
+            Box::new(HistoryBrowserPanel::new(theme, glyphs)),
+            Box::new(FileBrowserPanel::new(theme, glyph_tier)),
+            Box::new(CommandsPanel::new(theme, glyph_tier)),
             Box::new(HelpPanel::new(theme)),
         ];
 
@@ -56,6 +59,7 @@ impl TabbedPanel {
             active_tab: 0,
             history_store: None,
             theme,
+            glyphs,
         }
     }
 
@@ -265,7 +269,7 @@ impl Panel for TabbedPanel {
             let sep_area = Rect::new(chunks[0].x, chunks[0].y + 1, chunks[0].width, 1);
             for x in sep_area.x..sep_area.x + sep_area.width {
                 if let Some(cell) = buffer.cell_mut((x, sep_area.y)) {
-                    cell.set_char('─');
+                    cell.set_char(self.glyphs.border.horizontal);
                     cell.set_style(Style::default().fg(self.theme.panel_border));
                 }
             }
@@ -293,8 +297,8 @@ impl Panel for TabbedPanel {
                 // Compose border widget with optional info
                 let border_info = panel.border_info();
                 let border = match border_info {
-                    Some(ref info) => BorderLine::new(self.theme).with_info(info),
-                    None => BorderLine::new(self.theme),
+                    Some(ref info) => BorderLine::new(self.theme, self.glyphs.border.horizontal).with_info(info),
+                    None => BorderLine::new(self.theme, self.glyphs.border.horizontal),
                 };
                 border.render(content_chunks[1], buffer);
 
@@ -331,6 +335,13 @@ impl Panel for TabbedPanel {
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
+
+    fn set_glyph_tier(&mut self, tier: GlyphTier) {
+        self.glyphs = GlyphSet::for_tier(tier);
+        for tab in &mut self.tabs {
+            tab.set_glyph_tier(tier);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -340,14 +351,14 @@ mod tests {
 
     #[test]
     fn test_tabbed_panel_new() {
-        let panel = TabbedPanel::new(&AMBER_THEME, SymbolSet::NerdFont);
+        let panel = TabbedPanel::new(&AMBER_THEME, GlyphTier::NerdFont);
         assert_eq!(panel.tab_count(), 4);
         assert_eq!(panel.active_tab(), 0);
     }
 
     #[test]
     fn test_tabbed_panel_next_tab() {
-        let mut panel = TabbedPanel::new(&AMBER_THEME, SymbolSet::NerdFont);
+        let mut panel = TabbedPanel::new(&AMBER_THEME, GlyphTier::NerdFont);
         assert_eq!(panel.active_tab(), 0);
         panel.next_tab();
         assert_eq!(panel.active_tab(), 1);
@@ -362,7 +373,7 @@ mod tests {
 
     #[test]
     fn test_tabbed_panel_prev_tab() {
-        let mut panel = TabbedPanel::new(&AMBER_THEME, SymbolSet::NerdFont);
+        let mut panel = TabbedPanel::new(&AMBER_THEME, GlyphTier::NerdFont);
         // Should wrap to last
         panel.prev_tab();
         assert_eq!(panel.active_tab(), 3);
@@ -372,7 +383,7 @@ mod tests {
 
     #[test]
     fn test_render_tab_hint_clears_wide_char_continuation_cell() {
-        let panel = TabbedPanel::new(&AMBER_THEME, SymbolSet::NerdFont);
+        let panel = TabbedPanel::new(&AMBER_THEME, GlyphTier::NerdFont);
         let sep_area = Rect::new(0, 0, 12, 1);
         let mut buffer = Buffer::empty(sep_area);
 

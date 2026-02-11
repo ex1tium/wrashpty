@@ -5,7 +5,7 @@
 use unicode_width::UnicodeWidthStr;
 
 use super::{RenderedSegment, SegmentAlign, TopbarSegment, TopbarState, color_to_fg_ansi};
-use crate::chrome::symbols::Symbols;
+use crate::chrome::glyphs::GlyphSet;
 use crate::chrome::theme::Theme;
 
 /// Segment displaying current time.
@@ -23,13 +23,13 @@ impl TopbarSegment for ClockSegment {
         &self,
         state: &TopbarState,
         theme: &Theme,
-        symbols: &Symbols,
+        glyphs: &GlyphSet,
         separator: &str,
     ) -> Option<RenderedSegment> {
         let sep_fg = color_to_fg_ansi(theme.separator_fg);
         let clock_fg = color_to_fg_ansi(theme.clock_fg);
         let separator_width = separator.width();
-        let clock_icon = symbols.clock;
+        let clock_icon = glyphs.icon.clock;
         let clock_icon_width = clock_icon.width();
 
         let (icon_part, icon_display_width) = if !clock_icon.is_empty() {
@@ -56,7 +56,8 @@ impl TopbarSegment for ClockSegment {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{SymbolSet, ThemePreset};
+    use crate::chrome::glyphs::GlyphSet;
+    use crate::config::ThemePreset;
 
     fn test_state() -> TopbarState {
         TopbarState {
@@ -73,10 +74,10 @@ mod tests {
     #[test]
     fn test_clock_segment_renders() {
         let theme = Theme::for_preset(ThemePreset::Amber);
-        let symbols = Symbols::for_set(SymbolSet::Fallback);
+        let glyphs = GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode);
         let state = test_state();
 
-        let rendered = ClockSegment.render(&state, theme, symbols, "▶");
+        let rendered = ClockSegment.render(&state, theme, glyphs, "▶");
         assert!(rendered.is_some());
 
         let segment = rendered.unwrap();

@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use ratatui_core::style::Color;
 
-use super::symbols::Symbols;
+use super::glyphs::GlyphSet;
 use super::theme::Theme;
 
 /// Alignment for topbar segments.
@@ -219,7 +219,7 @@ pub trait TopbarSegment: Send + Sync {
         &self,
         state: &TopbarState,
         theme: &Theme,
-        symbols: &Symbols,
+        glyphs: &GlyphSet,
         separator: &str,
     ) -> Option<RenderedSegment>;
 }
@@ -270,17 +270,17 @@ impl TopbarRegistry {
         state: &TopbarState,
         max_width: usize,
         theme: &Theme,
-        symbols: &Symbols,
+        glyphs: &GlyphSet,
     ) -> String {
         let bar_bg = color_to_bg_ansi(theme.bar_bg);
-        let separator = symbols.separator_right;
+        let separator = glyphs.separator.powerline_right;
 
         // Render all segments
         let mut left_segments: Vec<RenderedSegment> = Vec::new();
         let mut right_segments: Vec<RenderedSegment> = Vec::new();
 
         for segment in &self.segments {
-            if let Some(rendered) = segment.render(state, theme, symbols, separator) {
+            if let Some(rendered) = segment.render(state, theme, glyphs, separator) {
                 match rendered.align {
                     SegmentAlign::Left => left_segments.push(rendered),
                     SegmentAlign::Right => right_segments.push(rendered),

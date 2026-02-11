@@ -20,6 +20,7 @@ use super::command_edit::{
     CommandEditState, CommandToken, TokenType, compute_edit_mode_layout, render_edit_mode_shared,
 };
 use super::footer_bar::FooterEntry;
+use super::glyphs::GlyphSet;
 use super::panel::{Panel, PanelResult};
 use super::theme::Theme;
 use crate::history_store::{FilterMode, HistoryRecord, HistoryStore, SortMode};
@@ -75,11 +76,13 @@ pub struct HistoryBrowserPanel {
     edit_mode: Option<CommandEditState>,
     /// Theme for rendering.
     theme: &'static Theme,
+    /// Unified glyph set for the current tier.
+    glyphs: &'static GlyphSet,
 }
 
 impl HistoryBrowserPanel {
     /// Creates a new empty history browser.
-    pub fn new(theme: &'static Theme) -> Self {
+    pub fn new(theme: &'static Theme, glyphs: &'static GlyphSet) -> Self {
         Self {
             records: Vec::new(),
             selection: 0,
@@ -91,6 +94,7 @@ impl HistoryBrowserPanel {
             history_store: None,
             edit_mode: None,
             theme,
+            glyphs,
         }
     }
 
@@ -281,14 +285,14 @@ impl HistoryBrowserPanel {
                     hint_idx += 1;
                     col_offset = ch_w.saturating_sub(1);
                 } else {
-                    cell.set_char('─');
+                    cell.set_char(self.glyphs.border.horizontal);
                     cell.set_style(border_style);
                 }
             }
         }
 
         // Render shared elements (token strip, suggestions, edit input, result preview)
-        render_edit_mode_shared(buffer, self.theme, edit_state, &layout);
+        render_edit_mode_shared(buffer, self.theme, self.glyphs, edit_state, &layout);
     }
 
     /// Renders the danger confirmation dialog.
@@ -933,7 +937,7 @@ impl Panel for HistoryBrowserPanel {
         let sep_style = Style::default().fg(self.theme.panel_border);
         for x in chunks[2].x..chunks[2].x + chunks[2].width {
             if let Some(cell) = buffer.cell_mut((x, chunks[2].y)) {
-                cell.set_char('─');
+                cell.set_char(self.glyphs.border.horizontal);
                 cell.set_style(sep_style);
             }
         }
@@ -1087,6 +1091,10 @@ impl Panel for HistoryBrowserPanel {
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
+
+    fn set_glyph_tier(&mut self, tier: super::glyphs::GlyphTier) {
+        self.glyphs = super::glyphs::GlyphSet::for_tier(tier);
+    }
 }
 
 #[cfg(test)]
@@ -1101,14 +1109,14 @@ mod tests {
 
     #[test]
     fn test_history_browser_new_constructs_empty_records() {
-        let panel = HistoryBrowserPanel::new(&AMBER_THEME);
+        let panel = HistoryBrowserPanel::new(&AMBER_THEME, crate::chrome::glyphs::GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode));
         assert!(panel.records.is_empty());
         assert_eq!(panel.selection, 0);
     }
 
     #[test]
     fn test_filter_mode_default_flags_false() {
-        let panel = HistoryBrowserPanel::new(&AMBER_THEME);
+        let panel = HistoryBrowserPanel::new(&AMBER_THEME, crate::chrome::glyphs::GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode));
         assert!(!panel.filter_mode.dedupe);
         assert!(!panel.filter_mode.current_dir_only);
         assert!(!panel.filter_mode.failed_only);
@@ -1116,7 +1124,7 @@ mod tests {
 
     #[test]
     fn test_sort_mode_cycle_through_variants() {
-        let mut panel = HistoryBrowserPanel::new(&AMBER_THEME);
+        let mut panel = HistoryBrowserPanel::new(&AMBER_THEME, crate::chrome::glyphs::GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode));
         assert_eq!(panel.sort_mode, SortMode::Recency);
         panel.sort_mode = panel.sort_mode.next();
         assert_eq!(panel.sort_mode, SortMode::Frequency);
@@ -1240,7 +1248,7 @@ mod tests {
 
     #[test]
     fn test_edit_mode_original_hint_preserves_wide_chars() {
-        let mut panel = HistoryBrowserPanel::new(&AMBER_THEME);
+        let mut panel = HistoryBrowserPanel::new(&AMBER_THEME, crate::chrome::glyphs::GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode));
         panel.edit_mode = Some(CommandEditState::from_command("echo 你好"));
 
         let area = Rect::new(0, 0, 60, 12);

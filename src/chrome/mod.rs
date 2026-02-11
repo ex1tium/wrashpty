@@ -11,12 +11,12 @@ pub mod core;
 pub mod file_browser;
 pub mod file_tree;
 pub mod footer_bar;
+pub mod glyphs;
 pub mod help_panel;
 pub mod history_browser;
 pub mod panel;
 pub mod schema_browser;
 pub mod segments;
-pub mod symbols;
 pub mod tabbed_panel;
 pub mod theme;
 

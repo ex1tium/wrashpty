@@ -251,12 +251,17 @@ impl Widget for FooterBar<'_> {
 pub struct BorderLine<'a> {
     theme: &'static Theme,
     info: Option<&'a str>,
+    border_char: char,
 }
 
 impl<'a> BorderLine<'a> {
     /// Creates a new border line widget.
-    pub fn new(theme: &'static Theme) -> Self {
-        Self { theme, info: None }
+    pub fn new(theme: &'static Theme, border_char: char) -> Self {
+        Self {
+            theme,
+            info: None,
+            border_char,
+        }
     }
 
     /// Sets right-aligned info text to overlay on the border.
@@ -274,10 +279,9 @@ impl Widget for BorderLine<'_> {
 
         let border_style = Style::default().fg(self.theme.panel_border);
 
-        // Fill with ─
         for x in area.x..area.x + area.width {
             if let Some(cell) = buf.cell_mut((x, area.y)) {
-                cell.set_char('─');
+                cell.set_char(self.border_char);
                 cell.set_style(border_style);
             }
         }
@@ -470,7 +474,7 @@ mod tests {
         let area = Rect::new(0, 0, 20, 1);
         let mut buf = Buffer::empty(area);
 
-        BorderLine::new(&AMBER_THEME).render(area, &mut buf);
+        BorderLine::new(&AMBER_THEME, '─').render(area, &mut buf);
 
         for x in 0..20 {
             let cell = buf.cell((x, 0)).unwrap();
@@ -483,7 +487,7 @@ mod tests {
         let area = Rect::new(0, 0, 30, 1);
         let mut buf = Buffer::empty(area);
 
-        BorderLine::new(&AMBER_THEME)
+        BorderLine::new(&AMBER_THEME, '─')
             .with_info("sort:name")
             .render(area, &mut buf);
 
@@ -501,7 +505,7 @@ mod tests {
         let area = Rect::new(0, 0, 10, 1);
         let mut buf = Buffer::empty(area);
 
-        BorderLine::new(&AMBER_THEME).render(area, &mut buf);
+        BorderLine::new(&AMBER_THEME, '─').render(area, &mut buf);
 
         for x in 0..10 {
             assert_eq!(buf.cell((x, 0)).unwrap().symbol(), "─");

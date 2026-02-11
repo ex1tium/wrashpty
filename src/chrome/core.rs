@@ -33,8 +33,8 @@ use tracing::{debug, info, warn};
 use unicode_width::UnicodeWidthStr;
 
 use super::buffer_convert::buffer_to_ansi;
+use super::glyphs::{GlyphSet, GlyphTier};
 use super::segments::{TopbarRegistry, TopbarState, color_to_bg_ansi, color_to_fg_ansi};
-use super::symbols::Symbols;
 use super::theme::Theme;
 use crate::config::Config;
 use crate::types::ChromeMode;
@@ -117,11 +117,11 @@ pub struct Chrome {
     /// Theme for rendering.
     theme: &'static Theme,
 
-    /// Symbols for icons.
-    symbols: &'static Symbols,
+    /// Current glyph tier.
+    glyph_tier: GlyphTier,
 
-    /// Symbol set enum for passing to sub-components.
-    symbol_set: crate::config::SymbolSet,
+    /// Unified glyph set for the current tier.
+    glyphs: &'static GlyphSet,
 
     /// Last rendered minute (0-59) for efficient clock updates.
     last_rendered_minute: Option<u8>,
@@ -139,17 +139,18 @@ impl Chrome {
     /// * `config` - Application configuration for theme and symbol selection
     pub fn new(mode: ChromeMode, config: &Config) -> Self {
         let theme = Theme::for_preset(config.theme);
-        let symbols = Symbols::for_set(config.symbol_set);
+        let glyph_tier = config.glyph_tier;
+        let glyphs = GlyphSet::for_tier(glyph_tier);
         let registry = TopbarRegistry::with_defaults();
-        info!(mode = ?mode, theme = ?config.theme, symbols = ?config.symbol_set, "Chrome layer initialized");
+        info!(mode = ?mode, theme = ?config.theme, glyph_tier = ?glyph_tier, "Chrome layer initialized");
         Self {
             mode,
             suspended: false,
             panel_state: PanelState::Collapsed,
             notifications: VecDeque::new(),
             theme,
-            symbols,
-            symbol_set: config.symbol_set,
+            glyph_tier,
+            glyphs,
             last_rendered_minute: None,
             registry,
         }
@@ -160,14 +161,20 @@ impl Chrome {
         self.theme
     }
 
-    /// Returns the symbols used by this Chrome instance.
-    pub fn symbols(&self) -> &'static Symbols {
-        self.symbols
+    /// Returns the current glyph tier.
+    pub fn glyph_tier(&self) -> GlyphTier {
+        self.glyph_tier
     }
 
-    /// Returns the symbol set used by this Chrome instance.
-    pub fn symbol_set(&self) -> crate::config::SymbolSet {
-        self.symbol_set
+    /// Returns the unified glyph set for the current tier.
+    pub fn glyphs(&self) -> &'static GlyphSet {
+        self.glyphs
+    }
+
+    /// Sets the glyph tier and updates the glyph set.
+    pub fn set_glyph_tier(&mut self, tier: GlyphTier) {
+        self.glyph_tier = tier;
+        self.glyphs = GlyphSet::for_tier(tier);
     }
 
     /// Checks if the clock should be updated based on the current minute.
@@ -455,7 +462,7 @@ impl Chrome {
 
         let content = self
             .registry
-            .render(state, cols as usize, self.theme, self.symbols);
+            .render(state, cols as usize, self.theme, self.glyphs);
         let bar_bg = color_to_bg_ansi(self.theme.bar_bg);
 
         let stdout = io::stdout();
@@ -822,27 +829,27 @@ impl Chrome {
     ///
     /// Returns an error if writing to stdout fails.
     fn render_notification(&self, cols: u16, notif: &Notification) -> io::Result<()> {
-        // Map style to theme colors and symbols
+        // Map style to theme colors and glyphs
         let (bg_color, fg_color, icon) = match notif.style {
             NotificationStyle::Info => (
                 self.theme.semantic_info,
                 self.theme.bar_bg,
-                self.symbols.notif_info,
+                self.glyphs.indicator.info,
             ),
             NotificationStyle::Success => (
                 self.theme.semantic_success,
                 self.theme.bar_bg,
-                self.symbols.success,
+                self.glyphs.indicator.success,
             ),
             NotificationStyle::Warning => (
                 self.theme.semantic_warning,
                 self.theme.bar_bg,
-                self.symbols.notif_warning,
+                self.glyphs.indicator.warning,
             ),
             NotificationStyle::Error => (
                 self.theme.semantic_error,
                 self.theme.bar_bg,
-                self.symbols.failure,
+                self.glyphs.indicator.failure,
             ),
         };
         let bg = color_to_bg_ansi(bg_color);
@@ -1065,9 +1072,9 @@ mod tests {
 
         let result = chrome
             .registry
-            .render(&state, 80, chrome.theme, chrome.symbols);
+            .render(&state, 80, chrome.theme, chrome.glyphs);
 
-        assert!(result.contains(chrome.symbols.success));
+        assert!(result.contains(chrome.glyphs.indicator.success));
         // Duration < 0.5s not shown
         assert!(result.contains("project"));
         assert!(result.contains("main"));
@@ -1092,9 +1099,9 @@ mod tests {
 
         let result = chrome
             .registry
-            .render(&state, 80, chrome.theme, chrome.symbols);
+            .render(&state, 80, chrome.theme, chrome.glyphs);
 
-        assert!(result.contains(chrome.symbols.failure));
+        assert!(result.contains(chrome.glyphs.indicator.failure));
     }
 
     #[test]
@@ -1118,7 +1125,7 @@ mod tests {
 
         let result = chrome
             .registry
-            .render(&state, 80, chrome.theme, chrome.symbols);
+            .render(&state, 80, chrome.theme, chrome.glyphs);
 
         // In fallback mode, dirty indicator is ●
         assert!(result.contains("feature"));
@@ -1145,13 +1152,13 @@ mod tests {
 
         let result = chrome
             .registry
-            .render(&state, 40, chrome.theme, chrome.symbols);
+            .render(&state, 40, chrome.theme, chrome.glyphs);
 
         // Verify render completes and produces output
         // Note: result.len() is bytes, not display width (contains ANSI codes)
         assert!(!result.is_empty());
         // Status segment (checkmark) should always be present
-        assert!(result.contains(chrome.symbols.success));
+        assert!(result.contains(chrome.glyphs.indicator.success));
     }
 
     #[test]

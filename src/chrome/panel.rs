@@ -7,6 +7,7 @@ use ratatui_core::buffer::Buffer;
 use ratatui_core::layout::Rect;
 
 use super::footer_bar::FooterEntry;
+use super::glyphs::GlyphTier;
 
 /// Result of handling panel input.
 #[derive(Debug, Clone)]
@@ -62,4 +63,9 @@ pub trait Panel {
     fn border_info(&self) -> Option<String> {
         None
     }
+
+    /// Updates the glyph tier for runtime switching.
+    ///
+    /// Default is a no-op. Override in panels that cache glyph references.
+    fn set_glyph_tier(&mut self, _tier: GlyphTier) {}
 }

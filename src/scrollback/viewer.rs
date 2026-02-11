@@ -8,7 +8,7 @@ use super::boundaries::CommandRecord;
 use super::buffer::ScrollbackBuffer;
 use super::features::{FilterState, SearchState};
 use super::separator::SeparatorRegistry;
-use crate::chrome::{symbols::Symbols, theme::Theme};
+use crate::chrome::{glyphs::GlyphSet, theme::Theme};
 
 /// Truncates raw byte content (potentially containing ANSI escape sequences)
 /// to fit within `max_display_cols` terminal columns.
@@ -150,8 +150,8 @@ pub struct RenderConfig<'a> {
     pub filter_offset: usize,
     /// Separator segment registry for rich command metadata display.
     pub separator_registry: Option<&'a SeparatorRegistry>,
-    /// UI symbols for status/failure indicators in separator segments.
-    pub symbols: Option<&'a Symbols>,
+    /// Unified glyph set for separator rendering.
+    pub glyphs: Option<&'a GlyphSet>,
     /// Optional external collapsed command set (reserved for future use).
     pub collapsed_commands: Option<&'a HashSet<usize>>,
     /// Whether sticky command headers are enabled in normal mode.
@@ -173,7 +173,7 @@ impl Default for RenderConfig<'_> {
             filter: None,
             filter_offset: 0,
             separator_registry: None,
-            symbols: None,
+            glyphs: None,
             collapsed_commands: None,
             sticky_header: false,
             theme: None,
@@ -437,6 +437,7 @@ impl ScrollViewer {
                     gutter_width,
                     "BEGIN",
                     config.theme,
+                    config.glyphs,
                 )?;
                 current_row += 1;
             }
@@ -451,7 +452,7 @@ impl ScrollViewer {
                         config.theme,
                         Some(record),
                         config.separator_registry,
-                        config.symbols,
+                        config.glyphs,
                     )?;
                     current_row += 1;
                 }
@@ -473,7 +474,7 @@ impl ScrollViewer {
                         config.theme,
                         Self::record_for_line(config.records, line_index),
                         config.separator_registry,
-                        config.symbols,
+                        config.glyphs,
                     )?;
                     current_row += 1;
                 }
@@ -548,6 +549,7 @@ impl ScrollViewer {
                     gutter_width,
                     "END",
                     config.theme,
+                    config.glyphs,
                 )?;
                 current_row += 1;
             }
@@ -642,6 +644,7 @@ impl ScrollViewer {
         gutter_width: usize,
         label: &str,
         theme: Option<&Theme>,
+        glyphs: Option<&GlyphSet>,
     ) -> io::Result<()> {
         use crate::chrome::segments::color_to_fg_ansi;
 
@@ -664,12 +667,13 @@ impl ScrollViewer {
             write!(out, "\x1b[2m")?;
         }
 
+        let dash = glyphs.map_or('─', |g| g.border.horizontal);
         for _ in 0..dashes_left {
-            write!(out, "─")?;
+            write!(out, "{dash}")?;
         }
         write!(out, "{}", label_with_spaces)?;
         for _ in 0..dashes_right {
-            write!(out, "─")?;
+            write!(out, "{dash}")?;
         }
 
         if theme.is_some() {
@@ -689,10 +693,10 @@ impl ScrollViewer {
         theme: Option<&Theme>,
         record: Option<&CommandRecord>,
         separator_registry: Option<&SeparatorRegistry>,
-        symbols: Option<&Symbols>,
+        glyphs: Option<&GlyphSet>,
     ) -> io::Result<()> {
-        if let (Some(theme), Some(registry), Some(symbols)) = (theme, separator_registry, symbols) {
-            let separator = registry.render(record, cols, gutter_width, theme, symbols);
+        if let (Some(theme), Some(registry), Some(glyphs)) = (theme, separator_registry, glyphs) {
+            let separator = registry.render(record, cols, gutter_width, theme, glyphs);
             write!(out, "{}", separator)?;
             return Ok(());
         }
@@ -712,8 +716,9 @@ impl ScrollViewer {
             write!(out, "\x1b[2m")?;
         }
 
+        let dash = glyphs.map_or('╌', |g| g.separator.dash);
         for _ in 0..content_cols {
-            write!(out, "╌")?;
+            write!(out, "{dash}")?;
         }
 
         if theme.is_some() {
@@ -915,7 +920,7 @@ impl ScrollViewer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{SymbolSet, ThemePreset};
+    use crate::config::ThemePreset;
     use crate::scrollback::{CommandRecord, SeparatorRegistry};
     use std::path::PathBuf;
     use std::time::Duration;
@@ -1250,7 +1255,7 @@ mod tests {
         ]);
         let mut output = Vec::new();
         let theme = crate::chrome::theme::Theme::for_preset(ThemePreset::Amber);
-        let symbols = crate::chrome::symbols::Symbols::for_set(SymbolSet::Fallback);
+        let glyphs = crate::chrome::glyphs::GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode);
         let registry = SeparatorRegistry::with_defaults();
         let records = vec![CommandRecord {
             output_start: 2,
@@ -1273,7 +1278,7 @@ mod tests {
                 records: &records,
                 sticky_header: true,
                 separator_registry: Some(&registry),
-                symbols: Some(symbols),
+                glyphs: Some(glyphs),
                 theme: Some(theme),
                 ..Default::default()
             },
@@ -1293,7 +1298,7 @@ mod tests {
         ]);
         let mut output = Vec::new();
         let theme = crate::chrome::theme::Theme::for_preset(ThemePreset::Amber);
-        let symbols = crate::chrome::symbols::Symbols::for_set(SymbolSet::Fallback);
+        let glyphs = crate::chrome::glyphs::GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode);
         let registry = SeparatorRegistry::with_defaults();
         let records = vec![CommandRecord {
             output_start: 2,
@@ -1314,7 +1319,7 @@ mod tests {
                 records: &records,
                 sticky_header: true,
                 separator_registry: Some(&registry),
-                symbols: Some(symbols),
+                glyphs: Some(glyphs),
                 theme: Some(theme),
                 ..Default::default()
             },
@@ -1372,7 +1377,7 @@ mod tests {
         let buffer = create_test_buffer(&["l1", "l2", "l3", "l4", "l5", "l6"]);
         let mut output = Vec::new();
         let theme = crate::chrome::theme::Theme::for_preset(ThemePreset::Amber);
-        let symbols = crate::chrome::symbols::Symbols::for_set(SymbolSet::Fallback);
+        let glyphs = crate::chrome::glyphs::GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode);
         let registry = SeparatorRegistry::with_defaults();
         let records = vec![
             CommandRecord {
@@ -1401,7 +1406,7 @@ mod tests {
                 boundary_lines: &[2],
                 records: &records,
                 separator_registry: Some(&registry),
-                symbols: Some(symbols),
+                glyphs: Some(glyphs),
                 theme: Some(theme),
                 ..Default::default()
             },

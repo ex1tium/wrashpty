@@ -98,7 +98,11 @@ impl FilterInput {
     ///
     /// When active: `" / pattern_"` (with cursor indicator).
     /// When inactive with text: `" / pattern"`.
-    pub fn render_spans<'a>(&'a self, theme: &Theme) -> Vec<Span<'a>> {
+    pub fn render_spans<'a>(
+        &'a self,
+        theme: &Theme,
+        glyphs: &crate::chrome::glyphs::GlyphSet,
+    ) -> Vec<Span<'a>> {
         let key_style = Style::default().fg(theme.text_highlight);
         let text_style = Style::default()
             .fg(theme.header_fg)
@@ -110,7 +114,10 @@ impl FilterInput {
         ];
 
         if self.active {
-            spans.push(Span::styled("█", Style::default().fg(theme.text_highlight)));
+            spans.push(Span::styled(
+                String::from(glyphs.progress.block_full),
+                Style::default().fg(theme.text_highlight),
+            ));
         }
 
         spans

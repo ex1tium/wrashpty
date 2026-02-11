@@ -10,10 +10,8 @@ use super::boundaries::CommandRecord;
 use crate::chrome::segments::{
     color_to_fg_ansi, format_duration, strip_ansi_width, truncate_ansi_content,
 };
-use crate::chrome::symbols::Symbols;
+use crate::chrome::glyphs::GlyphSet;
 use crate::chrome::theme::Theme;
-
-const DASH_CHAR: &str = "╌";
 
 /// Rendered separator segment with width metadata.
 #[derive(Debug, Clone)]
@@ -46,7 +44,7 @@ pub trait SeparatorSegment: Send + Sync {
         &self,
         record: &CommandRecord,
         theme: &Theme,
-        symbols: &Symbols,
+        glyphs: &GlyphSet,
     ) -> Option<RenderedSepPart>;
 }
 
@@ -97,8 +95,9 @@ impl SeparatorRegistry {
         cols: usize,
         gutter_width: usize,
         theme: &Theme,
-        symbols: &Symbols,
+        glyphs: &GlyphSet,
     ) -> String {
+        let dash_str = String::from(glyphs.separator.dash);
         let content_cols = cols.saturating_sub(gutter_width);
         if content_cols == 0 {
             return " ".repeat(gutter_width);
@@ -116,7 +115,7 @@ impl SeparatorRegistry {
             let mut parts: Vec<RenderedSepPart> = self
                 .segments
                 .iter()
-                .filter_map(|segment| segment.render(record, theme, symbols))
+                .filter_map(|segment| segment.render(record, theme, glyphs))
                 .collect();
 
             let command_cap = content_cols / 2;
@@ -130,7 +129,7 @@ impl SeparatorRegistry {
             }
 
             if parts.is_empty() {
-                line.push_str(&DASH_CHAR.repeat(content_cols));
+                line.push_str(&dash_str.repeat(content_cols));
                 line.push_str("\x1b[39m");
                 return line;
             }
@@ -157,7 +156,7 @@ impl SeparatorRegistry {
             }
 
             if parts.is_empty() {
-                line.push_str(&DASH_CHAR.repeat(content_cols));
+                line.push_str(&dash_str.repeat(content_cols));
                 line.push_str("\x1b[39m");
                 return line;
             }
@@ -166,7 +165,7 @@ impl SeparatorRegistry {
             let gaps = parts.len().saturating_sub(1);
             let center_width = parts_width + gaps + 2;
             if center_width >= content_cols {
-                line.push_str(&DASH_CHAR.repeat(content_cols));
+                line.push_str(&dash_str.repeat(content_cols));
                 line.push_str("\x1b[39m");
                 return line;
             }
@@ -175,7 +174,7 @@ impl SeparatorRegistry {
             let left_dashes = (dash_total / 2).max(2).min(dash_total);
             let right_dashes = dash_total.saturating_sub(left_dashes);
 
-            line.push_str(&DASH_CHAR.repeat(left_dashes));
+            line.push_str(&dash_str.repeat(left_dashes));
             line.push(' ');
             for (idx, part) in parts.iter().enumerate() {
                 if idx > 0 {
@@ -185,12 +184,12 @@ impl SeparatorRegistry {
             }
             line.push(' ');
             line.push_str(&marker_fg);
-            line.push_str(&DASH_CHAR.repeat(right_dashes));
+            line.push_str(&dash_str.repeat(right_dashes));
             line.push_str("\x1b[39m");
             return line;
         }
 
-        line.push_str(&DASH_CHAR.repeat(content_cols));
+        line.push_str(&dash_str.repeat(content_cols));
         line.push_str("\x1b[39m");
         line
     }
@@ -207,25 +206,17 @@ impl SeparatorSegment for ExitCodeSegment {
         &self,
         record: &CommandRecord,
         theme: &Theme,
-        symbols: &Symbols,
+        glyphs: &GlyphSet,
     ) -> Option<RenderedSepPart> {
         let code = record.exit_code?;
         if code == 0 {
             let fg = color_to_fg_ansi(theme.semantic_success);
-            let success = if symbols.success.is_empty() {
-                "✓"
-            } else {
-                symbols.success
-            };
+            let success = glyphs.indicator.success;
             return Some(RenderedSepPart::new(format!("{fg}{success}"), 0));
         }
 
         let fg = color_to_fg_ansi(theme.semantic_error);
-        let failure = if symbols.failure.is_empty() {
-            "✗"
-        } else {
-            symbols.failure
-        };
+        let failure = glyphs.indicator.failure;
         Some(RenderedSepPart::new(format!("{fg}{failure} {code}"), 0))
     }
 }
@@ -241,7 +232,7 @@ impl SeparatorSegment for CommandTextSegment {
         &self,
         record: &CommandRecord,
         theme: &Theme,
-        _symbols: &Symbols,
+        _glyphs: &GlyphSet,
     ) -> Option<RenderedSepPart> {
         let command = record.command_text.as_deref()?.trim();
         if command.is_empty() {
@@ -264,7 +255,7 @@ impl SeparatorSegment for FoldBadgeSegment {
         &self,
         record: &CommandRecord,
         theme: &Theme,
-        _symbols: &Symbols,
+        _glyphs: &GlyphSet,
     ) -> Option<RenderedSepPart> {
         if !record.folded {
             return None;
@@ -294,7 +285,7 @@ impl SeparatorSegment for DurationSegment {
         &self,
         record: &CommandRecord,
         theme: &Theme,
-        _symbols: &Symbols,
+        _glyphs: &GlyphSet,
     ) -> Option<RenderedSepPart> {
         let duration = record.duration?;
         if duration.as_secs_f64() < 0.5 {
@@ -320,7 +311,7 @@ impl SeparatorSegment for TimestampSegment {
         &self,
         record: &CommandRecord,
         theme: &Theme,
-        _symbols: &Symbols,
+        _glyphs: &GlyphSet,
     ) -> Option<RenderedSepPart> {
         let started_at = record.started_at?;
         let fg = color_to_fg_ansi(theme.text_secondary);
@@ -342,7 +333,7 @@ impl SeparatorSegment for CwdSegment {
         &self,
         record: &CommandRecord,
         theme: &Theme,
-        _symbols: &Symbols,
+        _glyphs: &GlyphSet,
     ) -> Option<RenderedSepPart> {
         let cwd = record.cwd.as_ref()?;
         let display = format_cwd(cwd);
@@ -380,23 +371,24 @@ fn format_cwd(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{SymbolSet, ThemePreset};
+    use crate::chrome::glyphs::GlyphTier;
+    use crate::config::ThemePreset;
     use chrono::NaiveDate;
 
     #[test]
     fn test_separator_registry_render_without_record_returns_dash_line() {
         let registry = SeparatorRegistry::with_defaults();
         let theme = Theme::for_preset(ThemePreset::Amber);
-        let symbols = Symbols::for_set(SymbolSet::Fallback);
-        let rendered = registry.render(None, 20, 0, theme, symbols);
-        assert!(rendered.contains(DASH_CHAR));
+        let glyphs = GlyphSet::for_tier(GlyphTier::Unicode);
+        let rendered = registry.render(None, 20, 0, theme, glyphs);
+        assert!(rendered.contains(glyphs.separator.dash));
     }
 
     #[test]
     fn test_separator_registry_render_with_exit_code_contains_status_symbol() {
         let registry = SeparatorRegistry::with_defaults();
         let theme = Theme::for_preset(ThemePreset::Amber);
-        let symbols = Symbols::for_set(SymbolSet::Fallback);
+        let glyphs = GlyphSet::for_tier(GlyphTier::Unicode);
         let record = CommandRecord {
             output_start: 10,
             prompt_line: Some(20),
@@ -405,15 +397,15 @@ mod tests {
             ..Default::default()
         };
 
-        let rendered = registry.render(Some(&record), 40, 0, theme, symbols);
-        assert!(rendered.contains(symbols.success));
+        let rendered = registry.render(Some(&record), 40, 0, theme, glyphs);
+        assert!(rendered.contains(glyphs.indicator.success));
     }
 
     #[test]
     fn test_separator_registry_render_with_cwd_reapplies_marker_color_before_right_dashes() {
         let registry = SeparatorRegistry::with_defaults();
         let theme = Theme::for_preset(ThemePreset::Amber);
-        let symbols = Symbols::for_set(SymbolSet::Fallback);
+        let glyphs = GlyphSet::for_tier(GlyphTier::Unicode);
         let started_at = NaiveDate::from_ymd_opt(2026, 2, 8)
             .and_then(|date| date.and_hms_opt(0, 58, 0))
             .expect("valid test timestamp");
@@ -429,9 +421,9 @@ mod tests {
         };
 
         let marker_fg = color_to_fg_ansi(theme.marker_fg);
-        let rendered = registry.render(Some(&record), 120, 0, theme, symbols);
+        let rendered = registry.render(Some(&record), 120, 0, theme, glyphs);
         assert!(
-            rendered.contains(&format!("/tmp {}{}", marker_fg, DASH_CHAR)),
+            rendered.contains(&format!("/tmp {}{}", marker_fg, glyphs.separator.dash)),
             "separator should restore marker color before trailing dashes: {rendered:?}"
         );
     }
@@ -440,7 +432,7 @@ mod tests {
     fn test_separator_registry_render_when_folded_shows_hidden_line_count_badge() {
         let registry = SeparatorRegistry::with_defaults();
         let theme = Theme::for_preset(ThemePreset::Amber);
-        let symbols = Symbols::for_set(SymbolSet::Fallback);
+        let glyphs = GlyphSet::for_tier(GlyphTier::Unicode);
         let record = CommandRecord {
             output_start: 10,
             prompt_line: Some(15),
@@ -448,7 +440,7 @@ mod tests {
             ..Default::default()
         };
 
-        let rendered = registry.render(Some(&record), 80, 0, theme, symbols);
+        let rendered = registry.render(Some(&record), 80, 0, theme, glyphs);
         assert!(rendered.contains("[4 lines]"));
     }
 }
