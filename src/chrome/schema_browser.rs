@@ -36,17 +36,19 @@ use crate::ui::tree_view::tree_prefix;
 #[derive(Debug)]
 enum DiscoveryResult {
     /// Discovery completed successfully.
-    Success,
+    Success { command: String },
     /// Discovery failed with an error message.
-    Error(String),
+    Error { command: String, message: String },
 }
 
 /// State for background schema discovery.
 struct DiscoveryState {
+    /// Command being discovered.
+    command: String,
     /// Channel receiver for discovery result.
     receiver: Receiver<DiscoveryResult>,
     /// Thread handle for cleanup.
-    _handle: JoinHandle<()>,
+    handle: Option<JoinHandle<()>>,
 }
 
 /// A node in the schema tree view.
@@ -574,6 +576,7 @@ impl SchemaBrowserPanel {
 
         // Create channel for result
         let (sender, receiver) = channel();
+        let command_for_thread = command.clone();
 
         // Spawn thread for background discovery
         let handle = thread::spawn(move || {
@@ -581,16 +584,22 @@ impl SchemaBrowserPanel {
                 let mut guard = match store.lock() {
                     Ok(g) => g,
                     Err(_) => {
-                        let _ = sender.send(DiscoveryResult::Error(
-                            "Failed to lock history store".to_string(),
-                        ));
+                        let _ = sender.send(DiscoveryResult::Error {
+                            command: command_for_thread.clone(),
+                            message: "Failed to lock history store".to_string(),
+                        });
                         return;
                     }
                 };
 
-                match guard.discover_schema(&command) {
-                    Ok(()) => DiscoveryResult::Success,
-                    Err(e) => DiscoveryResult::Error(e.to_string()),
+                match guard.discover_schema(&command_for_thread) {
+                    Ok(()) => DiscoveryResult::Success {
+                        command: command_for_thread.clone(),
+                    },
+                    Err(e) => DiscoveryResult::Error {
+                        command: command_for_thread.clone(),
+                        message: e.to_string(),
+                    },
                 }
             };
             let _ = sender.send(result);
@@ -598,48 +607,54 @@ impl SchemaBrowserPanel {
 
         // Store discovery state
         self.discovery = Some(DiscoveryState {
+            command: command.clone(),
             receiver,
-            _handle: handle,
+            handle: Some(handle),
         });
 
         // Update status to show discovery started
-        self.status = Some("Discovering schema...".to_string());
+        self.status = Some(format!("Discovering schema: {command}"));
+    }
+
+    /// Finalizes a discovery operation and updates state with the result.
+    fn complete_discovery(&mut self, result: DiscoveryResult) {
+        if let Some(mut discovery) = self.discovery.take() {
+            if let Some(handle) = discovery.handle.take() {
+                let _ = handle.join();
+            }
+        }
+
+        match result {
+            DiscoveryResult::Success { command } => {
+                self.load_schemas();
+                self.status = Some(format!("Schema discovered: {command}"));
+            }
+            DiscoveryResult::Error { command, message } => {
+                self.status = Some(format!("Discovery failed [{command}]: {message}"));
+            }
+        }
     }
 
     /// Polls for discovery completion. Returns true if discovery is complete.
     fn poll_discovery(&mut self) -> bool {
-        if let Some(discovery) = &mut self.discovery {
-            match discovery.receiver.try_recv() {
-                Ok(DiscoveryResult::Success) => {
-                    // Clean up
-                    self.discovery = None;
+        let (recv, command) = match self.discovery.as_mut() {
+            Some(discovery) => (discovery.receiver.try_recv(), discovery.command.clone()),
+            None => return true,
+        };
 
-                    // Reload schemas
-                    self.load_schemas();
-                    self.status = Some("Schema discovered successfully".to_string());
-                    true
-                }
-                Ok(DiscoveryResult::Error(msg)) => {
-                    // Clean up
-                    self.discovery = None;
-
-                    // Show error
-                    self.status = Some(format!("Discovery failed: {msg}"));
-                    true
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    // Still running
-                    false
-                }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    // Thread panicked - clean up
-                    self.discovery = None;
-                    self.status = Some("Discovery failed unexpectedly".to_string());
-                    true
-                }
+        match recv {
+            Ok(result) => {
+                self.complete_discovery(result);
+                true
             }
-        } else {
-            true // No discovery running
+            Err(std::sync::mpsc::TryRecvError::Empty) => false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.complete_discovery(DiscoveryResult::Error {
+                    command,
+                    message: "Discovery thread terminated unexpectedly".to_string(),
+                });
+                true
+            }
         }
     }
 
@@ -1045,6 +1060,11 @@ impl Panel for SchemaBrowserPanel {
             return self.handle_edit_input(key);
         }
 
+        // Ignore inputs while discovery is in-flight.
+        if self.discovery.is_some() {
+            return PanelResult::Continue;
+        }
+
         // If filter is active, delegate to filter handler
         if self.filter.is_active() {
             return self.handle_filter_input(key);
@@ -1138,7 +1158,9 @@ impl Panel for SchemaBrowserPanel {
     }
 
     fn footer_entries(&self) -> Vec<FooterEntry> {
-        if self.edit_mode.is_some() {
+        if self.discovery.is_some() {
+            vec![FooterEntry::message("Discovering schema...")]
+        } else if self.edit_mode.is_some() {
             vec![
                 FooterEntry::action("↑↓", "Cycle"),
                 FooterEntry::action("←→", "Nav"),

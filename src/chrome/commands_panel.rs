@@ -256,6 +256,14 @@ impl Panel for CommandsPanel {
         self.discover.set_theme(theme);
         self.schema.set_theme(theme);
     }
+
+    fn is_animating(&self) -> bool {
+        match self.active_sub {
+            SUB_DISCOVER => self.discover.is_animating(),
+            SUB_SCHEMA => self.schema.is_animating(),
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]
