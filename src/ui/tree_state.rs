@@ -105,8 +105,7 @@ impl TreeViewState {
         }
 
         // Clamp selection to new visible count.
-        self.scroll
-            .set_selection(self.scroll.selection(), vis_len);
+        self.scroll.set_selection(self.scroll.selection(), vis_len);
     }
 
     // ── Accessors ──
@@ -203,12 +202,7 @@ impl Default for TreeViewState {
 
 /// Determines whether the node at `visible[vi]` is the last sibling at its
 /// depth by scanning forward for the next node at depth <= current.
-fn is_last_sibling<T: TreeItem>(
-    visible: &[usize],
-    vi: usize,
-    depth: usize,
-    nodes: &[T],
-) -> bool {
+fn is_last_sibling<T: TreeItem>(visible: &[usize], vi: usize, depth: usize, nodes: &[T]) -> bool {
     for j in (vi + 1)..visible.len() {
         let d = nodes[visible[j]].depth();
         if d <= depth {

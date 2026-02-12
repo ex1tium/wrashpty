@@ -45,10 +45,7 @@ fn fuzzy_score(query: &str, target: &str) -> Option<u32> {
     }
 
     let query_lower: Vec<char> = query.chars().flat_map(|c| c.to_lowercase()).collect();
-    let target_lower: Vec<char> = target
-        .chars()
-        .flat_map(|c| c.to_lowercase())
-        .collect();
+    let target_lower: Vec<char> = target.chars().flat_map(|c| c.to_lowercase()).collect();
 
     // Quick check: query can't match if longer than target
     if query_lower.len() > target_lower.len() {
@@ -224,7 +221,11 @@ impl HelpView {
 
         if !entries.is_empty() {
             // Check if we already have a "Colon Commands" section and replace it
-            if let Some(pos) = self.sections.iter().position(|s| s.title == "Colon Commands") {
+            if let Some(pos) = self
+                .sections
+                .iter()
+                .position(|s| s.title == "Colon Commands")
+            {
                 self.sections[pos] = HelpSection {
                     title: "Colon Commands".to_string(),
                     entries,
@@ -287,11 +288,7 @@ impl HelpView {
     }
 
     fn recalculate_total_lines(&mut self) {
-        self.total_lines = self
-            .sections
-            .iter()
-            .map(|s| 1 + s.entries.len() + 1)
-            .sum();
+        self.total_lines = self.sections.iter().map(|s| 1 + s.entries.len() + 1).sum();
     }
 
     /// Rebuilds filtered results based on current filter text using fuzzy matching.
@@ -638,11 +635,17 @@ mod tests {
     fn test_footer_entries_change_with_filter_state() {
         let mut view = HelpView::new(&AMBER_THEME, GlyphTier::Unicode);
         let normal = view.footer_entries();
-        assert!(normal.iter().any(|e| matches!(&e.kind, super::super::footer_bar::FooterKind::Action { key: "/", .. })));
+        assert!(normal.iter().any(|e| matches!(
+            &e.kind,
+            super::super::footer_bar::FooterKind::Action { key: "/", .. }
+        )));
 
         view.handle_input(KeyEvent::from(KeyCode::Char('/')));
         let active = view.footer_entries();
-        assert!(active.iter().any(|e| matches!(&e.kind, super::super::footer_bar::FooterKind::Action { key: "Type", .. })));
+        assert!(active.iter().any(|e| matches!(
+            &e.kind,
+            super::super::footer_bar::FooterKind::Action { key: "Type", .. }
+        )));
     }
 
     // --- Fuzzy scoring ---

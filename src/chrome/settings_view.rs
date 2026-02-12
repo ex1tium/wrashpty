@@ -16,8 +16,8 @@ use ratatui_widgets::list::{List, ListItem};
 use super::footer_bar::FooterEntry;
 use super::glyphs::{GlyphSet, GlyphTier};
 use super::theme::Theme;
-use crate::history_store::HistoryStore;
 use crate::config::ThemePreset;
+use crate::history_store::HistoryStore;
 use crate::ui::input_widgets::{
     CarouselWidget, SelectWidget, SliderWidget, TextInputWidget, ToggleWidget, WidgetResult,
 };
@@ -204,12 +204,10 @@ impl SettingsView {
                             SettingKind::Toggle(v) => {
                                 *v = val == "true" || val == "1";
                             }
-                            SettingKind::Select {
-                                options,
-                                selected,
-                            } => {
-                                if let Some(idx) =
-                                    options.iter().position(|o| o.to_lowercase() == val.to_lowercase())
+                            SettingKind::Select { options, selected } => {
+                                if let Some(idx) = options
+                                    .iter()
+                                    .position(|o| o.to_lowercase() == val.to_lowercase())
                                 {
                                     *selected = idx;
                                 }
@@ -299,21 +297,11 @@ impl SettingsView {
                 *val = w.value();
                 persist_value = if *val { "true".into() } else { "false".into() };
             }
-            (
-                SettingKind::Select {
-                    selected, ..
-                },
-                EditState::Select(w),
-            ) => {
+            (SettingKind::Select { selected, .. }, EditState::Select(w)) => {
                 *selected = w.selected();
                 persist_value = w.selected_label().to_string();
             }
-            (
-                SettingKind::Select {
-                    selected, ..
-                },
-                EditState::Carousel(w),
-            ) => {
+            (SettingKind::Select { selected, .. }, EditState::Carousel(w)) => {
                 *selected = w.selected();
                 persist_value = w.selected_label().to_string();
             }
@@ -321,10 +309,7 @@ impl SettingsView {
                 *val = w.value().to_string();
                 persist_value = val.clone();
             }
-            (
-                SettingKind::Slider { value, .. },
-                EditState::Slider(w),
-            ) => {
+            (SettingKind::Slider { value, .. }, EditState::Slider(w)) => {
                 *value = w.value();
                 persist_value = value.to_string();
             }
@@ -503,9 +488,7 @@ impl SettingsView {
                 };
 
                 let value_str = match &item.kind {
-                    SettingKind::Toggle(v) => {
-                        if *v { "ON" } else { "OFF" }.to_string()
-                    }
+                    SettingKind::Toggle(v) => if *v { "ON" } else { "OFF" }.to_string(),
                     SettingKind::Select {
                         options, selected, ..
                     } => options.get(*selected).cloned().unwrap_or_default(),
@@ -520,10 +503,7 @@ impl SettingsView {
                 };
                 items.push(ListItem::new(Line::from(vec![
                     Span::styled(format!("{} ", prefix), style),
-                    Span::styled(
-                        crate::ui::text_width::pad_to_width(item.name, 18),
-                        style,
-                    ),
+                    Span::styled(crate::ui::text_width::pad_to_width(item.name, 18), style),
                     Span::styled(value_str, Style::default().fg(self.theme.text_secondary)),
                 ])));
 
@@ -537,7 +517,11 @@ impl SettingsView {
         // Translate the item-based scroll offset into a row offset that accounts
         // for section headers and blank spacer lines.
         let row_offset = self.row_offset_for_item(render_list.scroll_offset());
-        let visible_items: Vec<ListItem> = items.into_iter().skip(row_offset).take(viewport_height).collect();
+        let visible_items: Vec<ListItem> = items
+            .into_iter()
+            .skip(row_offset)
+            .take(viewport_height)
+            .collect();
 
         let list = List::new(visible_items);
         list.render(area, buffer);
@@ -559,14 +543,27 @@ impl SettingsView {
         // Description
         let desc_line = Line::from(vec![
             Span::styled("  ", Style::default()),
-            Span::styled(item.name, Style::default().fg(self.theme.header_fg).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                item.name,
+                Style::default()
+                    .fg(self.theme.header_fg)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(": ", Style::default().fg(self.theme.text_secondary)),
-            Span::styled(item.description, Style::default().fg(self.theme.text_secondary)),
+            Span::styled(
+                item.description,
+                Style::default().fg(self.theme.text_secondary),
+            ),
         ]);
         ratatui_widgets::paragraph::Paragraph::new(desc_line).render(chunks[0], buffer);
 
         // Editing widget or current value display
-        let edit_area = Rect::new(chunks[1].x + 2, chunks[1].y, chunks[1].width.saturating_sub(4), chunks[1].height);
+        let edit_area = Rect::new(
+            chunks[1].x + 2,
+            chunks[1].y,
+            chunks[1].width.saturating_sub(4),
+            chunks[1].height,
+        );
 
         if let Some(ref edit) = self.editing {
             match edit {
@@ -579,9 +576,7 @@ impl SettingsView {
         } else {
             // Show current value as read-only
             let value_str = match &item.kind {
-                SettingKind::Toggle(v) => {
-                    if *v { "ON" } else { "OFF" }.to_string()
-                }
+                SettingKind::Toggle(v) => if *v { "ON" } else { "OFF" }.to_string(),
                 SettingKind::Select {
                     options, selected, ..
                 } => options.get(*selected).cloned().unwrap_or_default(),
@@ -735,7 +730,9 @@ mod tests {
         let actions = view.take_pending_actions();
         assert_eq!(
             actions,
-            vec![SettingAction::SetTheme(crate::config::ThemePreset::Terminal)]
+            vec![SettingAction::SetTheme(
+                crate::config::ThemePreset::Terminal
+            )]
         );
     }
 
@@ -751,10 +748,7 @@ mod tests {
         view.handle_input(KeyEvent::from(KeyCode::Enter));
         assert!(!view.is_editing());
         let actions = view.take_pending_actions();
-        assert_eq!(
-            actions,
-            vec![SettingAction::SetScrollbackEnabled(false)]
-        );
+        assert_eq!(actions, vec![SettingAction::SetScrollbackEnabled(false)]);
     }
 
     #[test]
@@ -768,10 +762,7 @@ mod tests {
         // Confirm
         view.handle_input(KeyEvent::from(KeyCode::Enter));
         let actions = view.take_pending_actions();
-        assert_eq!(
-            actions,
-            vec![SettingAction::SetScrollbackMaxLines(11_000)]
-        );
+        assert_eq!(actions, vec![SettingAction::SetScrollbackMaxLines(11_000)]);
     }
 
     #[test]

@@ -42,10 +42,7 @@ pub enum FooterKind {
         active: bool,
     },
     /// A key-value display (e.g., "^S Frecency").
-    Value {
-        key: &'static str,
-        value: String,
-    },
+    Value { key: &'static str, value: String },
     /// An informational message (no key).
     Message(String),
 }
@@ -169,11 +166,7 @@ impl<'a> FooterBar<'a> {
                     Span::styled(format!(" {}", label), label_style),
                 ]
             }
-            FooterKind::Toggle {
-                key,
-                label,
-                active,
-            } => {
+            FooterKind::Toggle { key, label, active } => {
                 let style = if *active { active_style } else { label_style };
                 vec![
                     Span::styled(*key, key_style),
@@ -288,8 +281,7 @@ impl Widget for BorderLine<'_> {
 
         // Overlay right-aligned info text if present
         if let Some(info) = self.info {
-            let info_display_width =
-                crate::ui::text_width::display_width(info) as u16;
+            let info_display_width = crate::ui::text_width::display_width(info) as u16;
             let padded_width = info_display_width + 2; // " info "
             let info_start = area.x + area.width.saturating_sub(padded_width + 1);
             let info_style = Style::default().fg(self.theme.text_secondary);
@@ -448,9 +440,9 @@ mod tests {
     fn test_footer_bar_priority_truncation_drops_highest_priority_number() {
         // Create entries that exceed 20 columns
         let entries = vec![
-            FooterEntry::action("Enter", "Run").with_priority(0),     // 9 cols, critical
+            FooterEntry::action("Enter", "Run").with_priority(0), // 9 cols, critical
             FooterEntry::toggle("^D", "Dedupe", true).with_priority(2), // 9 cols
-            FooterEntry::action("Esc", "Close").with_priority(1),     // 9 cols
+            FooterEntry::action("Esc", "Close").with_priority(1), // 9 cols
         ];
         // Total: 9 + 2 + 9 + 2 + 9 = 31 cols
 

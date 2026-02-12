@@ -69,8 +69,8 @@ impl TopbarSegment for GitSegment {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chrome::segments::GitInfo;
     use crate::chrome::glyphs::GlyphSet;
+    use crate::chrome::segments::GitInfo;
     use crate::config::ThemePreset;
 
     fn test_state() -> TopbarState {

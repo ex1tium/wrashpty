@@ -18,10 +18,10 @@ use ratatui_widgets::paragraph::Paragraph;
 
 use super::command_palette::CommandPalettePanel;
 use super::footer_bar::FooterEntry;
+use super::glyphs::{GlyphSet, GlyphTier};
 use super::panel::{Panel, PanelResult};
 use super::schema_browser::SchemaBrowserPanel;
 use super::theme::Theme;
-use super::glyphs::{GlyphSet, GlyphTier};
 use crate::history_store::HistoryStore;
 
 /// Inner sub-tab indices.
@@ -170,9 +170,12 @@ impl Panel for CommandsPanel {
         }
 
         // Layout: inner tab bar (1 line), separator (1 line), content (rest)
-        let chunks =
-            Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(1)])
-                .split(area);
+        let chunks = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
+        .split(area);
 
         // Render inner tab bar
         self.render_inner_tabs(buffer, chunks[0]);

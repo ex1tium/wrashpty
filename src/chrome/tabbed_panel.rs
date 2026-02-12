@@ -15,12 +15,12 @@ use ratatui_widgets::tabs::Tabs;
 use super::commands_panel::CommandsPanel;
 use super::file_browser::FileBrowserPanel;
 use super::footer_bar::{BorderLine, FooterBar};
+use super::glyphs::{GlyphSet, GlyphTier};
 use super::history_browser::HistoryBrowserPanel;
 use super::panel::{Panel, PanelResult};
 use super::settings_panel::SettingsPanel;
 use super::settings_view::SettingAction;
 use super::theme::Theme;
-use super::glyphs::{GlyphSet, GlyphTier};
 use crate::history_store::HistoryStore;
 
 // Tab indices for type-based access
@@ -257,11 +257,7 @@ impl Panel for TabbedPanel {
         self.tabs
             .get(self.active_tab)
             .map(|p| {
-                let footer_rows = if p.footer_entries().is_empty() {
-                    0
-                } else {
-                    2
-                };
+                let footer_rows = if p.footer_entries().is_empty() { 0 } else { 2 };
                 p.preferred_height() + 2 + footer_rows
             })
             .unwrap_or(14)
@@ -345,7 +341,9 @@ impl Panel for TabbedPanel {
                 // Compose border widget with optional info
                 let border_info = panel.border_info();
                 let border = match border_info {
-                    Some(ref info) => BorderLine::new(self.theme, self.glyphs.border.horizontal).with_info(info),
+                    Some(ref info) => {
+                        BorderLine::new(self.theme, self.glyphs.border.horizontal).with_info(info)
+                    }
                     None => BorderLine::new(self.theme, self.glyphs.border.horizontal),
                 };
                 border.render(content_chunks[1], buffer);

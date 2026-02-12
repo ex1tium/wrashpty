@@ -20,8 +20,8 @@ use super::command_edit::{
 };
 use super::file_tree::{FileTreeState, FlatEntry};
 use super::footer_bar::FooterEntry;
-use super::panel::{Panel, PanelResult};
 use super::glyphs::{GlyphSet, GlyphTier};
+use super::panel::{Panel, PanelResult};
 use super::theme::Theme;
 use crate::git::{CachedGitRepoStatus, GitFileStatus, get_git_repo_status_cached};
 use crate::history_store::HistoryStore;
@@ -346,12 +346,36 @@ impl FileBrowserPanel {
 
         let icons = &self.glyphs.icon;
         let entries: Vec<(GitFileStatus, &str, ratatui_core::style::Color)> = vec![
-            (GitFileStatus::Modified, icons.git_modified, self.theme.git_modified_fg),
-            (GitFileStatus::Added, icons.git_added, self.theme.git_added_fg),
-            (GitFileStatus::Deleted, icons.git_deleted, self.theme.git_deleted_fg),
-            (GitFileStatus::Untracked, icons.git_untracked, self.theme.git_untracked_fg),
-            (GitFileStatus::Renamed, icons.git_renamed, self.theme.git_renamed_fg),
-            (GitFileStatus::Conflict, icons.git_conflict, self.theme.git_conflict_fg),
+            (
+                GitFileStatus::Modified,
+                icons.git_modified,
+                self.theme.git_modified_fg,
+            ),
+            (
+                GitFileStatus::Added,
+                icons.git_added,
+                self.theme.git_added_fg,
+            ),
+            (
+                GitFileStatus::Deleted,
+                icons.git_deleted,
+                self.theme.git_deleted_fg,
+            ),
+            (
+                GitFileStatus::Untracked,
+                icons.git_untracked,
+                self.theme.git_untracked_fg,
+            ),
+            (
+                GitFileStatus::Renamed,
+                icons.git_renamed,
+                self.theme.git_renamed_fg,
+            ),
+            (
+                GitFileStatus::Conflict,
+                icons.git_conflict,
+                self.theme.git_conflict_fg,
+            ),
         ];
 
         for (status, marker, color) in entries {
@@ -1126,7 +1150,8 @@ mod tests {
 
     #[test]
     #[allow(non_snake_case)]
-    fn test_FileBrowserPanel_new_with_default_theme_and_nerdfont_shows_hidden_false_and_sorted_by_name() {
+    fn test_FileBrowserPanel_new_with_default_theme_and_nerdfont_shows_hidden_false_and_sorted_by_name()
+     {
         let panel = FileBrowserPanel::new(&AMBER_THEME, GlyphTier::NerdFont);
         assert!(!panel.tree.show_hidden());
         assert_eq!(panel.tree.sort_mode(), SortMode::Name);

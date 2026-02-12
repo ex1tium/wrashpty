@@ -70,7 +70,10 @@ impl SchemaMode {
             "schema-enabled" => Self::SchemaEnabled,
             "full-library" => Self::FullLibrary,
             other => {
-                tracing::debug!(value = other, "Unknown schema mode setting, defaulting to SchemaEnabled");
+                tracing::debug!(
+                    value = other,
+                    "Unknown schema mode setting, defaulting to SchemaEnabled"
+                );
                 Self::SchemaEnabled
             }
         }
@@ -131,9 +134,9 @@ mod full {
     use command_schema_core::CommandSchema;
     use command_schema_sqlite::{Migration, SchemaQuery};
     use rusqlite::Connection;
-    use tracing::{debug, info};
     #[cfg(feature = "bundled-schemas")]
     use tracing::warn;
+    use tracing::{debug, info};
 
     use super::{SchemaMode, SchemaProvider, SchemaSearchResult, SchemaSearchSource};
     use crate::intelligence::error::CIError;
@@ -158,15 +161,17 @@ mod full {
         /// any previously learned schemas from SQLite.
         pub fn new(conn: &Connection, mode: SchemaMode) -> Result<Self, CIError> {
             // Ensure cs_* tables exist (idempotent)
-            let migration = Migration::new(conn, "cs_")
-                .map_err(|e| CIError::Internal(e.to_string()))?;
-            migration.up()
+            let migration =
+                Migration::new(conn, "cs_").map_err(|e| CIError::Internal(e.to_string()))?;
+            migration
+                .up()
                 .map_err(|e| CIError::Internal(e.to_string()))?;
 
             // Load learned schemas from cs_* tables
-            let query = SchemaQuery::new(conn, "cs_")
-                .map_err(|e| CIError::Internal(e.to_string()))?;
-            let learned_schemas = query.get_all_schemas()
+            let query =
+                SchemaQuery::new(conn, "cs_").map_err(|e| CIError::Internal(e.to_string()))?;
+            let learned_schemas = query
+                .get_all_schemas()
                 .map_err(|e| CIError::Internal(e.to_string()))?;
 
             let learned: HashMap<String, CommandSchema> = learned_schemas
@@ -175,7 +180,10 @@ mod full {
                 .collect();
 
             if !learned.is_empty() {
-                info!(count = learned.len(), "Loaded learned schemas from cs_* tables");
+                info!(
+                    count = learned.len(),
+                    "Loaded learned schemas from cs_* tables"
+                );
             }
 
             // Load bundled schemas if available and mode requests it
@@ -214,13 +222,15 @@ mod full {
     /// to ensure learned schemas survive restarts. Creates a temporary
     /// `SchemaQuery` for the write operation.
     pub fn persist_schema(conn: &Connection, schema: &CommandSchema) -> Result<(), CIError> {
-        let query = SchemaQuery::new(conn, "cs_")
-            .map_err(|e| CIError::Internal(e.to_string()))?;
+        let query = SchemaQuery::new(conn, "cs_").map_err(|e| CIError::Internal(e.to_string()))?;
 
         // Try insert first; if the command already exists, update instead
         match query.insert_schema(schema) {
             Ok(()) => {
-                debug!(command = schema.command, "Persisted new schema to cs_* tables");
+                debug!(
+                    command = schema.command,
+                    "Persisted new schema to cs_* tables"
+                );
                 Ok(())
             }
             Err(e) => {
@@ -233,9 +243,13 @@ mod full {
                     ) if err.code == rusqlite::ErrorCode::ConstraintViolation
                 );
                 if is_constraint {
-                    query.update_schema(schema)
+                    query
+                        .update_schema(schema)
                         .map_err(|e| CIError::Internal(e.to_string()))?;
-                    debug!(command = schema.command, "Updated existing schema in cs_* tables");
+                    debug!(
+                        command = schema.command,
+                        "Updated existing schema in cs_* tables"
+                    );
                     Ok(())
                 } else {
                     Err(CIError::Internal(e.to_string()))
@@ -291,15 +305,13 @@ mod full {
             #[cfg(feature = "bundled-schemas")]
             {
                 if let Some(ref db) = self.bundled {
-                    let bundled_vals = db
-                        .commands()
-                        .filter_map(move |cmd| {
-                            if self.learned.contains_key(cmd) {
-                                None
-                            } else {
-                                db.get(cmd)
-                            }
-                        });
+                    let bundled_vals = db.commands().filter_map(move |cmd| {
+                        if self.learned.contains_key(cmd) {
+                            None
+                        } else {
+                            db.get(cmd)
+                        }
+                    });
                     return Box::new(learned_vals.chain(bundled_vals));
                 }
             }
@@ -347,9 +359,11 @@ mod full {
 
             // Sort: prefix matches first, then by confidence
             tagged.sort_by(|(a_prefix, a), (b_prefix, b)| {
-                b_prefix
-                    .cmp(a_prefix)
-                    .then(b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal))
+                b_prefix.cmp(a_prefix).then(
+                    b.confidence
+                        .partial_cmp(&a.confidence)
+                        .unwrap_or(std::cmp::Ordering::Equal),
+                )
             });
             results = tagged.into_iter().map(|(_, r)| r).collect();
 
@@ -407,7 +421,10 @@ mod full {
         fn add_overlay(&mut self, schema: CommandSchema) {
             // Skip if this command is bundled (bundled schemas are authoritative for structure)
             if self.is_bundled(&schema.command) {
-                debug!(command = schema.command, "Skipping overlay for bundled command");
+                debug!(
+                    command = schema.command,
+                    "Skipping overlay for bundled command"
+                );
                 return;
             }
             self.learned.insert(schema.command.clone(), schema);
@@ -632,10 +649,22 @@ pub(crate) mod tests {
 
     #[test]
     fn test_schema_mode_roundtrip() {
-        assert_eq!(SchemaMode::from_setting("history-only"), SchemaMode::HistoryOnly);
-        assert_eq!(SchemaMode::from_setting("schema-enabled"), SchemaMode::SchemaEnabled);
-        assert_eq!(SchemaMode::from_setting("full-library"), SchemaMode::FullLibrary);
-        assert_eq!(SchemaMode::from_setting("unknown"), SchemaMode::SchemaEnabled);
+        assert_eq!(
+            SchemaMode::from_setting("history-only"),
+            SchemaMode::HistoryOnly
+        );
+        assert_eq!(
+            SchemaMode::from_setting("schema-enabled"),
+            SchemaMode::SchemaEnabled
+        );
+        assert_eq!(
+            SchemaMode::from_setting("full-library"),
+            SchemaMode::FullLibrary
+        );
+        assert_eq!(
+            SchemaMode::from_setting("unknown"),
+            SchemaMode::SchemaEnabled
+        );
     }
 
     #[test]

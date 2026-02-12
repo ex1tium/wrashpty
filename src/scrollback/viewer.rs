@@ -287,7 +287,11 @@ impl ScrollViewer {
             for (original_idx, line) in &lines {
                 let line_number = *original_idx + 1;
 
-                crossterm::queue!(out, MoveTo(0, (current_row - 1) as u16), Clear(ClearType::CurrentLine))?;
+                crossterm::queue!(
+                    out,
+                    MoveTo(0, (current_row - 1) as u16),
+                    Clear(ClearType::CurrentLine)
+                )?;
 
                 Self::render_gutter(
                     out,
@@ -302,8 +306,7 @@ impl ScrollViewer {
                 // Content: with search highlights if available, otherwise plain
                 if let Some(search) = config.search {
                     if let Some(theme) = config.theme {
-                        let line_matches: Vec<_> =
-                            search.matches_on_line(*original_idx).collect();
+                        let line_matches: Vec<_> = search.matches_on_line(*original_idx).collect();
                         if !line_matches.is_empty() {
                             Self::render_line_with_highlights(
                                 out,
@@ -342,7 +345,11 @@ impl ScrollViewer {
 
             // Clear remaining rows
             while current_row < max_row {
-                crossterm::queue!(out, MoveTo(0, (current_row - 1) as u16), Clear(ClearType::CurrentLine))?;
+                crossterm::queue!(
+                    out,
+                    MoveTo(0, (current_row - 1) as u16),
+                    Clear(ClearType::CurrentLine)
+                )?;
                 current_row += 1;
             }
 
@@ -430,7 +437,11 @@ impl ScrollViewer {
 
             // BEGIN marker
             if show_begin {
-                crossterm::queue!(out, MoveTo(0, (current_row - 1) as u16), Clear(ClearType::CurrentLine))?;
+                crossterm::queue!(
+                    out,
+                    MoveTo(0, (current_row - 1) as u16),
+                    Clear(ClearType::CurrentLine)
+                )?;
                 Self::render_boundary_marker_styled(
                     out,
                     cols as usize,
@@ -444,7 +455,11 @@ impl ScrollViewer {
 
             if let Some(record) = sticky_record {
                 if current_row < max_row {
-                    crossterm::queue!(out, MoveTo(0, (current_row - 1) as u16), Clear(ClearType::CurrentLine))?;
+                    crossterm::queue!(
+                        out,
+                        MoveTo(0, (current_row - 1) as u16),
+                        Clear(ClearType::CurrentLine)
+                    )?;
                     Self::render_command_separator(
                         out,
                         cols as usize,
@@ -466,7 +481,11 @@ impl ScrollViewer {
                     if current_row >= max_row {
                         break;
                     }
-                    crossterm::queue!(out, MoveTo(0, (current_row - 1) as u16), Clear(ClearType::CurrentLine))?;
+                    crossterm::queue!(
+                        out,
+                        MoveTo(0, (current_row - 1) as u16),
+                        Clear(ClearType::CurrentLine)
+                    )?;
                     Self::render_command_separator(
                         out,
                         cols as usize,
@@ -487,7 +506,11 @@ impl ScrollViewer {
                     continue;
                 };
 
-                crossterm::queue!(out, MoveTo(0, (current_row - 1) as u16), Clear(ClearType::CurrentLine))?;
+                crossterm::queue!(
+                    out,
+                    MoveTo(0, (current_row - 1) as u16),
+                    Clear(ClearType::CurrentLine)
+                )?;
 
                 Self::render_gutter(
                     out,
@@ -502,8 +525,7 @@ impl ScrollViewer {
                 // Content: with search highlights if available
                 if let Some(search) = config.search {
                     if let Some(theme) = config.theme {
-                        let line_matches: Vec<_> =
-                            search.matches_on_line(line_index).collect();
+                        let line_matches: Vec<_> = search.matches_on_line(line_index).collect();
                         if !line_matches.is_empty() {
                             Self::render_line_with_highlights(
                                 out,
@@ -542,7 +564,11 @@ impl ScrollViewer {
 
             // END marker
             if show_end && current_row < max_row {
-                crossterm::queue!(out, MoveTo(0, (current_row - 1) as u16), Clear(ClearType::CurrentLine))?;
+                crossterm::queue!(
+                    out,
+                    MoveTo(0, (current_row - 1) as u16),
+                    Clear(ClearType::CurrentLine)
+                )?;
                 Self::render_boundary_marker_styled(
                     out,
                     cols as usize,
@@ -556,7 +582,11 @@ impl ScrollViewer {
 
             // Clear remaining rows
             while current_row < max_row {
-                crossterm::queue!(out, MoveTo(0, (current_row - 1) as u16), Clear(ClearType::CurrentLine))?;
+                crossterm::queue!(
+                    out,
+                    MoveTo(0, (current_row - 1) as u16),
+                    Clear(ClearType::CurrentLine)
+                )?;
                 current_row += 1;
             }
 
@@ -1255,7 +1285,8 @@ mod tests {
         ]);
         let mut output = Vec::new();
         let theme = crate::chrome::theme::Theme::for_preset(ThemePreset::Amber);
-        let glyphs = crate::chrome::glyphs::GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode);
+        let glyphs =
+            crate::chrome::glyphs::GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode);
         let registry = SeparatorRegistry::with_defaults();
         let records = vec![CommandRecord {
             output_start: 2,
@@ -1298,7 +1329,8 @@ mod tests {
         ]);
         let mut output = Vec::new();
         let theme = crate::chrome::theme::Theme::for_preset(ThemePreset::Amber);
-        let glyphs = crate::chrome::glyphs::GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode);
+        let glyphs =
+            crate::chrome::glyphs::GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode);
         let registry = SeparatorRegistry::with_defaults();
         let records = vec![CommandRecord {
             output_start: 2,
@@ -1377,7 +1409,8 @@ mod tests {
         let buffer = create_test_buffer(&["l1", "l2", "l3", "l4", "l5", "l6"]);
         let mut output = Vec::new();
         let theme = crate::chrome::theme::Theme::for_preset(ThemePreset::Amber);
-        let glyphs = crate::chrome::glyphs::GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode);
+        let glyphs =
+            crate::chrome::glyphs::GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode);
         let registry = SeparatorRegistry::with_defaults();
         let records = vec![
             CommandRecord {

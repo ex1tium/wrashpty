@@ -498,13 +498,7 @@ impl CarouselWidget {
         }
     }
 
-    fn render_vertical(
-        &self,
-        buffer: &mut Buffer,
-        area: Rect,
-        theme: &Theme,
-        glyphs: &GlyphSet,
-    ) {
+    fn render_vertical(&self, buffer: &mut Buffer, area: Rect, theme: &Theme, glyphs: &GlyphSet) {
         let len = self.options.len();
         let prev_idx = (self.selected + len - 1) % len;
         let next_idx = (self.selected + 1) % len;
@@ -553,13 +547,7 @@ impl CarouselWidget {
         }
     }
 
-    fn render_horizontal(
-        &self,
-        buffer: &mut Buffer,
-        area: Rect,
-        theme: &Theme,
-        glyphs: &GlyphSet,
-    ) {
+    fn render_horizontal(&self, buffer: &mut Buffer, area: Rect, theme: &Theme, glyphs: &GlyphSet) {
         let len = self.options.len();
         let prev_idx = (self.selected + len - 1) % len;
         let next_idx = (self.selected + 1) % len;
@@ -584,7 +572,10 @@ impl CarouselWidget {
         spans.push(Span::styled("  ", Style::default()));
         // Current with chevron
         spans.push(Span::styled(
-            format!("{} {}", glyphs.nav.chevron_right, &self.options[self.selected]),
+            format!(
+                "{} {}",
+                glyphs.nav.chevron_right, &self.options[self.selected]
+            ),
             active,
         ));
         // Spacer
@@ -665,7 +656,9 @@ impl SliderWidget {
             let row = Rect::new(area.x, area.y, area.width, 1);
             ratatui_widgets::paragraph::Paragraph::new(Line::from(Span::styled(
                 &value_str,
-                Style::default().fg(theme.text_highlight).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.text_highlight)
+                    .add_modifier(Modifier::BOLD),
             )))
             .render(row, buffer);
             return;
@@ -798,10 +791,7 @@ mod tests {
 
     #[test]
     fn test_multiselect_navigation() {
-        let mut m = MultiSelectWidget::new(vec![
-            ("A".into(), false),
-            ("B".into(), false),
-        ]);
+        let mut m = MultiSelectWidget::new(vec![("A".into(), false), ("B".into(), false)]);
         m.handle_input(KeyEvent::from(KeyCode::Down));
         assert_eq!(m.list.selection(), 1);
     }

@@ -81,8 +81,8 @@ impl TopbarSegment for ScrollSegment {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::chrome::segments::ScrollInfo;
     use crate::chrome::glyphs::GlyphSet;
+    use crate::chrome::segments::ScrollInfo;
     use crate::config::ThemePreset;
 
     fn test_state() -> TopbarState {
