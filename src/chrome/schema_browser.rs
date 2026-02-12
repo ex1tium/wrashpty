@@ -6,7 +6,11 @@
 
 use std::any::Any;
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    mpsc::{Receiver, channel},
+};
+use std::thread::{self, JoinHandle};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui_core::buffer::Buffer;
@@ -17,15 +21,33 @@ use ratatui_core::widgets::Widget;
 use ratatui_widgets::list::{List, ListItem};
 use ratatui_widgets::paragraph::Paragraph;
 
-use super::command_edit::{compute_edit_mode_layout, render_edit_mode_shared, CommandEditState};
+use super::command_edit::{CommandEditState, compute_edit_mode_layout, render_edit_mode_shared};
 use super::footer_bar::FooterEntry;
+use super::glyphs::{GlyphSet, GlyphTier};
 use super::panel::{Panel, PanelResult};
 use super::theme::Theme;
 use crate::history_store::HistoryStore;
 use crate::ui::filter_input::FilterInput;
+use crate::ui::loading_widget::{LoadingWidget, LoadingWidgetOptions, SpinnerStyle};
 use crate::ui::tree_state::{TreeItem, TreeViewState};
-use super::glyphs::{GlyphSet, GlyphTier};
 use crate::ui::tree_view::tree_prefix;
+
+/// Result from background schema discovery.
+#[derive(Debug)]
+enum DiscoveryResult {
+    /// Discovery completed successfully.
+    Success,
+    /// Discovery failed with an error message.
+    Error(String),
+}
+
+/// State for background schema discovery.
+struct DiscoveryState {
+    /// Channel receiver for discovery result.
+    receiver: Receiver<DiscoveryResult>,
+    /// Thread handle for cleanup.
+    _handle: JoinHandle<()>,
+}
 
 /// A node in the schema tree view.
 #[derive(Debug, Clone)]
@@ -88,17 +110,11 @@ impl TreeNode {
         match self {
             TreeNode::Command {
                 name, description, ..
-            } => {
-                filter.matches(name)
-                    || description.as_ref().is_some_and(|d| filter.matches(d))
-            }
+            } => filter.matches(name) || description.as_ref().is_some_and(|d| filter.matches(d)),
             TreeNode::Section { label, .. } => filter.matches(label),
             TreeNode::Subcommand {
                 name, description, ..
-            } => {
-                filter.matches(name)
-                    || description.as_ref().is_some_and(|d| filter.matches(d))
-            }
+            } => filter.matches(name) || description.as_ref().is_some_and(|d| filter.matches(d)),
             TreeNode::Flag {
                 short,
                 long,
@@ -161,11 +177,21 @@ pub struct SchemaBrowserPanel {
     glyphs: &'static GlyphSet,
     /// Status message shown in border info.
     status: Option<String>,
+    /// Active background discovery, if any.
+    discovery: Option<DiscoveryState>,
+    /// Loading widget for discovery animation.
+    loading_widget: LoadingWidget,
 }
 
 impl SchemaBrowserPanel {
     /// Creates a new schema browser panel.
     pub fn new(theme: &'static Theme, glyph_tier: GlyphTier) -> Self {
+        let loading_widget = LoadingWidget::new(LoadingWidgetOptions {
+            style: SpinnerStyle::Dots,
+            label: Some("Discovering schema...".to_string()),
+            tick_interval: Some(2),
+        });
+
         Self {
             nodes: Vec::new(),
             tree: TreeViewState::new(),
@@ -177,6 +203,8 @@ impl SchemaBrowserPanel {
             theme,
             glyphs: GlyphSet::for_tier(glyph_tier),
             status: None,
+            discovery: None,
+            loading_widget,
         }
     }
 
@@ -414,10 +442,7 @@ impl SchemaBrowserPanel {
         // Title
         let cmd_name = self.edit_command_name.as_deref().unwrap_or("command");
         let mut title_spans = vec![
-            Span::styled(
-                " Edit Command: ",
-                Style::default().fg(self.theme.header_fg),
-            ),
+            Span::styled(" Edit Command: ", Style::default().fg(self.theme.header_fg)),
             Span::styled(
                 cmd_name,
                 Style::default()
@@ -520,15 +545,18 @@ impl SchemaBrowserPanel {
         self.rebuild_visible();
     }
 
-    /// Discovers a command schema from its --help output.
+    /// Discovers a command schema from its --help output in a background thread.
     fn discover_command(&mut self) {
+        // Check if already discovering
+        if self.discovery.is_some() {
+            return;
+        }
+
         let command = if self.filter.has_filter() {
             self.filter.text().trim().to_string()
         } else if let Some(node_idx) = self.tree.selected_node_idx() {
             match &self.nodes[node_idx] {
-                TreeNode::Command { name, .. } | TreeNode::Subcommand { name, .. } => {
-                    name.clone()
-                }
+                TreeNode::Command { name, .. } | TreeNode::Subcommand { name, .. } => name.clone(),
                 _ => return,
             }
         } else {
@@ -544,19 +572,74 @@ impl SchemaBrowserPanel {
             None => return,
         };
 
-        let mut guard = match store.lock() {
-            Ok(g) => g,
-            Err(_) => return,
-        };
+        // Create channel for result
+        let (sender, receiver) = channel();
 
-        match guard.discover_schema(&command) {
-            Ok(()) => {
-                drop(guard);
-                self.load_schemas();
+        // Spawn thread for background discovery
+        let handle = thread::spawn(move || {
+            let result = {
+                let mut guard = match store.lock() {
+                    Ok(g) => g,
+                    Err(_) => {
+                        let _ = sender.send(DiscoveryResult::Error(
+                            "Failed to lock history store".to_string(),
+                        ));
+                        return;
+                    }
+                };
+
+                match guard.discover_schema(&command) {
+                    Ok(()) => DiscoveryResult::Success,
+                    Err(e) => DiscoveryResult::Error(e.to_string()),
+                }
+            };
+            let _ = sender.send(result);
+        });
+
+        // Store discovery state
+        self.discovery = Some(DiscoveryState {
+            receiver,
+            _handle: handle,
+        });
+
+        // Update status to show discovery started
+        self.status = Some("Discovering schema...".to_string());
+    }
+
+    /// Polls for discovery completion. Returns true if discovery is complete.
+    fn poll_discovery(&mut self) -> bool {
+        if let Some(discovery) = &mut self.discovery {
+            match discovery.receiver.try_recv() {
+                Ok(DiscoveryResult::Success) => {
+                    // Clean up
+                    self.discovery = None;
+
+                    // Reload schemas
+                    self.load_schemas();
+                    self.status = Some("Schema discovered successfully".to_string());
+                    true
+                }
+                Ok(DiscoveryResult::Error(msg)) => {
+                    // Clean up
+                    self.discovery = None;
+
+                    // Show error
+                    self.status = Some(format!("Discovery failed: {msg}"));
+                    true
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    // Still running
+                    false
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    // Thread panicked - clean up
+                    self.discovery = None;
+                    self.status = Some("Discovery failed unexpectedly".to_string());
+                    true
+                }
             }
-            Err(e) => {
-                self.status = Some(format!("Discovery failed: {e}"));
-            }
+        } else {
+            true // No discovery running
         }
     }
 
@@ -603,9 +686,9 @@ impl SchemaBrowserPanel {
             |idx| {
                 if has_filter {
                     // In filter mode, show expanded indicator when children are visible.
-                    nodes.get(idx + 1).is_some_and(|n| {
-                        n.depth() > nodes[idx].depth() && vis[idx + 1]
-                    })
+                    nodes
+                        .get(idx + 1)
+                        .is_some_and(|n| n.depth() > nodes[idx].depth() && vis[idx + 1])
                 } else {
                     expanded.contains(&idx)
                 }
@@ -796,11 +879,7 @@ impl SchemaBrowserPanel {
 
 impl Panel for SchemaBrowserPanel {
     fn preferred_height(&self) -> u16 {
-        if self.edit_mode.is_some() {
-            12
-        } else {
-            8
-        }
+        if self.edit_mode.is_some() { 12 } else { 8 }
     }
 
     fn title(&self) -> &str {
@@ -812,6 +891,14 @@ impl Panel for SchemaBrowserPanel {
             return;
         }
 
+        // Poll for discovery completion
+        self.poll_discovery();
+
+        // Tick loading widget if still discovering
+        if self.discovery.is_some() {
+            self.loading_widget.tick();
+        }
+
         // Edit mode: delegate to edit renderer
         if let Some(ref edit_state) = self.edit_mode {
             self.render_edit_mode(buffer, area, edit_state);
@@ -821,8 +908,7 @@ impl Panel for SchemaBrowserPanel {
         // Layout: optional filter bar + tree area
         let show_filter = self.filter.is_active() || self.filter.has_filter();
         let (filter_area, tree_area) = if show_filter {
-            let chunks =
-                Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(area);
+            let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(area);
             (Some(chunks[0]), chunks[1])
         } else {
             (None, area)
@@ -896,9 +982,7 @@ impl Panel for SchemaBrowserPanel {
                 let desc = match node {
                     TreeNode::Command { description, .. }
                     | TreeNode::Subcommand { description, .. }
-                    | TreeNode::Flag { description, .. } => {
-                        description.as_deref().unwrap_or("")
-                    }
+                    | TreeNode::Flag { description, .. } => description.as_deref().unwrap_or(""),
                     TreeNode::Section { .. } => "",
                 };
 
@@ -908,18 +992,14 @@ impl Panel for SchemaBrowserPanel {
                         .add_modifier(Modifier::BOLD)
                 } else {
                     match node {
-                        TreeNode::Command { .. } => {
-                            Style::default().fg(self.theme.text_primary)
-                        }
+                        TreeNode::Command { .. } => Style::default().fg(self.theme.text_primary),
                         TreeNode::Section { .. } => Style::default()
                             .fg(self.theme.text_secondary)
                             .add_modifier(Modifier::ITALIC),
                         TreeNode::Subcommand { .. } => {
                             Style::default().fg(self.theme.text_highlight)
                         }
-                        TreeNode::Flag { .. } => {
-                            Style::default().fg(self.theme.text_secondary)
-                        }
+                        TreeNode::Flag { .. } => Style::default().fg(self.theme.text_secondary),
                     }
                 };
 
@@ -945,6 +1025,18 @@ impl Panel for SchemaBrowserPanel {
             .collect();
 
         List::new(items).render(tree_area, buffer);
+
+        // Render loading widget overlay if discovery is active
+        if self.discovery.is_some() {
+            // Render loading widget in center of area
+            let loading_area = Rect::new(
+                area.x + (area.width.saturating_sub(30)) / 2,
+                area.y + area.height / 2,
+                area.width.min(30),
+                1,
+            );
+            self.loading_widget.render(buffer, loading_area, self.theme);
+        }
     }
 
     fn handle_input(&mut self, key: KeyEvent) -> PanelResult {
@@ -1298,14 +1390,8 @@ mod tests {
     fn test_no_filter_shows_commands_only() {
         let panel = panel_with_nodes();
         assert_eq!(panel.tree.visible_count(), 2);
-        assert_eq!(
-            panel.nodes[panel.tree.visible()[0]].display_name(),
-            "git"
-        );
-        assert_eq!(
-            panel.nodes[panel.tree.visible()[1]].display_name(),
-            "cargo"
-        );
+        assert_eq!(panel.nodes[panel.tree.visible()[0]].display_name(), "git");
+        assert_eq!(panel.nodes[panel.tree.visible()[1]].display_name(), "cargo");
     }
 
     #[test]
@@ -1314,10 +1400,7 @@ mod tests {
         type_filter(&mut panel, "git");
         // "git" matches → shows git + all children
         assert!(panel.tree.visible_count() >= 2);
-        assert_eq!(
-            panel.nodes[panel.tree.visible()[0]].display_name(),
-            "git"
-        );
+        assert_eq!(panel.nodes[panel.tree.visible()[0]].display_name(), "git");
     }
 
     #[test]
@@ -1326,14 +1409,8 @@ mod tests {
         type_filter(&mut panel, "build");
         // "build" → cargo parent + build child
         assert_eq!(panel.tree.visible_count(), 2);
-        assert_eq!(
-            panel.nodes[panel.tree.visible()[0]].display_name(),
-            "cargo"
-        );
-        assert_eq!(
-            panel.nodes[panel.tree.visible()[1]].display_name(),
-            "build"
-        );
+        assert_eq!(panel.nodes[panel.tree.visible()[0]].display_name(), "cargo");
+        assert_eq!(panel.nodes[panel.tree.visible()[1]].display_name(), "build");
     }
 
     #[test]
@@ -1341,10 +1418,7 @@ mod tests {
         let mut panel = panel_with_nodes();
         type_filter(&mut panel, "--verbose");
         assert!(panel.tree.visible_count() >= 2);
-        assert_eq!(
-            panel.nodes[panel.tree.visible()[0]].display_name(),
-            "git"
-        );
+        assert_eq!(panel.nodes[panel.tree.visible()[0]].display_name(), "git");
     }
 
     #[test]
@@ -1554,12 +1628,8 @@ mod tests {
         // Expand and find a flag
         panel.expanded.insert(0);
         panel.rebuild_visible();
-        let flag_vis = (0..panel.tree.visible_count()).find(|&vi| {
-            matches!(
-                panel.nodes[panel.tree.visible()[vi]],
-                TreeNode::Flag { .. }
-            )
-        });
+        let flag_vis = (0..panel.tree.visible_count())
+            .find(|&vi| matches!(panel.nodes[panel.tree.visible()[vi]], TreeNode::Flag { .. }));
         if let Some(vi) = flag_vis {
             let count = panel.tree.visible_count();
             panel.tree.scroll_mut().set_selection(vi, count);
@@ -1588,12 +1658,7 @@ mod tests {
         panel.rebuild_visible();
 
         let flag_vis = (0..panel.tree.visible_count())
-            .find(|&vi| {
-                matches!(
-                    panel.nodes[panel.tree.visible()[vi]],
-                    TreeNode::Flag { .. }
-                )
-            })
+            .find(|&vi| matches!(panel.nodes[panel.tree.visible()[vi]], TreeNode::Flag { .. }))
             .expect("should have a flag");
         let count = panel.tree.visible_count();
         panel.tree.scroll_mut().set_selection(flag_vis, count);
@@ -1705,9 +1770,11 @@ mod tests {
             use unicode_width::UnicodeWidthStr;
             let actual_width = UnicodeWidthStr::width(prefix.as_str());
             assert_eq!(
-                actual_width, expected_width,
+                actual_width,
+                expected_width,
                 "Prefix width mismatch at vis_idx {vi}: {:?} (node={:?})",
-                prefix, panel.nodes[panel.tree.visible()[vi]].display_name()
+                prefix,
+                panel.nodes[panel.tree.visible()[vi]].display_name()
             );
         }
     }
@@ -1752,9 +1819,7 @@ mod tests {
         let commit_node_idx = panel
             .nodes
             .iter()
-            .position(|n| {
-                matches!(n, TreeNode::Subcommand { name, .. } if name == "commit")
-            })
+            .position(|n| matches!(n, TreeNode::Subcommand { name, .. } if name == "commit"))
             .unwrap();
         panel.expanded.insert(commit_node_idx);
 
@@ -1804,7 +1869,10 @@ mod tests {
                 TreeNode::Section { .. }
             )
         });
-        assert!(section_vis, "Section should be visible when command expanded");
+        assert!(
+            section_vis,
+            "Section should be visible when command expanded"
+        );
 
         // Flag under Section should be visible
         let flag_vis = (0..panel.tree.visible_count()).any(|vi| {
@@ -1901,12 +1969,7 @@ mod tests {
         panel.expanded.insert(0);
         panel.rebuild_visible();
         let flag_vis = (0..panel.tree.visible_count())
-            .find(|&vi| {
-                matches!(
-                    panel.nodes[panel.tree.visible()[vi]],
-                    TreeNode::Flag { .. }
-                )
-            })
+            .find(|&vi| matches!(panel.nodes[panel.tree.visible()[vi]], TreeNode::Flag { .. }))
             .expect("should have a flag");
         let count = panel.tree.visible_count();
         panel.tree.scroll_mut().set_selection(flag_vis, count);
@@ -2034,10 +2097,7 @@ mod tests {
     fn test_find_parent_command_name() {
         let panel = panel_with_nodes();
         // Node 3 is "commit" subcommand → parent should be "git" (node 0)
-        assert_eq!(
-            panel.find_parent_command_name(3),
-            Some("git".to_string())
-        );
+        assert_eq!(panel.find_parent_command_name(3), Some("git".to_string()));
         // Node 0 is "git" command → no parent
         assert_eq!(panel.find_parent_command_name(0), None);
     }
@@ -2049,9 +2109,7 @@ mod tests {
         let commit_idx = panel
             .nodes
             .iter()
-            .position(|n| {
-                matches!(n, TreeNode::Subcommand { name, .. } if name == "commit")
-            })
+            .position(|n| matches!(n, TreeNode::Subcommand { name, .. } if name == "commit"))
             .unwrap();
         let flags = panel.collect_flags_for_subcommand(commit_idx);
         assert_eq!(flags.len(), 1);

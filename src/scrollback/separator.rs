@@ -7,10 +7,10 @@ use std::fmt;
 use std::path::Path;
 
 use super::boundaries::CommandRecord;
+use crate::chrome::glyphs::GlyphSet;
 use crate::chrome::segments::{
     color_to_fg_ansi, format_duration, strip_ansi_width, truncate_ansi_content,
 };
-use crate::chrome::glyphs::GlyphSet;
 use crate::chrome::theme::Theme;
 
 /// Rendered separator segment with width metadata.

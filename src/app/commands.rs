@@ -333,7 +333,8 @@ fn cmd_dedupe(ctx: &mut CommandContext) -> CommandAction {
                     sqlite_removed,
                     bash_removed
                 );
-                ctx.chrome.notify(msg, NotificationStyle::Success, Duration::from_secs(5));
+                ctx.chrome
+                    .notify(msg, NotificationStyle::Success, Duration::from_secs(5));
             }
             Err(e) => {
                 ctx.chrome.notify(
@@ -418,7 +419,8 @@ fn cmd_help(ctx: &mut CommandContext) -> CommandAction {
 :wipe-ci           Reset intelligence DB\n\
 :help (:h, :?)     Open help panel";
 
-        ctx.chrome.notify(help, NotificationStyle::Info, Duration::from_secs(15));
+        ctx.chrome
+            .notify(help, NotificationStyle::Info, Duration::from_secs(15));
         CommandAction::Handled
     }
 }
@@ -582,11 +584,7 @@ mod tests {
 
         registry.dispatch(":glyph-emoji", &mut chrome, &store);
 
-        let saved = store
-            .lock()
-            .unwrap()
-            .get_setting("glyph_tier")
-            .unwrap();
+        let saved = store.lock().unwrap().get_setting("glyph_tier").unwrap();
         assert_eq!(saved, Some("Emoji".to_string()));
     }
 

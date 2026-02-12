@@ -284,7 +284,10 @@ const SCHEMA_SCORE_FACTOR: f64 = 0.9;
 ///
 /// This integrates extracted/bootstrapped command schemas into the same
 /// unified suggestion pipeline used by learned hierarchy patterns.
-fn suggest_from_schema(provider: &dyn SchemaProvider, context: &SuggestionContext) -> Vec<Suggestion> {
+fn suggest_from_schema(
+    provider: &dyn SchemaProvider,
+    context: &SuggestionContext,
+) -> Vec<Suggestion> {
     let mut suggestions = Vec::new();
     let now = chrono::Utc::now().timestamp();
 
@@ -1019,8 +1022,7 @@ mod tests {
     fn test_schema_suggests_subcommands_without_learned_hierarchy() {
         let conn = setup_test_db();
 
-        let mut schema =
-            command_schema_core::CommandSchema::new("tool", SchemaSource::Bootstrap);
+        let mut schema = command_schema_core::CommandSchema::new("tool", SchemaSource::Bootstrap);
         schema.subcommands.push(SubcommandSchema::new("build"));
         schema.subcommands.push(SubcommandSchema::new("deploy"));
         let provider = TestSchemaProvider::from_schemas(vec![schema]);
@@ -1049,8 +1051,7 @@ mod tests {
     fn test_schema_suggests_nested_subcommands() {
         let conn = setup_test_db();
 
-        let mut schema =
-            command_schema_core::CommandSchema::new("git", SchemaSource::Bootstrap);
+        let mut schema = command_schema_core::CommandSchema::new("git", SchemaSource::Bootstrap);
         let mut remote = SubcommandSchema::new("remote");
         remote.subcommands.push(SubcommandSchema::new("add"));
         remote.subcommands.push(SubcommandSchema::new("remove"));
@@ -1084,8 +1085,7 @@ mod tests {
     fn test_schema_suggests_choice_values_for_flag_value_position() {
         let conn = setup_test_db();
 
-        let mut schema =
-            command_schema_core::CommandSchema::new("tool", SchemaSource::Bootstrap);
+        let mut schema = command_schema_core::CommandSchema::new("tool", SchemaSource::Bootstrap);
         schema.global_flags.push(FlagSchema::with_value(
             None,
             Some("--format"),

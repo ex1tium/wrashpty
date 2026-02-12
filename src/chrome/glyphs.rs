@@ -492,10 +492,10 @@ pub static UNICODE_GLYPHS: GlyphSet = GlyphSet {
         powerline_thin: "|",
     },
     indicator: IndicatorGlyphs {
-        success: "\u{2713}",   // ✓
-        failure: "\u{2717}",   // ✗
-        warning: "\u{26a0}",   // ⚠
-        info: "\u{2139}",      // ℹ
+        success: "\u{2713}",    // ✓
+        failure: "\u{2717}",    // ✗
+        warning: "\u{26a0}",    // ⚠
+        info: "\u{2139}",       // ℹ
         dot_filled: "\u{25cf}", // ●
         dot_empty: "\u{25cb}",  // ○
         dot_half: "\u{25d0}",   // ◐
@@ -533,17 +533,17 @@ pub static UNICODE_GLYPHS: GlyphSet = GlyphSet {
     },
     icon: IconGlyphs {
         git_branch: "",
-        git_dirty: "\u{25cf}",  // ●
+        git_dirty: "\u{25cf}",    // ●
         git_modified: "\u{25cf}", // ●
         git_added: "+",
         git_deleted: "x",
         git_untracked: "?",
         git_conflict: "!",
         git_renamed: "r",
-        folder: "\u{1f5c0}",  // 🗀 (file folder, text presentation)
-        file: "\u{1f5ce}",    // 🗎 (document, text presentation)
-        executable: "\u{2699}",// ⚙ (gear)
-        link: "\u{2192}",     // → (rightwards arrow)
+        folder: "\u{1f5c0}",    // 🗀 (file folder, text presentation)
+        file: "\u{1f5ce}",      // 🗎 (document, text presentation)
+        executable: "\u{2699}", // ⚙ (gear)
+        link: "\u{2192}",       // → (rightwards arrow)
         home: "~",
         search: "",
         history: "",
@@ -572,8 +572,8 @@ pub static EMOJI_GLYPHS: GlyphSet = GlyphSet {
     indicator: IndicatorGlyphs {
         success: "✅",
         failure: "❌",
-        warning: "⚠\u{fe0f}",  // ⚠️ (with emoji presentation selector)
-        info: "ℹ\u{fe0f}",     // ℹ️
+        warning: "⚠\u{fe0f}", // ⚠️ (with emoji presentation selector)
+        info: "ℹ\u{fe0f}",    // ℹ️
         dot_filled: "🔵",
         dot_empty: "⚪",
         dot_half: "🔘",
@@ -635,10 +635,10 @@ pub static NERD_FONT_GLYPHS: GlyphSet = GlyphSet {
         powerline_thin: "\u{e0b1}",  //  (powerline right thin)
     },
     indicator: IndicatorGlyphs {
-        success: "\u{f00c}",   //  (fa-check)
-        failure: "\u{f00d}",   //  (fa-times)
-        warning: "\u{f071}",   //  (fa-exclamation-triangle)
-        info: "\u{f05a}",      //  (fa-info-circle)
+        success: "\u{f00c}",    //  (fa-check)
+        failure: "\u{f00d}",    //  (fa-times)
+        warning: "\u{f071}",    //  (fa-exclamation-triangle)
+        info: "\u{f05a}",       //  (fa-info-circle)
         dot_filled: "\u{f111}", //  (fa-circle)
         dot_empty: "\u{f10c}",  //  (fa-circle-thin)
         dot_half: "\u{f042}",   //  (fa-adjust)
@@ -649,12 +649,12 @@ pub static NERD_FONT_GLYPHS: GlyphSet = GlyphSet {
     },
     progress: UNICODE_GLYPHS.progress,
     nav: NavGlyphs {
-        arrow_right: "\u{f061}", //  (fa-arrow-right)
-        arrow_left: "\u{f060}",  //  (fa-arrow-left)
-        arrow_up: "\u{f062}",    //  (fa-arrow-up)
-        arrow_down: "\u{f063}",  //  (fa-arrow-down)
-        chevron_right: "\u{f054}", //  (fa-chevron-right)
-        chevron_left: "\u{f053}",  //  (fa-chevron-left)
+        arrow_right: "\u{f061}",    //  (fa-arrow-right)
+        arrow_left: "\u{f060}",     //  (fa-arrow-left)
+        arrow_up: "\u{f062}",       //  (fa-arrow-up)
+        arrow_down: "\u{f063}",     //  (fa-arrow-down)
+        chevron_right: "\u{f054}",  //  (fa-chevron-right)
+        chevron_left: "\u{f053}",   //  (fa-chevron-left)
         triangle_right: "\u{e0b0}", //  (powerline right)
         triangle_left: "\u{e0b2}",  //  (powerline left)
         triangle_up: "▲",
@@ -662,32 +662,32 @@ pub static NERD_FONT_GLYPHS: GlyphSet = GlyphSet {
         ellipsis: "…",
     },
     bullet: BulletGlyphs {
-        disc: "\u{f111}",    //  (fa-circle)
-        circle: "\u{f10c}",  //  (fa-circle-thin)
-        square: "\u{f0c8}",  //  (fa-square)
-        dash: "\u{f101}",    //  (fa-angle-double-right)
-        arrow: "\u{f054}",   //  (fa-chevron-right)
+        disc: "\u{f111}",   //  (fa-circle)
+        circle: "\u{f10c}", //  (fa-circle-thin)
+        square: "\u{f0c8}", //  (fa-square)
+        dash: "\u{f101}",   //  (fa-angle-double-right)
+        arrow: "\u{f054}",  //  (fa-chevron-right)
     },
     icon: IconGlyphs {
-        git_branch: "\u{e725}", //  (git-branch)
-        git_dirty: "\u{f069}",  //  (fa-asterisk)
+        git_branch: "\u{e725}",   //  (git-branch)
+        git_dirty: "\u{f069}",    //  (fa-asterisk)
         git_modified: "\u{25cf}", // ● (black circle)
         git_added: "\u{271a}",    // ✚ (heavy greek cross)
         git_deleted: "\u{2716}",  // ✖ (heavy multiplication x)
         git_untracked: "?",
         git_conflict: "!",
         git_renamed: "\u{2192}", // → (rightwards arrow)
-        folder: "\u{f07b}",     //  (fa-folder)
-        file: "\u{f15b}",       //  (fa-file)
-        executable: "\u{f489}", //  (terminal)
-        link: "\u{f0c1}",       //  (fa-link)
-        home: "\u{f015}",       //  (fa-home)
-        search: "\u{f002}",     //  (fa-search)
-        history: "\u{f1da}",    //  (fa-history)
-        help: "\u{f059}",       //  (fa-question-circle)
-        clock: "\u{f017}",      //  (fa-clock-o)
-        stopwatch: "\u{f252}",  //  (fa-hourglass-half)
-        prompt: "\u{e0b0}",     //  (same as separator)
+        folder: "\u{f07b}",      //  (fa-folder)
+        file: "\u{f15b}",        //  (fa-file)
+        executable: "\u{f489}",  //  (terminal)
+        link: "\u{f0c1}",        //  (fa-link)
+        home: "\u{f015}",        //  (fa-home)
+        search: "\u{f002}",      //  (fa-search)
+        history: "\u{f1da}",     //  (fa-history)
+        help: "\u{f059}",        //  (fa-question-circle)
+        clock: "\u{f017}",       //  (fa-clock-o)
+        stopwatch: "\u{f252}",   //  (fa-hourglass-half)
+        prompt: "\u{e0b0}",      //  (same as separator)
     },
 };
 
@@ -762,7 +762,7 @@ mod tests {
         assert_eq!(unicode.border.horizontal, '─');
         assert_eq!(unicode.tree.vertical, "│");
         assert_eq!(unicode.icon.folder, "\u{1f5c0}"); // 🗀
-        assert_eq!(unicode.icon.file, "\u{1f5ce}");   // 🗎
+        assert_eq!(unicode.icon.file, "\u{1f5ce}"); // 🗎
 
         let emoji = GlyphSet::for_tier(GlyphTier::Emoji);
         assert_eq!(emoji.border.horizontal, '─'); // Same as unicode
@@ -816,7 +816,7 @@ mod tests {
         let g = &UNICODE_GLYPHS;
         assert_eq!(g.indicator.success, "\u{2713}"); // ✓
         assert_eq!(g.indicator.failure, "\u{2717}"); // ✗
-        assert_eq!(g.indicator.info, "\u{2139}");    // ℹ
+        assert_eq!(g.indicator.info, "\u{2139}"); // ℹ
         assert_eq!(g.indicator.warning, "\u{26a0}"); // ⚠
     }
 

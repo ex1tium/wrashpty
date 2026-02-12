@@ -772,13 +772,13 @@ mod tests {
         .unwrap();
 
         let result = create_schema(&conn);
-        assert!(result.is_err(), "Should reject downgrade from future version");
+        assert!(
+            result.is_err(),
+            "Should reject downgrade from future version"
+        );
         let err = result.unwrap_err();
         match err {
-            CIError::SchemaVersion {
-                expected,
-                found,
-            } => {
+            CIError::SchemaVersion { expected, found } => {
                 assert_eq!(expected, SCHEMA_VERSION);
                 assert_eq!(found, 999);
             }

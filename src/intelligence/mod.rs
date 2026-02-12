@@ -240,11 +240,8 @@ impl CommandIntelligence {
             return Err(CIError::Disabled);
         }
 
-        let (stats, new_last_id) = sync::sync_from_reedline(
-            &self.conn,
-            self.last_sync_id,
-            self.schema_provider.as_ref(),
-        )?;
+        let (stats, new_last_id) =
+            sync::sync_from_reedline(&self.conn, self.last_sync_id, self.schema_provider.as_ref())?;
         self.last_sync_id = new_last_id;
 
         Ok(stats)

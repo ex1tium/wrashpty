@@ -963,7 +963,6 @@ impl Panel for HistoryBrowserPanel {
             );
             self.render_row(buffer, row_area, record, &cols, is_selected);
         }
-
     }
 
     fn handle_input(&mut self, key: KeyEvent) -> PanelResult {
@@ -1117,14 +1116,20 @@ mod tests {
 
     #[test]
     fn test_history_browser_new_constructs_empty_records() {
-        let panel = HistoryBrowserPanel::new(&AMBER_THEME, crate::chrome::glyphs::GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode));
+        let panel = HistoryBrowserPanel::new(
+            &AMBER_THEME,
+            crate::chrome::glyphs::GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode),
+        );
         assert!(panel.records.is_empty());
         assert_eq!(panel.selection, 0);
     }
 
     #[test]
     fn test_filter_mode_default_flags_false() {
-        let panel = HistoryBrowserPanel::new(&AMBER_THEME, crate::chrome::glyphs::GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode));
+        let panel = HistoryBrowserPanel::new(
+            &AMBER_THEME,
+            crate::chrome::glyphs::GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode),
+        );
         assert!(!panel.filter_mode.dedupe);
         assert!(!panel.filter_mode.current_dir_only);
         assert!(!panel.filter_mode.failed_only);
@@ -1132,7 +1137,10 @@ mod tests {
 
     #[test]
     fn test_sort_mode_cycle_through_variants() {
-        let mut panel = HistoryBrowserPanel::new(&AMBER_THEME, crate::chrome::glyphs::GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode));
+        let mut panel = HistoryBrowserPanel::new(
+            &AMBER_THEME,
+            crate::chrome::glyphs::GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode),
+        );
         assert_eq!(panel.sort_mode, SortMode::Recency);
         panel.sort_mode = panel.sort_mode.next();
         assert_eq!(panel.sort_mode, SortMode::Frequency);
@@ -1256,7 +1264,10 @@ mod tests {
 
     #[test]
     fn test_edit_mode_original_hint_preserves_wide_chars() {
-        let mut panel = HistoryBrowserPanel::new(&AMBER_THEME, crate::chrome::glyphs::GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode));
+        let mut panel = HistoryBrowserPanel::new(
+            &AMBER_THEME,
+            crate::chrome::glyphs::GlyphSet::for_tier(crate::chrome::glyphs::GlyphTier::Unicode),
+        );
         panel.edit_mode = Some(CommandEditState::from_command("echo 你好"));
 
         let area = Rect::new(0, 0, 60, 12);

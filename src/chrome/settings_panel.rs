@@ -181,9 +181,12 @@ impl Panel for SettingsPanel {
         }
 
         // Layout: inner tab bar (1 line), separator (1 line), content (rest)
-        let chunks =
-            Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(1)])
-                .split(area);
+        let chunks = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
+        .split(area);
 
         // Render inner tab bar
         self.render_inner_tabs(buffer, chunks[0]);

@@ -22,8 +22,10 @@ use wrashpty::types::ChromeMode;
 #[command(name = "wrashpty")]
 #[command(version)] // Automatically pulls version from Cargo.toml
 #[command(about = "Modern interactive shell on stock Bash")]
-#[command(long_about = "Wrashpty provides modern line editing, autosuggestions, and command \
-    intelligence on top of stock Bash without modifying the shell.")]
+#[command(
+    long_about = "Wrashpty provides modern line editing, autosuggestions, and command \
+    intelligence on top of stock Bash without modifying the shell."
+)]
 #[command(author)]
 #[command(disable_help_flag = true)]
 struct Cli {
@@ -32,7 +34,11 @@ struct Cli {
     no_chrome: bool,
 
     /// Output help in a specific machine-readable format
-    #[arg(long, value_name = "FORMAT", help = "Output help in parseable format: json, gnu, npm, clap")]
+    #[arg(
+        long,
+        value_name = "FORMAT",
+        help = "Output help in parseable format: json, gnu, npm, clap"
+    )]
     help_format: Option<String>,
 
     /// Print help information (GNU-style)
@@ -147,10 +153,7 @@ fn print_formatted_help(format: &str) {
 }
 
 /// JSON format: command-schema-v1.json compliant structured output.
-fn print_help_json(
-    cmd: &clap::Command,
-    colon_cmds: &[(&str, &[&str], &str)],
-) {
+fn print_help_json(cmd: &clap::Command, colon_cmds: &[(&str, &[&str], &str)]) {
     let name = cmd.get_name();
     let version = cmd.get_version();
     let about = cmd.get_about().map(|s| s.to_string());
@@ -181,8 +184,7 @@ fn print_help_json(
     let subcommands: Vec<serde_json::Value> = colon_cmds
         .iter()
         .map(|(cmd_name, aliases, desc)| {
-            let alias_list: Vec<String> =
-                aliases.iter().map(|a| format!(":{a}")).collect();
+            let alias_list: Vec<String> = aliases.iter().map(|a| format!(":{a}")).collect();
             serde_json::json!({
                 "name": format!(":{cmd_name}"),
                 "description": desc,
@@ -206,14 +208,14 @@ fn print_help_json(
         "confidence": 1.0
     });
 
-    println!("{}", serde_json::to_string(&schema).expect("JSON serialization failed"));
+    println!(
+        "{}",
+        serde_json::to_string(&schema).expect("JSON serialization failed")
+    );
 }
 
 /// GNU-style help output.
-fn print_help_gnu(
-    cmd: &clap::Command,
-    colon_cmds: &[(&str, &[&str], &str)],
-) {
+fn print_help_gnu(cmd: &clap::Command, colon_cmds: &[(&str, &[&str], &str)]) {
     let name = cmd.get_name();
     let about = cmd.get_about().map(|s| s.to_string()).unwrap_or_default();
 
@@ -237,16 +239,17 @@ fn print_help_gnu(
         let help = arg.get_help().map(|h| h.to_string()).unwrap_or_default();
         let takes_val = arg.get_action().takes_values();
         if takes_val {
-            let val_name = arg.get_value_names().map(|v| {
-                v.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" ")
-            }).unwrap_or_else(|| "VALUE".to_string());
+            let val_name = arg
+                .get_value_names()
+                .map(|v| v.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" "))
+                .unwrap_or_else(|| "VALUE".to_string());
             println!("  {:<24} {}", format!("{long}={val_name}"), help);
         } else {
             println!("  {:<24} {}", long, help);
         }
     }
-    println!("  {:<24} {}", "--help", "Print help information");
-    println!("  {:<24} {}", "--version", "Print version information");
+    println!("  {:<24} Print help information", "--help");
+    println!("  {:<24} Print version information", "--version");
 
     // Colon commands section
     if !colon_cmds.is_empty() {
@@ -256,7 +259,11 @@ fn print_help_gnu(
             let label = if aliases.is_empty() {
                 format!(":{cmd_name}")
             } else {
-                let alias_list = aliases.iter().map(|a| format!(":{a}")).collect::<Vec<_>>().join(", ");
+                let alias_list = aliases
+                    .iter()
+                    .map(|a| format!(":{a}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 format!(":{cmd_name} ({alias_list})")
             };
             println!("  {:<28} {}", label, desc);
@@ -265,10 +272,7 @@ fn print_help_gnu(
 }
 
 /// NPM-style help output.
-fn print_help_npm(
-    cmd: &clap::Command,
-    colon_cmds: &[(&str, &[&str], &str)],
-) {
+fn print_help_npm(cmd: &clap::Command, colon_cmds: &[(&str, &[&str], &str)]) {
     let name = cmd.get_name();
     let version = cmd.get_version().unwrap_or("unknown");
     let about = cmd.get_about().map(|s| s.to_string()).unwrap_or_default();
@@ -292,16 +296,17 @@ fn print_help_npm(
         let help = arg.get_help().map(|h| h.to_string()).unwrap_or_default();
         let takes_val = arg.get_action().takes_values();
         if takes_val {
-            let val_name = arg.get_value_names().map(|v| {
-                v.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" ")
-            }).unwrap_or_else(|| "VALUE".to_string());
+            let val_name = arg
+                .get_value_names()
+                .map(|v| v.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" "))
+                .unwrap_or_else(|| "VALUE".to_string());
             println!("  {:<24} {}", format!("{long} <{val_name}>"), help);
         } else {
             println!("  {:<24} {}", long, help);
         }
     }
-    println!("  {:<24} {}", "--help", "Print help");
-    println!("  {:<24} {}", "--version", "Print version");
+    println!("  {:<24} Print help", "--help");
+    println!("  {:<24} Print version", "--version");
 
     // Colon commands
     if !colon_cmds.is_empty() {
@@ -311,7 +316,11 @@ fn print_help_npm(
             let label = if aliases.is_empty() {
                 format!(":{cmd_name}")
             } else {
-                let alias_list = aliases.iter().map(|a| format!(":{a}")).collect::<Vec<_>>().join(", ");
+                let alias_list = aliases
+                    .iter()
+                    .map(|a| format!(":{a}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 format!(":{cmd_name} ({alias_list})")
             };
             println!("  {:<28} {}", label, desc);

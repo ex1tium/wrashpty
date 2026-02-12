@@ -549,11 +549,7 @@ impl CommandEditState {
     ///
     /// Locked token(s) for the command path, an empty argument token for
     /// user input, and schema flags pre-populated as suggestions.
-    pub fn for_schema(
-        command: &str,
-        subcommand: Option<&str>,
-        flags: Vec<String>,
-    ) -> Self {
+    pub fn for_schema(command: &str, subcommand: Option<&str>, flags: Vec<String>) -> Self {
         let mut tokens = vec![CommandToken::locked(command)];
         if let Some(sub) = subcommand {
             tokens.push(CommandToken::locked(sub));

@@ -229,7 +229,7 @@ pub static TERMINAL_THEME: Theme = Theme {
     segment_bg: Color::Reset,          // Transparent (DarkGray is bg in Solarized)
     success_fg: Color::Green,          // ANSI 2
     failure_fg: Color::Red,            // ANSI 1
-    cwd_fg: Color::Cyan,              // ANSI 6
+    cwd_fg: Color::Cyan,               // ANSI 6
     git_fg: Color::Magenta,            // ANSI 5
     git_dirty_fg: Color::LightMagenta, // ANSI 13
     duration_fg: Color::White,         // ANSI 15
@@ -238,14 +238,14 @@ pub static TERMINAL_THEME: Theme = Theme {
     separator_fg: Color::Gray,         // ANSI 7 (was DarkGray/8)
 
     // Panels
-    panel_bg: Color::Reset,            // Terminal default
-    panel_border: Color::Gray,         // ANSI 7 (was DarkGray/8)
-    header_fg: Color::Cyan,            // ANSI 6
-    text_primary: Color::White,        // ANSI 15
-    text_secondary: Color::Gray,       // ANSI 7 (was DarkGray/8)
-    text_highlight: Color::LightCyan,  // ANSI 14
-    selection_bg: Color::Blue,         // ANSI 4 — universal selection color
-    selection_fg: Color::White,        // ANSI 15
+    panel_bg: Color::Reset,           // Terminal default
+    panel_border: Color::Gray,        // ANSI 7 (was DarkGray/8)
+    header_fg: Color::Cyan,           // ANSI 6
+    text_primary: Color::White,       // ANSI 15
+    text_secondary: Color::Gray,      // ANSI 7 (was DarkGray/8)
+    text_highlight: Color::LightCyan, // ANSI 14
+    selection_bg: Color::Blue,        // ANSI 4 — universal selection color
+    selection_fg: Color::White,       // ANSI 15
 
     // Semantic
     semantic_success: Color::Green,  // ANSI 2
@@ -254,12 +254,12 @@ pub static TERMINAL_THEME: Theme = Theme {
     semantic_info: Color::Cyan,      // ANSI 6
 
     // Git File Status
-    git_modified_fg: Color::Yellow,    // ANSI 3
-    git_added_fg: Color::Green,        // ANSI 2
-    git_deleted_fg: Color::Red,        // ANSI 1
-    git_untracked_fg: Color::Gray,     // ANSI 7 (was DarkGray/8)
-    git_conflict_fg: Color::LightRed,  // ANSI 9
-    git_renamed_fg: Color::Magenta,    // ANSI 5
+    git_modified_fg: Color::Yellow,   // ANSI 3
+    git_added_fg: Color::Green,       // ANSI 2
+    git_deleted_fg: Color::Red,       // ANSI 1
+    git_untracked_fg: Color::Gray,    // ANSI 7 (was DarkGray/8)
+    git_conflict_fg: Color::LightRed, // ANSI 9
+    git_renamed_fg: Color::Magenta,   // ANSI 5
 
     // File Browser
     dir_color: Color::Blue,            // ANSI 4
@@ -269,24 +269,24 @@ pub static TERMINAL_THEME: Theme = Theme {
     file_date_color: Color::Cyan,      // ANSI 6
 
     // Tabs
-    tab_active_bg: Color::Blue,        // ANSI 4 — universal active highlight
-    tab_active_fg: Color::White,       // ANSI 15 (was Black/0, invisible in Solarized)
-    tab_inactive_bg: Color::Reset,     // Transparent (was DarkGray/8)
-    tab_inactive_fg: Color::Gray,      // ANSI 7 — dimmer than active White
+    tab_active_bg: Color::Blue,    // ANSI 4 — universal active highlight
+    tab_active_fg: Color::White,   // ANSI 15 (was Black/0, invisible in Solarized)
+    tab_inactive_bg: Color::Reset, // Transparent (was DarkGray/8)
+    tab_inactive_fg: Color::Gray,  // ANSI 7 — dimmer than active White
 
     // Scroll Viewer
-    search_current_bg: Color::Yellow,    // ANSI 3
-    search_current_fg: Color::Black,     // ANSI 0 — dark on bright yellow works in most themes
-    search_other_bg: Color::Cyan,        // ANSI 6 — distinct from Blue selection
-    search_other_fg: Color::White,       // ANSI 15
-    url_fg: Color::LightBlue,           // ANSI 12
-    yank_selection_bg: Color::Magenta,   // ANSI 5 — distinct from Blue selection
-    yank_selection_fg: Color::White,     // ANSI 15
-    timestamp_fg: Color::Gray,           // ANSI 7 (was DarkGray/8)
-    marker_fg: Color::Cyan,              // ANSI 6
-    help_bar_bg: Color::Reset,           // Transparent (was DarkGray/8)
-    help_bar_fg: Color::White,           // ANSI 15
-    help_bar_key: Color::Cyan,           // ANSI 6 (was LightCyan/14, which is base1 in Solarized)
+    search_current_bg: Color::Yellow,  // ANSI 3
+    search_current_fg: Color::Black,   // ANSI 0 — dark on bright yellow works in most themes
+    search_other_bg: Color::Cyan,      // ANSI 6 — distinct from Blue selection
+    search_other_fg: Color::White,     // ANSI 15
+    url_fg: Color::LightBlue,          // ANSI 12
+    yank_selection_bg: Color::Magenta, // ANSI 5 — distinct from Blue selection
+    yank_selection_fg: Color::White,   // ANSI 15
+    timestamp_fg: Color::Gray,         // ANSI 7 (was DarkGray/8)
+    marker_fg: Color::Cyan,            // ANSI 6
+    help_bar_bg: Color::Reset,         // Transparent (was DarkGray/8)
+    help_bar_fg: Color::White,         // ANSI 15
+    help_bar_key: Color::Cyan,         // ANSI 6 (was LightCyan/14, which is base1 in Solarized)
 };
 
 #[cfg(test)]

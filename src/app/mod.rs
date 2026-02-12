@@ -172,10 +172,8 @@ impl AltScreenGuard {
 impl Drop for AltScreenGuard {
     fn drop(&mut self) {
         if self.active {
-            let _ = crossterm::execute!(
-                std::io::stdout(),
-                crossterm::terminal::LeaveAlternateScreen
-            );
+            let _ =
+                crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen);
         }
     }
 }
@@ -876,11 +874,10 @@ impl App {
                 }
 
                 // Dispatch through the command registry
-                if let Some(action) = self.command_registry.dispatch(
-                    trimmed,
-                    &mut self.chrome,
-                    &self.history_store,
-                ) {
+                if let Some(action) =
+                    self.command_registry
+                        .dispatch(trimmed, &mut self.chrome, &self.history_store)
+                {
                     match action {
                         commands::CommandAction::Handled => {
                             // Immediate re-render so the user sees the effect
@@ -1350,7 +1347,11 @@ impl App {
                                     use crossterm::cursor::MoveTo;
                                     use crossterm::terminal::{Clear, ClearType};
                                     for row in 1..=*panel_height {
-                                        crossterm::queue!(out, MoveTo(0, row - 1), Clear(ClearType::UntilNewLine))?;
+                                        crossterm::queue!(
+                                            out,
+                                            MoveTo(0, row - 1),
+                                            Clear(ClearType::UntilNewLine)
+                                        )?;
                                     }
                                     out.flush()?;
                                 }
@@ -1426,7 +1427,11 @@ impl App {
                                 use crossterm::cursor::MoveTo;
                                 use crossterm::terminal::{Clear, ClearType};
                                 for row in 1..=*panel_height {
-                                    crossterm::queue!(out, MoveTo(0, row - 1), Clear(ClearType::UntilNewLine))?;
+                                    crossterm::queue!(
+                                        out,
+                                        MoveTo(0, row - 1),
+                                        Clear(ClearType::UntilNewLine)
+                                    )?;
                                 }
                                 out.flush()?;
                             }
@@ -1625,12 +1630,18 @@ impl App {
                     self.scrollback_config.enabled = enabled;
                 }
                 SettingAction::SetScrollbackMaxLines(n) => {
-                    debug!(max_lines = n, "Applying scrollback max lines from settings panel");
+                    debug!(
+                        max_lines = n,
+                        "Applying scrollback max lines from settings panel"
+                    );
                     self.scrollback_buffer.set_max_lines(n);
                     self.scrollback_config.max_lines = n;
                 }
                 SettingAction::SetScrollbackMaxLineBytes(n) => {
-                    debug!(max_line_bytes = n, "Applying scrollback max line bytes from settings panel");
+                    debug!(
+                        max_line_bytes = n,
+                        "Applying scrollback max line bytes from settings panel"
+                    );
                     self.scrollback_buffer.set_max_line_bytes(n);
                     self.scrollback_config.max_line_bytes = n;
                 }

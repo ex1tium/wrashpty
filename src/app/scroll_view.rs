@@ -1506,10 +1506,7 @@ impl App {
             .context("Failed to ensure raw mode for scroll view")?;
 
         // Enter alternate screen — saves main screen atomically
-        crossterm::execute!(
-            std::io::stdout(),
-            crossterm::terminal::EnterAlternateScreen
-        )?;
+        crossterm::execute!(std::io::stdout(), crossterm::terminal::EnterAlternateScreen)?;
         let mut alt_guard = super::AltScreenGuard::new();
         alt_guard.active = true;
 

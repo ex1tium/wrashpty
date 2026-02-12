@@ -29,10 +29,7 @@ pub struct SchemaPackImportStats {
 /// are included as-is. This produces a portable snapshot of the provider's
 /// current schema knowledge.
 pub fn export_schema_pack(provider: &dyn SchemaProvider) -> Result<String, CIError> {
-    let mut schemas = provider
-        .all_schemas()
-        .cloned()
-        .collect::<Vec<_>>();
+    let mut schemas = provider.all_schemas().cloned().collect::<Vec<_>>();
     schemas.sort_by(|a, b| a.command.cmp(&b.command));
 
     let package = SchemaPackage {
