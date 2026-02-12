@@ -426,6 +426,14 @@ impl App {
                     self.chrome.set_glyph_tier(tier);
                 }
             }
+
+            // Restore persisted theme preference
+            if let Ok(Some(theme_str)) = store.get_setting("theme") {
+                if let Some(preset) = crate::config::ThemePreset::from_label(&theme_str) {
+                    let theme = crate::chrome::theme::Theme::for_preset(preset);
+                    self.chrome.set_theme(theme);
+                }
+            }
         }
 
         loop {
@@ -1211,9 +1219,6 @@ impl App {
         use ratatui_widgets::block::Block;
         use ratatui_widgets::borders::Borders;
 
-        // Get theme for panel styling
-        let theme = self.chrome.theme();
-
         // Track if we need to redraw - start with true for initial render
         let mut needs_redraw = true;
 
@@ -1231,6 +1236,10 @@ impl App {
                 // We use row 0 in buffer coordinates, which maps to terminal row 1
                 let area = Rect::new(0, 0, *cols, *panel_height);
                 let mut buffer = Buffer::empty(area);
+
+                // Re-read theme from panel each frame so runtime theme
+                // changes (via Settings) are reflected in the outer border.
+                let theme = panel.theme();
 
                 // Create a bordered block for the panel with theme colors
                 let title = if fullscreen {

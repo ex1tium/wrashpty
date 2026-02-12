@@ -15,6 +15,17 @@ pub enum ThemePreset {
     Terminal,
 }
 
+impl ThemePreset {
+    /// Parses a label string (as persisted in settings) into a `ThemePreset`.
+    pub fn from_label(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "amber" => Some(Self::Amber),
+            "terminal" => Some(Self::Terminal),
+            _ => None,
+        }
+    }
+}
+
 /// Configuration for the internal scrollback system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScrollbackConfig {

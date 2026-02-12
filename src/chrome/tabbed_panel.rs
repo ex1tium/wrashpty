@@ -420,6 +420,10 @@ impl Panel for TabbedPanel {
         }
     }
 
+    fn theme(&self) -> &'static Theme {
+        self.theme
+    }
+
     fn set_theme(&mut self, theme: &'static Theme) {
         self.theme = theme;
         for tab in &mut self.tabs {
