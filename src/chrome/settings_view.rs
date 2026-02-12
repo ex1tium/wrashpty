@@ -102,6 +102,10 @@ pub struct SettingsView {
 }
 
 impl SettingsView {
+    /// Creates a new `SettingsView` configured with the given theme and glyph tier.
+    ///
+    /// The view is initialized with built-in setting sections (Appearance, Scrollback).
+    /// Persisted values are loaded later via [`set_history_store`](Self::set_history_store).
     pub fn new(theme: &'static Theme, glyph_tier: GlyphTier) -> Self {
         let glyphs = GlyphSet::for_tier(glyph_tier);
 
@@ -450,6 +454,26 @@ impl SettingsView {
         self.render_detail(buffer, chunks[1]);
     }
 
+    /// Computes the display row offset for a given flat item index.
+    ///
+    /// Walks `self.sections` counting section headers (1 row each), item rows,
+    /// and trailing blank lines (1 row each) to translate from a flat item
+    /// index to the corresponding row index in the rendered list.
+    fn row_offset_for_item(&self, flat_idx: usize) -> usize {
+        let mut row = 0usize;
+        let mut remaining = flat_idx;
+        for section in &self.sections {
+            if remaining < section.items.len() {
+                // Header row + items before the target
+                return row + 1 + remaining;
+            }
+            // header + items + blank spacer
+            row += 1 + section.items.len() + 1;
+            remaining -= section.items.len();
+        }
+        row
+    }
+
     fn render_item_list(&self, buffer: &mut Buffer, area: Rect) {
         let viewport_height = area.height as usize;
         let mut render_list = self.list.clone();
@@ -510,8 +534,12 @@ impl SettingsView {
             items.push(ListItem::new(Line::from("")));
         }
 
-        // Calculate effective scroll offset accounting for section headers and blank lines
-        let list = List::new(items);
+        // Translate the item-based scroll offset into a row offset that accounts
+        // for section headers and blank spacer lines.
+        let row_offset = self.row_offset_for_item(render_list.scroll_offset());
+        let visible_items: Vec<ListItem> = items.into_iter().skip(row_offset).take(viewport_height).collect();
+
+        let list = List::new(visible_items);
         list.render(area, buffer);
     }
 

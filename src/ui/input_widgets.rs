@@ -1,7 +1,10 @@
 //! Reusable input widget components for settings panels.
 //!
-//! Composable primitives: ToggleWidget, SelectWidget, MultiSelectWidget, TextInputWidget.
-//! Each implements the `InputWidget` trait for uniform handling.
+//! Provides composable primitives: [`ToggleWidget`], [`SelectWidget`],
+//! [`MultiSelectWidget`], [`CarouselWidget`], [`SliderWidget`], and
+//! [`TextInputWidget`]. Each widget handles key input through its own
+//! `handle_input` method and returns a [`WidgetResult`] to indicate
+//! whether the edit was confirmed, cancelled, or still in progress.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui_core::buffer::Buffer;
