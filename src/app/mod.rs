@@ -1613,14 +1613,17 @@ impl App {
                     } else {
                         self.scrollback_buffer.suspend_capture();
                     }
+                    self.scrollback_config.enabled = enabled;
                 }
                 SettingAction::SetScrollbackMaxLines(n) => {
                     debug!(max_lines = n, "Applying scrollback max lines from settings panel");
                     self.scrollback_buffer.set_max_lines(n);
+                    self.scrollback_config.max_lines = n;
                 }
                 SettingAction::SetScrollbackMaxLineBytes(n) => {
                     debug!(max_line_bytes = n, "Applying scrollback max line bytes from settings panel");
                     self.scrollback_buffer.set_max_line_bytes(n);
+                    self.scrollback_config.max_line_bytes = n;
                 }
             }
         }

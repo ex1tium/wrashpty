@@ -236,6 +236,8 @@ impl HelpView {
                 });
             }
             self.recalculate_total_lines();
+            // Rebuild filtered indices so stale section_idx/entry_idx don't cause panics
+            self.rebuild_filter();
         }
     }
 
@@ -280,6 +282,8 @@ impl HelpView {
         }
 
         self.recalculate_total_lines();
+        // Rebuild filtered indices so stale section_idx/entry_idx don't cause panics
+        self.rebuild_filter();
     }
 
     fn recalculate_total_lines(&mut self) {
