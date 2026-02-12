@@ -428,6 +428,12 @@ impl Panel for TabbedPanel {
             tab.set_theme(theme);
         }
     }
+
+    fn is_animating(&self) -> bool {
+        self.tabs
+            .get(self.active_tab)
+            .is_some_and(|panel| panel.is_animating())
+    }
 }
 
 #[cfg(test)]
