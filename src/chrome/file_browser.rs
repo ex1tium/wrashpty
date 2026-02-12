@@ -1015,6 +1015,10 @@ impl Panel for FileBrowserPanel {
         self.glyphs = super::glyphs::GlyphSet::for_tier(tier);
     }
 
+    fn theme(&self) -> &'static super::theme::Theme {
+        self.theme
+    }
+
     fn set_theme(&mut self, theme: &'static super::theme::Theme) {
         self.theme = theme;
     }

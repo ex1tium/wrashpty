@@ -70,6 +70,12 @@ pub trait Panel {
     /// Default is a no-op. Override in panels that cache glyph references.
     fn set_glyph_tier(&mut self, _tier: GlyphTier) {}
 
+    /// Returns the panel's current theme.
+    ///
+    /// Used by the outer panel frame to keep border/header colors in sync
+    /// when the theme changes at runtime (e.g. via the settings panel).
+    fn theme(&self) -> &'static Theme;
+
     /// Updates the theme for runtime switching.
     ///
     /// Default is a no-op. Override in panels that cache theme references.

@@ -244,6 +244,10 @@ impl Panel for CommandsPanel {
         self.schema.set_glyph_tier(tier);
     }
 
+    fn theme(&self) -> &'static super::theme::Theme {
+        self.theme
+    }
+
     fn set_theme(&mut self, theme: &'static super::theme::Theme) {
         self.theme = theme;
         self.discover.set_theme(theme);

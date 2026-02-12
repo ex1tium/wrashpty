@@ -283,6 +283,10 @@ impl Panel for SettingsPanel {
         self.help_view.set_glyph_tier(tier);
     }
 
+    fn theme(&self) -> &'static Theme {
+        self.theme
+    }
+
     fn set_theme(&mut self, theme: &'static Theme) {
         self.theme = theme;
         self.settings_view.set_theme(theme);

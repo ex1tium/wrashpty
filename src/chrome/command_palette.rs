@@ -522,6 +522,10 @@ impl Panel for CommandPalettePanel {
         self
     }
 
+    fn theme(&self) -> &'static super::theme::Theme {
+        self.theme
+    }
+
     fn set_theme(&mut self, theme: &'static super::theme::Theme) {
         self.theme = theme;
     }
