@@ -54,6 +54,459 @@ impl ColumnWidths {
     }
 }
 
+fn command_display_lines(command: &str, cmd_width: usize) -> Vec<String> {
+    let max_width = cmd_width.max(1);
+    let continuation_prefix = "  ";
+    let mut lines: Vec<String> = command
+        .split('\n')
+        .enumerate()
+        .map(|(idx, line)| {
+            let display = if idx == 0 {
+                line.to_string()
+            } else {
+                format!("{continuation_prefix}{line}")
+            };
+
+            if crate::ui::text_width::display_width(&display) > max_width {
+                crate::ui::text_width::truncate_with_ellipsis(&display, max_width).into_owned()
+            } else {
+                display
+            }
+        })
+        .collect();
+
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+
+    lines
+}
+
+#[derive(Debug, Clone)]
+struct HeredocSpec {
+    delimiter: String,
+    strip_tabs: bool,
+}
+
+fn parse_heredoc_spec(command: &str) -> Option<HeredocSpec> {
+    let bytes = command.as_bytes();
+    let mut i = 0usize;
+
+    while i + 1 < bytes.len() {
+        if bytes[i] != b'<' || bytes[i + 1] != b'<' {
+            i += 1;
+            continue;
+        }
+
+        // Ignore here-strings (<<<)
+        if i + 2 < bytes.len() && bytes[i + 2] == b'<' {
+            i += 1;
+            continue;
+        }
+
+        let mut j = i + 2;
+        let strip_tabs = if j < bytes.len() && bytes[j] == b'-' {
+            j += 1;
+            true
+        } else {
+            false
+        };
+
+        while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+            j += 1;
+        }
+
+        if j >= bytes.len() {
+            return None;
+        }
+
+        let delimiter = match bytes[j] {
+            b'\'' | b'"' => {
+                let quote = bytes[j];
+                j += 1;
+                let start = j;
+                while j < bytes.len() && bytes[j] != quote {
+                    j += 1;
+                }
+                if j <= start {
+                    return None;
+                }
+                command[start..j].to_string()
+            }
+            _ => {
+                let start = j;
+                while j < bytes.len() {
+                    let b = bytes[j];
+                    if b.is_ascii_whitespace() || matches!(b, b';' | b'|' | b'&' | b')') {
+                        break;
+                    }
+                    j += 1;
+                }
+                if j <= start {
+                    return None;
+                }
+                command[start..j].to_string()
+            }
+        };
+
+        if !delimiter.is_empty() {
+            return Some(HeredocSpec {
+                delimiter,
+                strip_tabs,
+            });
+        }
+
+        i += 1;
+    }
+
+    None
+}
+
+fn heredoc_line_matches_delimiter(line: &str, spec: &HeredocSpec) -> bool {
+    if spec.strip_tabs {
+        line.trim_start_matches('\t') == spec.delimiter
+    } else {
+        line == spec.delimiter
+    }
+}
+
+fn try_merge_heredoc_records(records: &[HistoryRecord], idx: usize) -> Option<(String, usize)> {
+    const MAX_HEREDOC_LINES: usize = 256;
+
+    let record = records.get(idx)?;
+    if record.command.contains('\n') {
+        return None;
+    }
+
+    let spec = parse_heredoc_spec(&record.command)?;
+    let mut joined = record.command.clone();
+    let mut consumed = 1usize;
+
+    for next in records.iter().skip(idx + 1).take(MAX_HEREDOC_LINES) {
+        // Avoid recursive/ambiguous grouping when the source row
+        // already contains newlines.
+        if next.command.contains('\n') {
+            break;
+        }
+
+        joined.push('\n');
+        joined.push_str(&next.command);
+        consumed += 1;
+
+        if heredoc_line_matches_delimiter(&next.command, &spec) {
+            return Some((joined, consumed));
+        }
+    }
+
+    None
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct ContinuationState {
+    open_single_quote: bool,
+    open_double_quote: bool,
+    open_backtick: bool,
+    paren_depth: i32,
+    brace_depth: i32,
+    if_depth: i32,
+    pending_then_depth: i32,
+    do_depth: i32,
+    pending_do_depth: i32,
+    case_depth: i32,
+    trailing_backslash: bool,
+    trailing_operator: bool,
+}
+
+impl ContinuationState {
+    fn is_incomplete(self) -> bool {
+        self.open_single_quote
+            || self.open_double_quote
+            || self.open_backtick
+            || self.paren_depth > 0
+            || self.brace_depth > 0
+            || self.if_depth > 0
+            || self.pending_then_depth > 0
+            || self.do_depth > 0
+            || self.pending_do_depth > 0
+            || self.case_depth > 0
+            || self.trailing_backslash
+            || self.trailing_operator
+    }
+}
+
+fn ends_with_unescaped_backslash(line: &str) -> bool {
+    let trimmed = line.trim_end();
+    if !trimmed.ends_with('\\') {
+        return false;
+    }
+    let backslashes = trimmed
+        .as_bytes()
+        .iter()
+        .rev()
+        .take_while(|&&b| b == b'\\')
+        .count();
+    backslashes % 2 == 1
+}
+
+fn ends_with_continuation_operator(line: &str) -> bool {
+    let trimmed = line.trim_end();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    if trimmed.ends_with("&&")
+        || trimmed.ends_with("||")
+        || trimmed.ends_with('|')
+        || trimmed.ends_with('(')
+        || trimmed.ends_with('{')
+        || trimmed.ends_with('>')
+        || trimmed.ends_with('<')
+    {
+        return true;
+    }
+
+    let last_word = trimmed
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .rev()
+        .find(|part| !part.is_empty())
+        .unwrap_or("");
+    let last_word = last_word.to_ascii_lowercase();
+
+    matches!(last_word.as_str(), "then" | "do" | "in" | "elif" | "else")
+}
+
+fn flush_keyword_token(token: &mut String, state: &mut ContinuationState) {
+    if token.is_empty() {
+        return;
+    }
+    let lower = token.to_ascii_lowercase();
+    token.clear();
+
+    match lower.as_str() {
+        "if" => {
+            state.if_depth += 1;
+            state.pending_then_depth += 1;
+        }
+        "elif" => state.pending_then_depth += 1,
+        "then" => state.pending_then_depth = (state.pending_then_depth - 1).max(0),
+        "fi" => state.if_depth = (state.if_depth - 1).max(0),
+        "for" | "while" | "until" | "select" => state.pending_do_depth += 1,
+        "do" => {
+            state.pending_do_depth = (state.pending_do_depth - 1).max(0);
+            state.do_depth += 1;
+        }
+        "done" => state.do_depth = (state.do_depth - 1).max(0),
+        "case" => state.case_depth += 1,
+        "esac" => state.case_depth = (state.case_depth - 1).max(0),
+        _ => {}
+    }
+}
+
+fn analyze_command_continuation(command: &str) -> ContinuationState {
+    let mut state = ContinuationState::default();
+    let mut token = String::new();
+
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut in_backtick = false;
+    let mut escaped_in_double = false;
+    let mut in_comment = false;
+    let mut prev_was_whitespace = true;
+
+    for ch in command.chars() {
+        if in_comment {
+            if ch == '\n' {
+                in_comment = false;
+                prev_was_whitespace = true;
+            }
+            continue;
+        }
+
+        if in_single {
+            if ch == '\'' {
+                in_single = false;
+            }
+            continue;
+        }
+
+        if in_double {
+            if escaped_in_double {
+                escaped_in_double = false;
+                continue;
+            }
+            match ch {
+                '\\' => escaped_in_double = true,
+                '"' => in_double = false,
+                _ => {}
+            }
+            continue;
+        }
+
+        if in_backtick {
+            if ch == '`' {
+                in_backtick = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' => {
+                flush_keyword_token(&mut token, &mut state);
+                in_single = true;
+                prev_was_whitespace = false;
+            }
+            '"' => {
+                flush_keyword_token(&mut token, &mut state);
+                in_double = true;
+                prev_was_whitespace = false;
+            }
+            '`' => {
+                flush_keyword_token(&mut token, &mut state);
+                in_backtick = true;
+                prev_was_whitespace = false;
+            }
+            '#' => {
+                if prev_was_whitespace {
+                    flush_keyword_token(&mut token, &mut state);
+                    in_comment = true;
+                } else {
+                    flush_keyword_token(&mut token, &mut state);
+                    prev_was_whitespace = false;
+                }
+            }
+            '(' => {
+                flush_keyword_token(&mut token, &mut state);
+                state.paren_depth += 1;
+                prev_was_whitespace = false;
+            }
+            ')' => {
+                flush_keyword_token(&mut token, &mut state);
+                state.paren_depth = (state.paren_depth - 1).max(0);
+                prev_was_whitespace = false;
+            }
+            '{' => {
+                flush_keyword_token(&mut token, &mut state);
+                state.brace_depth += 1;
+                prev_was_whitespace = false;
+            }
+            '}' => {
+                flush_keyword_token(&mut token, &mut state);
+                state.brace_depth = (state.brace_depth - 1).max(0);
+                prev_was_whitespace = false;
+            }
+            c if c.is_ascii_alphanumeric() || c == '_' => {
+                token.push(c);
+                prev_was_whitespace = false;
+            }
+            c if c.is_whitespace() => {
+                flush_keyword_token(&mut token, &mut state);
+                prev_was_whitespace = true;
+            }
+            _ => {
+                flush_keyword_token(&mut token, &mut state);
+                prev_was_whitespace = false;
+            }
+        }
+    }
+
+    flush_keyword_token(&mut token, &mut state);
+
+    state.open_single_quote = in_single;
+    state.open_double_quote = in_double;
+    state.open_backtick = in_backtick;
+
+    if let Some(last_line) = command.lines().rev().find(|line| !line.trim().is_empty()) {
+        state.trailing_backslash = ends_with_unescaped_backslash(last_line);
+        state.trailing_operator = ends_with_continuation_operator(last_line);
+    }
+
+    state
+}
+
+fn try_merge_general_multiline_records(
+    records: &[HistoryRecord],
+    idx: usize,
+) -> Option<(String, usize)> {
+    const MAX_GENERAL_LINES: usize = 64;
+
+    let record = records.get(idx)?;
+    if record.command.contains('\n') {
+        return None;
+    }
+
+    let initial = analyze_command_continuation(&record.command);
+    if !initial.is_incomplete() {
+        return None;
+    }
+
+    let mut joined = record.command.clone();
+    let mut consumed = 1usize;
+
+    for next in records.iter().skip(idx + 1).take(MAX_GENERAL_LINES) {
+        if next.command.contains('\n') {
+            break;
+        }
+
+        joined.push('\n');
+        joined.push_str(&next.command);
+        consumed += 1;
+
+        if !analyze_command_continuation(&joined).is_incomplete() {
+            return Some((joined, consumed));
+        }
+    }
+
+    None
+}
+
+fn merge_split_multiline_records(records: Vec<HistoryRecord>) -> Vec<HistoryRecord> {
+    let mut merged = Vec::with_capacity(records.len());
+    let mut idx = 0usize;
+
+    while idx < records.len() {
+        let mut record = records[idx].clone();
+        let mut consumed = 1usize;
+
+        if !record.command.contains('\n') {
+            if let Some((joined, n)) = try_merge_heredoc_records(&records, idx) {
+                record.command = joined;
+                consumed = n;
+            } else if let Some((joined, n)) = try_merge_general_multiline_records(&records, idx) {
+                record.command = joined;
+                consumed = n;
+            }
+        }
+
+        // Normalize metadata across merged fragments so non-recency modes
+        // keep stable counters/recency when lines have different aggregates.
+        if consumed > 1 {
+            for extra in records.iter().skip(idx + 1).take(consumed - 1) {
+                if let Some(extra_ts) = extra.timestamp {
+                    if record.timestamp.is_none_or(|ts| extra_ts > ts) {
+                        record.timestamp = Some(extra_ts);
+                    }
+                }
+                if record.cwd.is_none() {
+                    record.cwd = extra.cwd.clone();
+                }
+                if record.exit_status.is_none() {
+                    record.exit_status = extra.exit_status;
+                }
+                if record.duration.is_none() {
+                    record.duration = extra.duration;
+                }
+                record.execution_count = record.execution_count.min(extra.execution_count);
+                record.frecency_score = record.frecency_score.min(extra.frecency_score);
+            }
+        }
+
+        merged.push(record);
+        idx += consumed;
+    }
+
+    merged
+}
+
 /// History browser panel with table view.
 pub struct HistoryBrowserPanel {
     /// History records from the store.
@@ -121,7 +574,9 @@ impl HistoryBrowserPanel {
                     self.current_cwd.as_ref(),
                     1000,
                 ) {
-                    Ok(records) => self.records = records,
+                    Ok(records) => {
+                        self.records = merge_split_multiline_records(records);
+                    }
                     Err(e) => warn!("Failed to query history: {}", e),
                 }
             }
@@ -142,11 +597,32 @@ impl HistoryBrowserPanel {
     }
 
     /// Ensures the selection is visible in the scroll window.
-    fn ensure_visible(&mut self, visible_count: usize) {
-        if self.selection < self.scroll_offset {
-            self.scroll_offset = self.selection;
-        } else if self.selection >= self.scroll_offset + visible_count {
-            self.scroll_offset = self.selection.saturating_sub(visible_count - 1);
+    fn ensure_visible(&mut self, visible_count: usize, cmd_width: usize) {
+        if self.records.is_empty() || visible_count == 0 {
+            self.scroll_offset = 0;
+            return;
+        }
+
+        let mut selected_start = 0usize;
+        let mut selected_height = 1usize;
+        let mut cumulative = 0usize;
+
+        for (idx, record) in self.records.iter().enumerate() {
+            let height = command_display_lines(&record.command, cmd_width).len();
+            if idx == self.selection {
+                selected_start = cumulative;
+                selected_height = height.max(1);
+                break;
+            }
+            cumulative += height.max(1);
+        }
+
+        let selected_end = selected_start + selected_height;
+
+        if selected_start < self.scroll_offset {
+            self.scroll_offset = selected_start;
+        } else if selected_end > self.scroll_offset + visible_count {
+            self.scroll_offset = selected_end.saturating_sub(visible_count);
         }
     }
 
@@ -675,14 +1151,16 @@ impl HistoryBrowserPanel {
         }
     }
 
-    /// Renders a single table row.
-    fn render_row(
+    /// Renders a single visual line for a history record.
+    fn render_row_line(
         &self,
         buffer: &mut Buffer,
         area: Rect,
         record: &HistoryRecord,
+        command_text: &str,
         cols: &ColumnWidths,
         is_selected: bool,
+        show_metadata: bool,
     ) {
         let base_style = if is_selected {
             Style::default().bg(self.theme.selection_bg)
@@ -690,6 +1168,9 @@ impl HistoryBrowserPanel {
             Style::default()
         };
         let dim = Style::default().fg(self.theme.text_secondary);
+        // Keep multiline rendering stable: continuation lines never draw
+        // column separators, regardless of selection state.
+        let hide_separators = !show_metadata;
 
         // Fill background for selected row
         if is_selected {
@@ -710,15 +1191,9 @@ impl HistoryBrowserPanel {
         } else {
             base_style.fg(self.theme.text_primary)
         };
-        let cmd_width = cols.command.saturating_sub(1) as usize;
-        let cmd_display = if crate::ui::text_width::display_width(&record.command) > cmd_width {
-            crate::ui::text_width::truncate_with_ellipsis(&record.command, cmd_width).into_owned()
-        } else {
-            record.command.clone()
-        };
         {
             let mut col: u16 = 0;
-            for ch in cmd_display.chars() {
+            for ch in command_text.chars() {
                 let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
                 if col + ch_w > cols.command {
                     break;
@@ -734,7 +1209,7 @@ impl HistoryBrowserPanel {
 
         // Separator
         if let Some(cell) = buffer.cell_mut((x, area.y)) {
-            cell.set_char('|');
+            cell.set_char(if hide_separators { ' ' } else { '|' });
             cell.set_style(if is_selected {
                 base_style.fg(self.theme.text_secondary)
             } else {
@@ -744,7 +1219,11 @@ impl HistoryBrowserPanel {
         x += 1;
 
         // When column
-        let time_text = self.format_relative_time(record);
+        let time_text = if show_metadata {
+            self.format_relative_time(record)
+        } else {
+            String::new()
+        };
         let time_style = base_style.fg(self.theme.semantic_info);
         let time_padded = crate::ui::text_width::pad_right_align(&time_text, 5);
         {
@@ -766,7 +1245,7 @@ impl HistoryBrowserPanel {
 
         // Separator
         if let Some(cell) = buffer.cell_mut((x, area.y)) {
-            cell.set_char('|');
+            cell.set_char(if hide_separators { ' ' } else { '|' });
             cell.set_style(if is_selected {
                 base_style.fg(self.theme.text_secondary)
             } else {
@@ -776,7 +1255,11 @@ impl HistoryBrowserPanel {
         x += 1;
 
         // Duration column
-        let dur_text = self.format_duration(record);
+        let dur_text = if show_metadata {
+            self.format_duration(record)
+        } else {
+            String::new()
+        };
         let dur_style = base_style.fg(self.theme.git_fg);
         let dur_padded = crate::ui::text_width::pad_right_align(&dur_text, 7);
         {
@@ -798,7 +1281,7 @@ impl HistoryBrowserPanel {
 
         // Separator
         if let Some(cell) = buffer.cell_mut((x, area.y)) {
-            cell.set_char('|');
+            cell.set_char(if hide_separators { ' ' } else { '|' });
             cell.set_style(if is_selected {
                 base_style.fg(self.theme.text_secondary)
             } else {
@@ -809,7 +1292,11 @@ impl HistoryBrowserPanel {
 
         // Count column (only in dedupe/frequency modes)
         if cols.count > 0 {
-            let count_text = format!("{:>4}", record.execution_count);
+            let count_text = if show_metadata {
+                format!("{:>4}", record.execution_count)
+            } else {
+                String::new()
+            };
             let count_style = if record.execution_count > 10 {
                 base_style.fg(self.theme.text_highlight)
             } else if record.execution_count > 1 {
@@ -836,7 +1323,7 @@ impl HistoryBrowserPanel {
 
             // Separator
             if let Some(cell) = buffer.cell_mut((x, area.y)) {
-                cell.set_char('|');
+                cell.set_char(if hide_separators { ' ' } else { '|' });
                 cell.set_style(if is_selected {
                     base_style.fg(self.theme.text_secondary)
                 } else {
@@ -847,7 +1334,11 @@ impl HistoryBrowserPanel {
         }
 
         // Status column (last)
-        let (status_text, status_color) = self.format_exit_status(record);
+        let (status_text, status_color) = if show_metadata {
+            self.format_exit_status(record)
+        } else {
+            ("", self.theme.text_secondary)
+        };
         let status_style = base_style.fg(status_color);
         {
             let max_col = cols.status as usize;
@@ -944,24 +1435,49 @@ impl Panel for HistoryBrowserPanel {
 
         // Render table body
         let visible_height = chunks[3].height as usize;
-        self.ensure_visible(visible_height);
+        let cmd_width = cols.command.saturating_sub(1) as usize;
+        self.ensure_visible(visible_height, cmd_width);
 
-        for (display_idx, record) in self
-            .records
-            .iter()
-            .skip(self.scroll_offset)
-            .take(visible_height)
-            .enumerate()
-        {
-            let actual_idx = self.scroll_offset + display_idx;
-            let is_selected = actual_idx == self.selection;
-            let row_area = Rect::new(
-                chunks[3].x,
-                chunks[3].y + display_idx as u16,
-                chunks[3].width,
-                1,
-            );
-            self.render_row(buffer, row_area, record, &cols, is_selected);
+        let viewport_start = self.scroll_offset;
+        let viewport_end = self.scroll_offset + visible_height;
+        let mut virtual_line = 0usize;
+        let mut y = chunks[3].y;
+        let y_end = chunks[3].y + chunks[3].height;
+
+        for (record_idx, record) in self.records.iter().enumerate() {
+            let display_lines = command_display_lines(&record.command, cmd_width);
+            let record_height = display_lines.len().max(1);
+            let record_start = virtual_line;
+            let record_end = record_start + record_height;
+            virtual_line = record_end;
+
+            if record_end <= viewport_start {
+                continue;
+            }
+            if record_start >= viewport_end || y >= y_end {
+                break;
+            }
+
+            let first_visible = viewport_start.saturating_sub(record_start);
+            let is_selected = record_idx == self.selection;
+
+            for (line_idx, command_line) in display_lines.iter().enumerate().skip(first_visible) {
+                if y >= y_end {
+                    break;
+                }
+
+                let row_area = Rect::new(chunks[3].x, y, chunks[3].width, 1);
+                self.render_row_line(
+                    buffer,
+                    row_area,
+                    record,
+                    command_line,
+                    &cols,
+                    is_selected,
+                    line_idx == 0,
+                );
+                y += 1;
+            }
         }
     }
 
@@ -1114,6 +1630,18 @@ mod tests {
     use super::super::theme::AMBER_THEME;
     use super::*;
 
+    fn history_record_for_command(command: &str) -> HistoryRecord {
+        HistoryRecord {
+            command: command.to_string(),
+            timestamp: None,
+            cwd: None,
+            exit_status: None,
+            duration: None,
+            frecency_score: 0.0,
+            execution_count: 1,
+        }
+    }
+
     #[test]
     fn test_history_browser_new_constructs_empty_records() {
         let panel = HistoryBrowserPanel::new(
@@ -1158,6 +1686,202 @@ mod tests {
         assert_eq!(cols.time, 6);
         assert_eq!(cols.duration, 8);
         assert!(cols.command > 0);
+    }
+
+    #[test]
+    fn test_parse_heredoc_spec_with_quoted_delimiter_returns_spec() {
+        let spec =
+            parse_heredoc_spec("sudo tee /tmp/file >/dev/null <<'EOF'").expect("heredoc spec");
+        assert_eq!(spec.delimiter, "EOF");
+        assert!(!spec.strip_tabs);
+    }
+
+    #[test]
+    fn test_parse_heredoc_spec_with_dash_strip_tabs_returns_spec() {
+        let spec = parse_heredoc_spec("cat <<-EOF").expect("heredoc spec");
+        assert_eq!(spec.delimiter, "EOF");
+        assert!(spec.strip_tabs);
+    }
+
+    #[test]
+    fn test_analyze_command_continuation_with_trailing_backslash_reports_incomplete() {
+        let state = analyze_command_continuation("echo hello \\");
+        assert!(state.is_incomplete());
+        assert!(state.trailing_backslash);
+    }
+
+    #[test]
+    fn test_analyze_command_continuation_with_complete_single_line_reports_complete() {
+        let state = analyze_command_continuation("echo hello");
+        assert!(!state.is_incomplete());
+    }
+
+    #[test]
+    fn test_merge_split_multiline_records_with_heredoc_rows_collapses_into_one_record() {
+        let records = vec![
+            history_record_for_command("sudo tee /tmp/demo <<'EOF'"),
+            history_record_for_command("line 1"),
+            history_record_for_command("line 2"),
+            history_record_for_command("EOF"),
+            history_record_for_command("echo done"),
+        ];
+
+        let merged = merge_split_multiline_records(records);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(
+            merged[0].command,
+            "sudo tee /tmp/demo <<'EOF'\nline 1\nline 2\nEOF"
+        );
+        assert_eq!(merged[1].command, "echo done");
+    }
+
+    #[test]
+    fn test_merge_split_multiline_records_without_delimiter_keeps_original_rows() {
+        let records = vec![
+            history_record_for_command("cat <<EOF"),
+            history_record_for_command("line 1"),
+            history_record_for_command("echo done"),
+        ];
+
+        let merged = merge_split_multiline_records(records);
+        assert_eq!(merged.len(), 3);
+        assert_eq!(merged[0].command, "cat <<EOF");
+        assert_eq!(merged[1].command, "line 1");
+        assert_eq!(merged[2].command, "echo done");
+    }
+
+    #[test]
+    fn test_merge_split_multiline_records_with_backslash_continuation_collapses_rows() {
+        let records = vec![
+            history_record_for_command("echo first \\"),
+            history_record_for_command("second"),
+            history_record_for_command("echo done"),
+        ];
+
+        let merged = merge_split_multiline_records(records);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].command, "echo first \\\nsecond");
+        assert_eq!(merged[1].command, "echo done");
+    }
+
+    #[test]
+    fn test_merge_split_multiline_records_with_trailing_pipe_collapses_rows() {
+        let records = vec![
+            history_record_for_command("cat /etc/passwd |"),
+            history_record_for_command("grep root"),
+            history_record_for_command("echo done"),
+        ];
+
+        let merged = merge_split_multiline_records(records);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].command, "cat /etc/passwd |\ngrep root");
+        assert_eq!(merged[1].command, "echo done");
+    }
+
+    #[test]
+    fn test_merge_split_multiline_records_with_unclosed_quote_collapses_rows() {
+        let records = vec![
+            history_record_for_command("echo \"hello"),
+            history_record_for_command("world\""),
+            history_record_for_command("echo done"),
+        ];
+
+        let merged = merge_split_multiline_records(records);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].command, "echo \"hello\nworld\"");
+        assert_eq!(merged[1].command, "echo done");
+    }
+
+    #[test]
+    fn test_merge_split_multiline_records_with_if_block_collapses_rows() {
+        let records = vec![
+            history_record_for_command("if [ -f /tmp/demo ]; then"),
+            history_record_for_command("echo yes"),
+            history_record_for_command("fi"),
+            history_record_for_command("echo done"),
+        ];
+
+        let merged = merge_split_multiline_records(records);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].command, "if [ -f /tmp/demo ]; then\necho yes\nfi");
+        assert_eq!(merged[1].command, "echo done");
+    }
+
+    #[test]
+    fn test_merge_split_multiline_records_with_for_do_done_collapses_rows() {
+        let records = vec![
+            history_record_for_command("for x in a b"),
+            history_record_for_command("do"),
+            history_record_for_command("echo $x"),
+            history_record_for_command("done"),
+            history_record_for_command("echo done"),
+        ];
+
+        let merged = merge_split_multiline_records(records);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].command, "for x in a b\ndo\necho $x\ndone");
+        assert_eq!(merged[1].command, "echo done");
+    }
+
+    #[test]
+    fn test_merge_split_multiline_records_with_unclosed_quote_without_terminator_keeps_rows() {
+        let records = vec![
+            history_record_for_command("echo \"hello"),
+            history_record_for_command("next-command"),
+        ];
+
+        let merged = merge_split_multiline_records(records);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].command, "echo \"hello");
+        assert_eq!(merged[1].command, "next-command");
+    }
+
+    #[test]
+    fn test_merge_split_multiline_records_with_frequency_like_metadata_normalizes_fields() {
+        let t0 = chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("timestamp t0");
+        let t1 = chrono::DateTime::from_timestamp(1_700_000_100, 0).expect("timestamp t1");
+        let records = vec![
+            HistoryRecord {
+                command: "cat <<'EOF'".to_string(),
+                timestamp: Some(t0),
+                cwd: None,
+                exit_status: None,
+                duration: None,
+                frecency_score: 42.0,
+                execution_count: 9,
+            },
+            HistoryRecord {
+                command: "line 1".to_string(),
+                timestamp: Some(t1),
+                cwd: Some(PathBuf::from("/tmp")),
+                exit_status: Some(0),
+                duration: Some(std::time::Duration::from_millis(1200)),
+                frecency_score: 3.0,
+                execution_count: 2,
+            },
+            HistoryRecord {
+                command: "EOF".to_string(),
+                timestamp: Some(t0),
+                cwd: None,
+                exit_status: None,
+                duration: None,
+                frecency_score: 7.0,
+                execution_count: 5,
+            },
+        ];
+
+        let merged = merge_split_multiline_records(records);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].command, "cat <<'EOF'\nline 1\nEOF");
+        assert_eq!(merged[0].timestamp, Some(t1));
+        assert_eq!(merged[0].cwd.as_deref(), Some(std::path::Path::new("/tmp")));
+        assert_eq!(merged[0].exit_status, Some(0));
+        assert_eq!(
+            merged[0].duration,
+            Some(std::time::Duration::from_millis(1200))
+        );
+        assert_eq!(merged[0].execution_count, 2);
+        assert_eq!(merged[0].frecency_score, 3.0);
     }
 
     // Tokenizer tests (delegated to command_edit module)
