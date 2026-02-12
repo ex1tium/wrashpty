@@ -80,4 +80,12 @@ pub trait Panel {
     ///
     /// Default is a no-op. Override in panels that cache theme references.
     fn set_theme(&mut self, _theme: &'static Theme) {}
+
+    /// Returns true if the panel has active animations that require periodic redraws.
+    ///
+    /// Default implementation returns false. Override in panels with animations
+    /// (e.g., loading spinners) that need to update even without user input.
+    fn is_animating(&self) -> bool {
+        false
+    }
 }

@@ -30,6 +30,71 @@ pub enum HistoryError {
 /// Maximum number of history entries to load.
 const MAX_HISTORY_LINES: usize = 10_000;
 
+/// Returns true when a line is a bash history timestamp marker (`#<unix-seconds>`).
+fn is_timestamp_marker(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix('#') else {
+        return false;
+    };
+    !rest.is_empty() && rest.as_bytes().iter().all(|b| b.is_ascii_digit())
+}
+
+/// Pushes an entry into a bounded history deque.
+fn push_bounded(history: &mut VecDeque<String>, entry: String) {
+    history.push_back(entry);
+    if history.len() > MAX_HISTORY_LINES {
+        history.pop_front();
+    }
+}
+
+/// Parses bash history content, preserving multiline entries when timestamp markers are present.
+fn parse_history_reader<R: BufRead>(reader: R) -> (Vec<String>, usize) {
+    let mut history: VecDeque<String> = VecDeque::with_capacity(MAX_HISTORY_LINES);
+    let mut skipped = 0;
+
+    // In timestamp mode (`HISTTIMEFORMAT`-style), each `#<epoch>` begins a new entry,
+    // and all following lines (including blanks) belong to the command until the next marker.
+    let mut in_timestamp_mode = false;
+    let mut pending_multiline = String::new();
+
+    for line_result in reader.lines() {
+        match line_result {
+            Ok(line) => {
+                if is_timestamp_marker(&line) {
+                    if in_timestamp_mode && !pending_multiline.trim().is_empty() {
+                        push_bounded(&mut history, std::mem::take(&mut pending_multiline));
+                    }
+                    in_timestamp_mode = true;
+                    continue;
+                }
+
+                if in_timestamp_mode {
+                    if !pending_multiline.is_empty() {
+                        pending_multiline.push('\n');
+                    }
+                    pending_multiline.push_str(&line);
+                    continue;
+                }
+
+                // Legacy non-timestamp mode: one command per line.
+                if line.trim().is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                push_bounded(&mut history, line);
+            }
+            Err(e) => {
+                warn!(error = %e, "Skipping corrupted history line");
+                skipped += 1;
+            }
+        }
+    }
+
+    if in_timestamp_mode && !pending_multiline.trim().is_empty() {
+        push_bounded(&mut history, pending_multiline);
+    }
+
+    (history.into(), skipped)
+}
+
 /// Loads history entries from ~/.bash_history.
 ///
 /// Uses a streaming approach with a bounded VecDeque to avoid loading the
@@ -67,42 +132,7 @@ pub fn load_history() -> Result<Vec<String>, HistoryError> {
 
     let reader = BufReader::new(file);
 
-    // Use a bounded VecDeque for streaming - avoids loading entire file
-    // before trimming when histories are huge
-    let mut history: VecDeque<String> = VecDeque::with_capacity(MAX_HISTORY_LINES);
-    let mut line_number = 0;
-    let mut skipped = 0;
-
-    for line_result in reader.lines() {
-        line_number += 1;
-
-        match line_result {
-            Ok(line) => {
-                // Skip empty lines
-                if line.trim().is_empty() {
-                    continue;
-                }
-
-                // Skip bash timestamp comments (lines starting with #)
-                if line.starts_with('#') {
-                    continue;
-                }
-
-                // Push to back, pop from front if over capacity
-                history.push_back(line);
-                if history.len() > MAX_HISTORY_LINES {
-                    history.pop_front();
-                }
-            }
-            Err(e) => {
-                warn!(line = line_number, error = %e, "Skipping corrupted history line");
-                skipped += 1;
-            }
-        }
-    }
-
-    // Convert VecDeque to Vec for return
-    let history: Vec<String> = history.into();
+    let (history, skipped) = parse_history_reader(reader);
 
     info!(
         entries = history.len(),
@@ -342,23 +372,24 @@ pub fn dedupe_bash_history() -> Result<usize, HistoryError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
 
     #[test]
     #[allow(clippy::assertions_on_constants)]
-    fn test_max_history_lines_constant() {
+    fn test_max_history_lines_constant_within_reasonable_bounds() {
         // Verify the constant is reasonable
         assert!(MAX_HISTORY_LINES >= 1000);
         assert!(MAX_HISTORY_LINES <= 100_000);
     }
 
     #[test]
-    fn test_get_history_path() {
+    fn test_get_history_path_when_home_available_returns_bash_history_path() {
         let path = get_history_path().expect("Should get history path");
         assert!(path.ends_with(".bash_history"));
     }
 
     #[test]
-    fn test_load_history_missing_file() {
+    fn test_load_history_when_file_missing_returns_ok_empty_or_existing() {
         // This tests the graceful degradation for missing files
         // The actual file may or may not exist, but load_history should not panic
         let result = load_history();
@@ -366,55 +397,74 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_file_returns_empty_vector() {
+    fn test_parse_history_reader_with_empty_input_returns_empty() {
         // File is empty - simulate by just checking our parsing logic handles this
-        let content = "";
-        let lines: Vec<String> = content
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(|s| s.to_string())
-            .collect();
-        assert!(lines.is_empty());
+        let (entries, skipped) = parse_history_reader(Cursor::new(""));
+        assert!(entries.is_empty());
+        assert_eq!(skipped, 0);
     }
 
     #[test]
-    fn test_skip_empty_lines() {
+    fn test_parse_history_reader_with_blank_lines_skips_empty_entries() {
         let content = "echo hello\n\necho world\n   \necho test";
-        let lines: Vec<String> = content
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(|s| s.to_string())
-            .collect();
-        assert_eq!(lines.len(), 3);
-        assert_eq!(lines[0], "echo hello");
-        assert_eq!(lines[1], "echo world");
-        assert_eq!(lines[2], "echo test");
+        let (entries, skipped) = parse_history_reader(Cursor::new(content));
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0], "echo hello");
+        assert_eq!(entries[1], "echo world");
+        assert_eq!(entries[2], "echo test");
+        assert_eq!(skipped, 0);
     }
 
     #[test]
-    fn test_skip_timestamp_comments() {
+    fn test_parse_history_reader_with_timestamp_markers_groups_multiline_entries() {
+        let content = "\
+#1700000000
+echo one
+#1700000001
+cat <<'EOF'
+line 1
+line 2
+EOF
+";
+        let (entries, skipped) = parse_history_reader(Cursor::new(content));
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0], "echo one");
+        assert_eq!(entries[1], "cat <<'EOF'\nline 1\nline 2\nEOF");
+        assert_eq!(skipped, 0);
+    }
+
+    #[test]
+    fn test_parse_history_reader_with_hash_line_inside_multiline_keeps_line() {
+        let content = "\
+#1700000000
+cat <<'EOF'
+# not a timestamp
+EOF
+";
+        let (entries, skipped) = parse_history_reader(Cursor::new(content));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0], "cat <<'EOF'\n# not a timestamp\nEOF");
+        assert_eq!(skipped, 0);
+    }
+
+    #[test]
+    fn test_parse_history_reader_with_plain_hash_comment_skips_comment() {
         let content = "#1234567890\necho hello\n#9876543210\necho world";
-        let lines: Vec<String> = content
-            .lines()
-            .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
-            .map(|s| s.to_string())
-            .collect();
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0], "echo hello");
-        assert_eq!(lines[1], "echo world");
+        let (entries, skipped) = parse_history_reader(Cursor::new(content));
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0], "echo hello");
+        assert_eq!(entries[1], "echo world");
+        assert_eq!(skipped, 0);
     }
 
     #[test]
-    fn test_history_capacity_limit_keeps_last_entries() {
+    fn test_push_bounded_when_over_capacity_keeps_most_recent_entries() {
         use std::collections::VecDeque;
 
         // Test that we limit to MAX_HISTORY_LINES using streaming VecDeque approach
         let mut history: VecDeque<String> = VecDeque::with_capacity(MAX_HISTORY_LINES);
         for i in 0..MAX_HISTORY_LINES + 100 {
-            history.push_back(format!("command {}", i));
-            if history.len() > MAX_HISTORY_LINES {
-                history.pop_front();
-            }
+            push_bounded(&mut history, format!("command {}", i));
         }
 
         let history: Vec<String> = history.into();
@@ -429,7 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn test_append_to_bash_history_skips_empty() {
+    fn test_append_to_bash_history_with_empty_command_returns_ok() {
         // Empty commands should be silently skipped
         let result = super::append_to_bash_history("");
         assert!(result.is_ok());
@@ -439,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn test_append_to_bash_history_writes_command_to_file() {
+    fn test_append_to_bash_history_with_command_writes_entry() {
         use std::fs;
         use tempfile::tempdir;
 

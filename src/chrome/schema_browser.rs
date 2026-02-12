@@ -1186,6 +1186,10 @@ impl Panel for SchemaBrowserPanel {
     fn set_theme(&mut self, theme: &'static super::theme::Theme) {
         self.theme = theme;
     }
+
+    fn is_animating(&self) -> bool {
+        self.discovery.is_some()
+    }
 }
 
 #[cfg(test)]

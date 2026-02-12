@@ -1273,8 +1273,15 @@ impl App {
                 needs_redraw = false;
             }
 
-            // Poll for input with timeout - use a longer timeout since we don't redraw constantly
-            match event::poll(std::time::Duration::from_millis(100)) {
+            // Determine poll timeout based on animation state
+            let poll_timeout = if panel.is_animating() {
+                std::time::Duration::from_millis(50) // Faster updates for animation
+            } else {
+                std::time::Duration::from_millis(100) // Normal idle
+            };
+
+            // Poll for input with timeout
+            match event::poll(poll_timeout) {
                 Ok(true) => {
                     match event::read() {
                         Ok(Event::Key(key)) => {
@@ -1448,7 +1455,10 @@ impl App {
                     }
                 }
                 Ok(false) => {
-                    // No event available - don't redraw, just continue polling
+                    // Timeout expired - check if we need to redraw for animation
+                    if panel.is_animating() {
+                        needs_redraw = true;
+                    }
                 }
                 Err(e) => {
                     warn!("Error polling for events: {}", e);
