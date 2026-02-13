@@ -181,6 +181,8 @@ pub struct IndicatorGlyphs {
     pub check_box: &'static str,
     /// Empty box: `☐` or `[ ]`.
     pub empty_box: &'static str,
+    /// Lock indicator: `ˡ` or `L`.
+    pub lock: &'static str,
 }
 
 /// Progress bar characters.
@@ -398,6 +400,7 @@ pub static ASCII_GLYPHS: GlyphSet = GlyphSet {
         diamond: "*",
         check_box: "[x]",
         empty_box: "[ ]",
+        lock: "L",
     },
     progress: ProgressGlyphs {
         bar: ['-', '-', '-', '-', '#', '#', '#', '#'],
@@ -503,6 +506,7 @@ pub static UNICODE_GLYPHS: GlyphSet = GlyphSet {
         diamond: "\u{25c6}",    // ◆
         check_box: "\u{2611}",  // ☑
         empty_box: "\u{2610}",  // ☐
+        lock: "\u{02E1}",      // ˡ (modifier letter small l)
     },
     progress: ProgressGlyphs {
         bar: ['▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'],
@@ -581,6 +585,7 @@ pub static EMOJI_GLYPHS: GlyphSet = GlyphSet {
         diamond: "💠",
         check_box: "☑\u{fe0f}", // ☑️
         empty_box: "☐",
+        lock: "\u{1f512}",     // 🔒
     },
     progress: UNICODE_GLYPHS.progress,
     nav: NavGlyphs {
@@ -646,6 +651,7 @@ pub static NERD_FONT_GLYPHS: GlyphSet = GlyphSet {
         diamond: "\u{f219}",    //  (fa-diamond)
         check_box: "\u{f046}",  //  (fa-check-square-o)
         empty_box: "\u{f096}",  //  (fa-square-o)
+        lock: "\u{f023}",       //  (fa-lock)
     },
     progress: UNICODE_GLYPHS.progress,
     nav: NavGlyphs {

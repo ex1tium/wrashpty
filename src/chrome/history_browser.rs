@@ -708,7 +708,7 @@ impl HistoryBrowserPanel {
         }
 
         // Compute adaptive layout (returns None if area too small)
-        let Some(layout) = compute_edit_mode_layout(area) else {
+        let Some(layout) = compute_edit_mode_layout(area, edit_state.strip_vertical) else {
             return;
         };
 
@@ -877,6 +877,14 @@ impl HistoryBrowserPanel {
                     edit_state.cycle_quote();
                     return Some(PanelResult::Continue);
                 }
+                KeyCode::Char('l') => {
+                    edit_state.toggle_lock();
+                    return Some(PanelResult::Continue);
+                }
+                KeyCode::Char('t') => {
+                    edit_state.toggle_strip_mode();
+                    return Some(PanelResult::Continue);
+                }
                 KeyCode::Char('!') => {
                     edit_state.toggle_danger_check();
                     return Some(PanelResult::Continue);
@@ -940,11 +948,21 @@ impl HistoryBrowserPanel {
                 Some(PanelResult::Continue)
             }
             KeyCode::Up => {
-                edit_state.cycle_suggestion(-1);
+                if edit_state.strip_vertical {
+                    edit_state.prev();
+                    self.update_suggestions_with_history();
+                } else {
+                    edit_state.cycle_suggestion(-1);
+                }
                 Some(PanelResult::Continue)
             }
             KeyCode::Down => {
-                edit_state.cycle_suggestion(1);
+                if edit_state.strip_vertical {
+                    edit_state.next();
+                    self.update_suggestions_with_history();
+                } else {
+                    edit_state.cycle_suggestion(1);
+                }
                 Some(PanelResult::Continue)
             }
             KeyCode::Tab => {
@@ -1588,6 +1606,8 @@ impl Panel for HistoryBrowserPanel {
                 FooterEntry::action("^D", "Del"),
                 FooterEntry::action("^A/I", "Ins"),
                 FooterEntry::action("^Q", "Quote"),
+                FooterEntry::action("^L", "Lock"),
+                FooterEntry::action("^T", "View"),
                 FooterEntry::action("Enter", "Run"),
                 FooterEntry::action("Esc", "Back"),
             ];

@@ -573,10 +573,9 @@ pub fn tokenize_command(command: &str) -> Vec<CommandToken> {
                                     &line
                                 };
                                 if check_line == delim {
-                                    // Emit body if non-empty
-                                    if !body_lines.is_empty() {
-                                        let body_text = body_lines.join("\n");
-                                        raw.push((body_text, Some(TokenType::HeredocBody)));
+                                    // Emit each body line as a separate HeredocBody token
+                                    for body_line in &body_lines {
+                                        raw.push((body_line.clone(), Some(TokenType::HeredocBody)));
                                     }
                                     // Emit closing delimiter
                                     raw.push((line, Some(TokenType::HeredocDelimiter)));
@@ -645,8 +644,11 @@ pub fn tokenize_command(command: &str) -> Vec<CommandToken> {
     for (idx, (text, structural_type)) in raw.into_iter().enumerate() {
         if let Some(tt) = structural_type {
             let mut tok = CommandToken::new(text, tt);
-            // Structural tokens are locked (non-editable) except heredoc markers
-            if !matches!(tt, TokenType::HeredocMarker | TokenType::HeredocDelimiter) {
+            // Structural tokens are locked (non-editable) except heredoc parts
+            if !matches!(
+                tt,
+                TokenType::HeredocMarker | TokenType::HeredocDelimiter | TokenType::HeredocBody
+            ) {
                 tok.locked = true;
             }
             tokens.push(tok);
@@ -710,12 +712,8 @@ fn collect_heredoc_bodies(tokens: &mut Vec<CommandToken>) {
                 tokens[marker_idx].pair_index = Some(di);
                 tokens[di].pair_index = Some(marker_idx);
 
-                // Ensure body tokens between marker and delimiter are locked
-                for j in (marker_idx + 1)..di {
-                    if tokens[j].token_type == TokenType::HeredocBody {
-                        tokens[j].locked = true;
-                    }
-                }
+                // Body tokens between marker and delimiter are editable
+                // (not locked — user can navigate to and edit them)
 
                 i = di + 1;
             }
@@ -840,6 +838,11 @@ pub struct CommandEditState {
     /// Skip dangerous command checks (toggled with Ctrl+!).
     pub skip_danger_check: bool,
 
+    // --- Display Mode ---
+    /// When true, the token strip uses a vertical stacked layout (one token per row).
+    /// When false (default), uses horizontal single-row layout with scroll.
+    pub strip_vertical: bool,
+
     // --- Context ---
     /// Optional context for suggestions (e.g., filename for file browser).
     context: Option<String>,
@@ -867,6 +870,7 @@ impl std::fmt::Debug for CommandEditState {
             .field("suggestion_index", &self.suggestion_index)
             .field("pending_confirm", &self.pending_confirm)
             .field("skip_danger_check", &self.skip_danger_check)
+            .field("strip_vertical", &self.strip_vertical)
             .field("context", &self.context)
             .field(
                 "history_store",
@@ -909,6 +913,7 @@ impl CommandEditState {
             suggestion_index: None,
             pending_confirm: None,
             skip_danger_check: false,
+            strip_vertical: false,
             context: None,
             history_store: None,
             cwd: None,
@@ -1153,10 +1158,7 @@ impl CommandEditState {
                 t.locked
                     && matches!(
                         t.token_type,
-                        TokenType::Pipe
-                            | TokenType::Redirect
-                            | TokenType::Operator
-                            | TokenType::HeredocBody
+                        TokenType::Pipe | TokenType::Redirect | TokenType::Operator
                     )
             })
             .unwrap_or(false)
@@ -1165,6 +1167,21 @@ impl CommandEditState {
     // ========================================================================
     // Editing
     // ========================================================================
+
+    /// Toggles the lock state of the currently selected token.
+    pub fn toggle_lock(&mut self) {
+        if let Some(token) = self.tokens.get_mut(self.selected) {
+            if token.locked {
+                // Unlock: load token text into edit buffer for editing
+                token.locked = false;
+                self.edit_buffer = token.text.clone();
+            } else {
+                // Lock: save current edit buffer to token first
+                token.text = self.edit_buffer.clone();
+                token.locked = true;
+            }
+        }
+    }
 
     /// Types a character into the edit buffer (if not locked).
     pub fn type_char(&mut self, c: char) {
@@ -1419,6 +1436,17 @@ impl CommandEditState {
     /// bootstrapped knowledge for common commands. The hierarchy learns from user
     /// command history and provides position-aware token suggestions.
     pub fn update_suggestions(&mut self) {
+        // Suppress suggestions for locked tokens and heredoc body lines
+        let is_body = self
+            .tokens
+            .get(self.selected)
+            .map(|t| t.token_type == TokenType::HeredocBody)
+            .unwrap_or(false);
+        if is_body {
+            self.suggestions.clear();
+            self.suggestion_index = None;
+            return;
+        }
         if self.is_selected_locked() {
             // Don't clear suggestions on locked tokens - preserve them for display
             return;
@@ -1561,6 +1589,11 @@ impl CommandEditState {
     pub fn toggle_danger_check(&mut self) {
         self.skip_danger_check = !self.skip_danger_check;
     }
+
+    /// Toggles the token strip display mode between horizontal and vertical.
+    pub fn toggle_strip_mode(&mut self) {
+        self.strip_vertical = !self.strip_vertical;
+    }
 }
 
 // ============================================================================
@@ -1601,7 +1634,10 @@ pub struct EditModeLayout {
 ///
 /// Returns `None` if the area is too small (height < 5) for a usable edit mode.
 /// Border and keybind rows are rendered externally by TabbedPanel's footer compositor.
-pub fn compute_edit_mode_layout(area: Rect) -> Option<EditModeLayout> {
+///
+/// When `vertical_strip` is true, the token strip gets multiple rows (scaled by
+/// available height) for the vertical stacked token layout.
+pub fn compute_edit_mode_layout(area: Rect, vertical_strip: bool) -> Option<EditModeLayout> {
     if area.height < 5 {
         return None;
     }
@@ -1609,13 +1645,30 @@ pub fn compute_edit_mode_layout(area: Rect) -> Option<EditModeLayout> {
     let show_suggestions = area.height >= 7;
     let show_spacers = area.height >= 9;
 
+    // Token strip rows: 1 for horizontal mode, scaled for vertical
+    let token_strip_rows: u16 = if vertical_strip {
+        if area.height >= 14 {
+            5
+        } else if area.height >= 12 {
+            4
+        } else if area.height >= 10 {
+            3
+        } else if area.height >= 8 {
+            2
+        } else {
+            1
+        }
+    } else {
+        1
+    };
+
     let mut constraints = Vec::new();
     constraints.push(Constraint::Length(1)); // title
     constraints.push(Constraint::Length(1)); // separator
     if show_suggestions {
         constraints.push(Constraint::Length(1)); // prev suggestion
     }
-    constraints.push(Constraint::Length(1)); // token strip
+    constraints.push(Constraint::Length(token_strip_rows)); // token strip
     if show_suggestions {
         constraints.push(Constraint::Length(1)); // next suggestion
     }
@@ -1678,6 +1731,11 @@ pub fn compute_edit_mode_layout(area: Rect) -> Option<EditModeLayout> {
 /// The caller is responsible for rendering the title and separator, as those
 /// differ between history browser and file browser. Border and keybind hints
 /// are rendered externally by TabbedPanel's footer compositor.
+///
+/// Supports two token strip display modes:
+/// - **Horizontal** (default): Single-row strip with horizontal scrolling,
+///   suggestions aligned under the selected token.
+/// - **Vertical**: One token per row, vertically scrolled, suggestions left-aligned.
 pub fn render_edit_mode_shared(
     buffer: &mut Buffer,
     theme: &Theme,
@@ -1685,137 +1743,263 @@ pub fn render_edit_mode_shared(
     edit_state: &CommandEditState,
     layout: &EditModeLayout,
 ) {
-    // Calculate the x-position where the selected token starts and ends
-    let mut selected_x_start: usize = 3; // Initial padding
-    let mut selected_x_end: usize = 3;
-    for (i, token) in edit_state.tokens.iter().enumerate() {
-        let display_text = if i == edit_state.selected {
-            if edit_state.edit_buffer.is_empty() {
-                "_"
-            } else {
-                &edit_state.edit_buffer
-            }
-        } else if token.text.is_empty() {
-            "_"
-        } else {
-            &token.text
-        };
-        let slot_num = i + 1;
-        let superscript_len = slot_num.to_string().len();
-        let text_display_width = crate::ui::text_width::display_width(display_text);
-        let token_width = superscript_len + 1 + text_display_width + 1 + 3;
-
-        if i == edit_state.selected {
-            selected_x_end = selected_x_start + superscript_len + 1 + text_display_width + 1;
-            break;
-        }
-        selected_x_start += token_width;
-    }
-    let superscript_len = (edit_state.selected + 1).to_string().len();
-    let selected_x_offset = selected_x_start + superscript_len + 1;
-
-    // Calculate horizontal scroll offset to keep selected token visible
-    let viewport_width = layout.token_strip.width as usize;
-    let left_context = viewport_width / 3;
-    let right_margin = 8;
-    let scroll_offset = if selected_x_end > viewport_width.saturating_sub(right_margin) {
-        selected_x_start.saturating_sub(left_context)
-    } else {
-        0
-    };
-
-    // Previous suggestion row
-    if let Some(prev_area) = layout.prev_suggestion {
-        if let Some(prev_sugg) = edit_state.prev_suggestion() {
-            let adjusted_offset = selected_x_offset.saturating_sub(scroll_offset);
-            let padding = " ".repeat(adjusted_offset);
-            let prev_line = Line::from(vec![
-                Span::styled(padding, Style::default()),
-                Span::styled(prev_sugg, Style::default().fg(theme.text_secondary)),
-            ]);
-            Paragraph::new(prev_line).render(prev_area, buffer);
-        }
-    }
-
-    // Current token strip with brackets and superscript numbers
-    let mut spans = Vec::new();
-    spans.push(Span::styled("   ", Style::default()));
-
     let bracket_style = Style::default().fg(theme.text_secondary);
     let bracket_selected_style = Style::default().fg(theme.header_fg);
 
-    for (i, token) in edit_state.tokens.iter().enumerate() {
-        let is_selected = i == edit_state.selected;
-        let slot_num = i + 1;
+    if edit_state.strip_vertical {
+        // === VERTICAL MODE: one token per row, vertically scrolled ===
 
-        let num_style = if is_selected {
-            Style::default()
-                .fg(theme.text_highlight)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme.text_secondary)
-        };
-        spans.push(Span::styled(superscript_number(slot_num), num_style));
+        // Previous suggestion row (left-aligned)
+        if let Some(prev_area) = layout.prev_suggestion {
+            if let Some(prev_sugg) = edit_state.prev_suggestion() {
+                let prev_line = Line::from(vec![
+                    Span::styled("   ", Style::default()),
+                    Span::styled(prev_sugg, Style::default().fg(theme.text_secondary)),
+                ]);
+                Paragraph::new(prev_line).render(prev_area, buffer);
+            }
+        }
 
-        let bstyle = if is_selected {
-            bracket_selected_style
-        } else {
-            bracket_style
-        };
-        spans.push(Span::styled("⟦", bstyle));
+        let mut token_lines: Vec<Line<'_>> = Vec::new();
+        for (i, token) in edit_state.tokens.iter().enumerate() {
+            let is_selected = i == edit_state.selected;
+            let slot_num = i + 1;
+            let mut row_spans = Vec::new();
 
-        let base_style = token_type_style(token.token_type, theme);
-        let token_style = if is_selected {
-            base_style.add_modifier(Modifier::BOLD)
-        } else {
-            base_style
-        };
+            if is_selected {
+                row_spans.push(Span::styled(
+                    " \u{25b8} ",
+                    Style::default()
+                        .fg(theme.text_highlight)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            } else {
+                row_spans.push(Span::styled("   ", Style::default()));
+            }
 
-        let display_text = if is_selected {
-            if edit_state.edit_buffer.is_empty() {
+            let num_style = if is_selected {
+                Style::default()
+                    .fg(theme.text_highlight)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.text_secondary)
+            };
+            row_spans.push(Span::styled(superscript_number(slot_num), num_style));
+
+            let bstyle = if is_selected {
+                bracket_selected_style
+            } else {
+                bracket_style
+            };
+            row_spans.push(Span::styled("\u{27e6}", bstyle));
+
+            let base_style = token_type_style(token.token_type, theme);
+            let token_style = if is_selected {
+                base_style.add_modifier(Modifier::BOLD)
+            } else {
+                base_style
+            };
+
+            let display_text = if is_selected {
+                if edit_state.edit_buffer.is_empty() {
+                    "_".to_string()
+                } else {
+                    edit_state.edit_buffer.clone()
+                }
+            } else if token.text.is_empty() {
                 "_".to_string()
             } else {
-                edit_state.edit_buffer.clone()
+                token.text.clone()
+            };
+            row_spans.push(Span::styled(display_text, token_style));
+            row_spans.push(Span::styled("\u{27e7}", bstyle));
+
+            if token.locked {
+                row_spans.push(Span::styled(
+                    glyphs.indicator.lock,
+                    Style::default().fg(theme.text_secondary),
+                ));
             }
-        } else if token.token_type == TokenType::HeredocBody {
-            // Abbreviate heredoc body in the token strip
-            let line_count = token.text.lines().count();
-            format!("\u{00ab}{line_count} lines\u{00bb}")
-        } else if token.text.is_empty() {
-            "_".to_string()
-        } else {
-            token.text.clone()
-        };
-        spans.push(Span::styled(display_text, token_style));
-        spans.push(Span::styled("⟧", bstyle));
-        // Tighter spacing for structural tokens
-        let gap = if matches!(
-            token.token_type,
-            TokenType::Pipe | TokenType::Redirect | TokenType::Operator
-        ) {
-            " "
-        } else {
-            "   "
-        };
-        spans.push(Span::raw(gap));
-    }
 
-    let token_line = Line::from(spans);
-    let scroll_offset_u16 = (scroll_offset.min(u16::MAX as usize)) as u16;
-    Paragraph::new(token_line)
-        .scroll((0, scroll_offset_u16))
-        .render(layout.token_strip, buffer);
+            token_lines.push(Line::from(row_spans));
+        }
 
-    // Next suggestion row
-    if let Some(next_area) = layout.next_suggestion {
-        if let Some(next_sugg) = edit_state.next_suggestion() {
-            let adjusted_offset = selected_x_offset.saturating_sub(scroll_offset);
-            let padding = " ".repeat(adjusted_offset);
-            let next_line = Line::from(vec![
-                Span::styled(padding, Style::default()),
-                Span::styled(next_sugg, Style::default().fg(theme.text_secondary)),
-            ]);
-            Paragraph::new(next_line).render(next_area, buffer);
+        let strip_height = layout.token_strip.height as usize;
+        let v_scroll = if strip_height > 0 && edit_state.selected >= strip_height {
+            edit_state
+                .selected
+                .saturating_sub(strip_height / 2)
+                .min(token_lines.len().saturating_sub(strip_height))
+        } else {
+            0
+        };
+        Paragraph::new(token_lines)
+            .scroll((v_scroll as u16, 0))
+            .render(layout.token_strip, buffer);
+
+        // Next suggestion row (left-aligned)
+        if let Some(next_area) = layout.next_suggestion {
+            if let Some(next_sugg) = edit_state.next_suggestion() {
+                let next_line = Line::from(vec![
+                    Span::styled("   ", Style::default()),
+                    Span::styled(next_sugg, Style::default().fg(theme.text_secondary)),
+                ]);
+                Paragraph::new(next_line).render(next_area, buffer);
+            }
+        }
+    } else {
+        // === HORIZONTAL MODE (default): single-row strip with horizontal scrolling ===
+
+        // Calculate x-positions for the selected token (for suggestion alignment)
+        let mut selected_x_start: usize = 3; // Initial padding "   "
+        let mut selected_x_end: usize = 3;
+        for (i, token) in edit_state.tokens.iter().enumerate() {
+            let display_text = if i == edit_state.selected {
+                if edit_state.edit_buffer.is_empty() {
+                    "_"
+                } else {
+                    &edit_state.edit_buffer
+                }
+            } else if token.text.is_empty() {
+                "_"
+            } else {
+                &token.text
+            };
+            let slot_num = i + 1;
+            let superscript_len = superscript_number(slot_num).chars().count();
+            let text_display_width = crate::ui::text_width::display_width(display_text);
+            let lock_width = if token.locked {
+                crate::ui::text_width::display_width(glyphs.indicator.lock)
+            } else {
+                0
+            };
+            // superscript + ⟦ + text + ⟧ + lock + gap
+            let gap_width = if matches!(
+                token.token_type,
+                TokenType::Pipe | TokenType::Redirect | TokenType::Operator
+            ) {
+                1
+            } else {
+                3
+            };
+            let token_width =
+                superscript_len + 1 + text_display_width + 1 + lock_width + gap_width;
+
+            if i == edit_state.selected {
+                selected_x_end =
+                    selected_x_start + superscript_len + 1 + text_display_width + 1;
+                break;
+            }
+            selected_x_start += token_width;
+        }
+        let superscript_len = superscript_number(edit_state.selected + 1).chars().count();
+        let selected_x_offset = selected_x_start + superscript_len + 1;
+
+        // Calculate horizontal scroll offset to keep selected token visible
+        let viewport_width = layout.token_strip.width as usize;
+        let left_context = viewport_width / 3;
+        let right_margin = 8;
+        let scroll_offset = if selected_x_end > viewport_width.saturating_sub(right_margin) {
+            selected_x_start.saturating_sub(left_context)
+        } else {
+            0
+        };
+
+        // Previous suggestion row (aligned under selected token)
+        if let Some(prev_area) = layout.prev_suggestion {
+            if let Some(prev_sugg) = edit_state.prev_suggestion() {
+                let adjusted_offset = selected_x_offset.saturating_sub(scroll_offset);
+                let padding = " ".repeat(adjusted_offset);
+                let prev_line = Line::from(vec![
+                    Span::styled(padding, Style::default()),
+                    Span::styled(prev_sugg, Style::default().fg(theme.text_secondary)),
+                ]);
+                Paragraph::new(prev_line).render(prev_area, buffer);
+            }
+        }
+
+        // Build horizontal token strip
+        let mut spans = Vec::new();
+        spans.push(Span::styled("   ", Style::default()));
+
+        for (i, token) in edit_state.tokens.iter().enumerate() {
+            let is_selected = i == edit_state.selected;
+            let slot_num = i + 1;
+
+            let num_style = if is_selected {
+                Style::default()
+                    .fg(theme.text_highlight)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.text_secondary)
+            };
+            spans.push(Span::styled(superscript_number(slot_num), num_style));
+
+            let bstyle = if is_selected {
+                bracket_selected_style
+            } else {
+                bracket_style
+            };
+            spans.push(Span::styled("\u{27e6}", bstyle));
+
+            let base_style = token_type_style(token.token_type, theme);
+            let token_style = if is_selected {
+                base_style.add_modifier(Modifier::BOLD)
+            } else {
+                base_style
+            };
+
+            let display_text = if is_selected {
+                if edit_state.edit_buffer.is_empty() {
+                    "_".to_string()
+                } else {
+                    edit_state.edit_buffer.clone()
+                }
+            } else if token.text.is_empty() {
+                "_".to_string()
+            } else {
+                token.text.clone()
+            };
+            spans.push(Span::styled(display_text, token_style));
+            spans.push(Span::styled("\u{27e7}", bstyle));
+
+            // Lock indicator after bracket
+            if token.locked {
+                spans.push(Span::styled(
+                    glyphs.indicator.lock,
+                    Style::default().fg(theme.text_secondary),
+                ));
+            }
+
+            // Tighter spacing for structural tokens
+            let gap = if matches!(
+                token.token_type,
+                TokenType::Pipe | TokenType::Redirect | TokenType::Operator
+            ) {
+                " "
+            } else {
+                "   "
+            };
+            spans.push(Span::raw(gap));
+        }
+
+        let token_line = Line::from(spans);
+        let scroll_offset_u16 = (scroll_offset.min(u16::MAX as usize)) as u16;
+        Paragraph::new(token_line)
+            .scroll((0, scroll_offset_u16))
+            .render(layout.token_strip, buffer);
+
+        // Next suggestion row (aligned under selected token)
+        if let Some(next_area) = layout.next_suggestion {
+            if let Some(next_sugg) = edit_state.next_suggestion() {
+                let adjusted_offset = selected_x_offset.saturating_sub(scroll_offset);
+                let padding = " ".repeat(adjusted_offset);
+                let next_line = Line::from(vec![
+                    Span::styled(padding, Style::default()),
+                    Span::styled(next_sugg, Style::default().fg(theme.text_secondary)),
+                ]);
+                Paragraph::new(next_line).render(next_area, buffer);
+            }
         }
     }
 
@@ -1851,13 +2035,36 @@ pub fn render_edit_mode_shared(
     ]);
     Paragraph::new(edit_line).render(layout.edit_input, buffer);
 
-    // Result preview — shows the actual command that will be executed (no abbreviation)
+    // Result preview — shows the actual command that will be executed (no abbreviation).
+    // For heredoc pairs, live-sync the paired token so the preview updates in real-time.
+    let live_pair_text: Option<(usize, String)> = {
+        let sel = edit_state.selected;
+        edit_state.tokens.get(sel).and_then(|tok| {
+            let pi = tok.pair_index?;
+            match tok.token_type {
+                TokenType::HeredocDelimiter => {
+                    // Editing delimiter → update marker in preview
+                    let marker = &edit_state.tokens.get(pi)?.text;
+                    Some((pi, rebuild_heredoc_marker(marker, &edit_state.edit_buffer)))
+                }
+                TokenType::HeredocMarker => {
+                    // Editing marker → update delimiter in preview
+                    let new_delim = extract_heredoc_delimiter(&edit_state.edit_buffer)?;
+                    Some((pi, new_delim))
+                }
+                _ => None,
+            }
+        })
+    };
+
     let result_preview: String = {
         let mut result = String::new();
         let mut prev_tt: Option<TokenType> = None;
         for (i, t) in edit_state.tokens.iter().enumerate() {
-            let text = if i == edit_state.selected {
+            let text: &str = if i == edit_state.selected {
                 &edit_state.edit_buffer
+            } else if let Some((pair_idx, ref synced)) = live_pair_text {
+                if i == pair_idx { synced } else { &t.text }
             } else {
                 &t.text
             };
@@ -1887,11 +2094,23 @@ pub fn render_edit_mode_shared(
     } else {
         Style::default().fg(theme.text_primary)
     };
-    let preview_line = Line::from(vec![
-        Span::styled("  Result: ", Style::default().fg(theme.text_secondary)),
-        Span::styled(&result_preview, preview_style),
-    ]);
-    Paragraph::new(preview_line)
+    // Split result by newlines so heredoc content renders on separate lines
+    let result_lines: Vec<&str> = result_preview.split('\n').collect();
+    let mut paragraph_lines: Vec<Line<'_>> = Vec::new();
+    for (line_idx, line_text) in result_lines.iter().enumerate() {
+        if line_idx == 0 {
+            paragraph_lines.push(Line::from(vec![
+                Span::styled("  Result: ", Style::default().fg(theme.text_secondary)),
+                Span::styled(*line_text, preview_style),
+            ]));
+        } else {
+            paragraph_lines.push(Line::from(Span::styled(
+                format!("          {line_text}"),
+                preview_style,
+            )));
+        }
+    }
+    Paragraph::new(paragraph_lines)
         .wrap(Wrap { trim: false })
         .render(layout.result_preview, buffer);
 }
@@ -2436,16 +2655,21 @@ mod tests {
     #[test]
     fn test_tokenize_heredoc_full_with_body() {
         let tokens = tokenize_command("cat <<'EOF'\nline1\nline2\nEOF");
-        assert_eq!(tokens.len(), 4); // cat, <<'EOF', body, EOF
+        assert_eq!(tokens.len(), 5); // cat, <<'EOF', line1, line2, EOF
         assert_eq!(tokens[0].text, "cat");
         assert_eq!(tokens[0].token_type, TokenType::Command);
         assert_eq!(tokens[1].text, "<<'EOF'");
         assert_eq!(tokens[1].token_type, TokenType::HeredocMarker);
-        assert_eq!(tokens[2].text, "line1\nline2");
+        assert_eq!(tokens[2].text, "line1");
         assert_eq!(tokens[2].token_type, TokenType::HeredocBody);
-        assert!(tokens[2].locked);
-        assert_eq!(tokens[3].text, "EOF");
-        assert_eq!(tokens[3].token_type, TokenType::HeredocDelimiter);
+        assert!(!tokens[2].locked); // body lines are editable
+        assert_eq!(tokens[3].text, "line2");
+        assert_eq!(tokens[3].token_type, TokenType::HeredocBody);
+        assert_eq!(tokens[4].text, "EOF");
+        assert_eq!(tokens[4].token_type, TokenType::HeredocDelimiter);
+        // pair_index links marker(1) ↔ delimiter(4)
+        assert_eq!(tokens[1].pair_index, Some(4));
+        assert_eq!(tokens[4].pair_index, Some(1));
     }
 
     #[test]
@@ -2546,17 +2770,27 @@ mod tests {
     }
 
     #[test]
-    fn test_navigation_skips_heredoc_body() {
-        let tokens = tokenize_command("cat <<EOF\nhello\nEOF");
+    fn test_navigation_visits_each_heredoc_body_line() {
+        let tokens = tokenize_command("cat <<EOF\nline1\nline2\nline3\nEOF");
         let mut state = CommandEditState::new(tokens, EditConfig::default());
         assert_eq!(state.selected_token().unwrap().text, "cat");
-        state.next(); // → <<EOF (HeredocMarker, NOT locked, navigable)
+        state.next(); // → <<EOF (HeredocMarker, editable)
         assert_eq!(state.selected_token().unwrap().text, "<<EOF");
         assert_eq!(
             state.selected_token().unwrap().token_type,
             TokenType::HeredocMarker
         );
-        state.next(); // Should skip body (locked) → EOF delimiter
+        state.next(); // → line1 (body line 1)
+        assert_eq!(state.selected_token().unwrap().text, "line1");
+        assert_eq!(
+            state.selected_token().unwrap().token_type,
+            TokenType::HeredocBody
+        );
+        state.next(); // → line2 (body line 2)
+        assert_eq!(state.selected_token().unwrap().text, "line2");
+        state.next(); // → line3 (body line 3)
+        assert_eq!(state.selected_token().unwrap().text, "line3");
+        state.next(); // → EOF delimiter
         assert_eq!(state.selected_token().unwrap().text, "EOF");
         assert_eq!(
             state.selected_token().unwrap().token_type,
@@ -2650,5 +2884,36 @@ mod tests {
         let result = state.build_command();
         let expected = "sudo tee /etc/apt/sources.list.d/vscode.sources > /dev/null <<'EOF'\nTypes: deb\nURIs: https://packages.microsoft.com/repos/code\nSuites: stable\nComponents: main\nEOF";
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_toggle_lock_prevents_editing() {
+        let tokens = tokenize_command("ls -la /tmp");
+        let mut state = CommandEditState::new(tokens, EditConfig::default());
+        state.select(1); // select -la
+        assert!(!state.is_selected_locked());
+        state.toggle_lock();
+        assert!(state.is_selected_locked());
+        // Typing should be a no-op on locked token
+        state.type_char('x');
+        assert_eq!(state.edit_buffer, "-la"); // unchanged
+        // Unlock
+        state.toggle_lock();
+        assert!(!state.is_selected_locked());
+        state.type_char('x');
+        assert_eq!(state.edit_buffer, "-lax"); // now editable
+    }
+
+    #[test]
+    fn test_heredoc_per_line_body_build_roundtrip() {
+        let cmd = "cat <<EOF\nalpha\nbeta\ngamma\nEOF";
+        let tokens = tokenize_command(cmd);
+        // 6 tokens: cat, <<EOF, alpha, beta, gamma, EOF
+        assert_eq!(tokens.len(), 6);
+        assert_eq!(tokens[2].token_type, TokenType::HeredocBody);
+        assert_eq!(tokens[3].token_type, TokenType::HeredocBody);
+        assert_eq!(tokens[4].token_type, TokenType::HeredocBody);
+        let mut state = CommandEditState::new(tokens, EditConfig::default());
+        assert_eq!(state.build_command(), cmd);
     }
 }
