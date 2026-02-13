@@ -11,6 +11,7 @@ use std::sync::{
     mpsc::{Receiver, channel},
 };
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui_core::buffer::Buffer;
@@ -21,7 +22,9 @@ use ratatui_core::widgets::Widget;
 use ratatui_widgets::list::{List, ListItem};
 use ratatui_widgets::paragraph::Paragraph;
 
-use super::command_edit::{CommandEditState, compute_edit_mode_layout, render_edit_mode_shared};
+use super::command_edit::{
+    CommandEditState, CommandToken, TokenType, compute_edit_mode_layout, render_edit_mode_shared,
+};
 use super::footer_bar::FooterEntry;
 use super::glyphs::{GlyphSet, GlyphTier};
 use super::panel::{Panel, PanelResult};
@@ -29,8 +32,24 @@ use super::theme::Theme;
 use crate::history_store::HistoryStore;
 use crate::ui::filter_input::FilterInput;
 use crate::ui::loading_widget::{LoadingWidget, LoadingWidgetOptions, SpinnerStyle};
+use crate::ui::selection_ribbon::{RibbonItem, SelectionRibbon};
 use crate::ui::tree_state::{TreeItem, TreeViewState};
-use crate::ui::tree_view::tree_prefix;
+use crate::ui::tree_view::{tree_checkbox, tree_prefix};
+
+/// A completed pipe segment: the ribbon items for one command in a pipeline.
+#[derive(Debug, Clone)]
+struct PipeSegment {
+    items: Vec<RibbonItem>,
+}
+
+/// Result of a debounced command existence check.
+#[derive(Debug, Clone)]
+enum CommandHint {
+    /// The command was found on the system.
+    Found { command: String, path: String },
+    /// The command was not found.
+    NotFound,
+}
 
 /// Result from background schema discovery.
 #[derive(Debug)]
@@ -183,6 +202,16 @@ pub struct SchemaBrowserPanel {
     discovery: Option<DiscoveryState>,
     /// Loading widget for discovery animation.
     loading_widget: LoadingWidget,
+    /// Node index of the focused (zoomed-in) top-level Command, if any.
+    focused_schema: Option<usize>,
+    /// Timestamp of last filter text change (for debounced command existence check).
+    filter_changed_at: Option<Instant>,
+    /// Result of the debounced command existence check.
+    command_hint: Option<CommandHint>,
+    /// Frame counter for ribbon marquee animation.
+    ribbon_frame: u64,
+    /// Completed pipe segments (commands before the current focus).
+    pipe_segments: Vec<PipeSegment>,
 }
 
 impl SchemaBrowserPanel {
@@ -207,6 +236,11 @@ impl SchemaBrowserPanel {
             status: None,
             discovery: None,
             loading_widget,
+            focused_schema: None,
+            filter_changed_at: None,
+            command_hint: None,
+            ribbon_frame: 0,
+            pipe_segments: Vec::new(),
         }
     }
 
@@ -221,8 +255,16 @@ impl SchemaBrowserPanel {
         self.edit_mode.is_some()
     }
 
-    /// Enters edit mode for the currently selected node.
+    /// Enters edit mode for the currently selected node, or builds a command
+    /// from the multiselect state when items are checked.
     fn enter_edit_mode(&mut self) {
+        // If there's a pipeline being built, or focused with selections
+        let has_current = self.focused_schema.is_some() && self.tree.checked_count() > 0;
+        if !self.pipe_segments.is_empty() || has_current {
+            self.enter_edit_mode_from_selections();
+            return;
+        }
+
         let Some(node_idx) = self.tree.selected_node_idx() else {
             return;
         };
@@ -259,6 +301,112 @@ impl SchemaBrowserPanel {
                 // Sections: no-op
             }
         }
+    }
+
+    /// Enters edit mode with a pre-built command from the multiselect state,
+    /// including any completed pipe segments.
+    fn enter_edit_mode_from_selections(&mut self) {
+        // Collect all segments: completed pipes + current selection
+        let mut all_segments: Vec<Vec<RibbonItem>> = self
+            .pipe_segments
+            .iter()
+            .map(|s| s.items.clone())
+            .collect();
+        let current = self.build_current_selection_items();
+        if !current.is_empty() {
+            all_segments.push(current);
+        }
+        if all_segments.is_empty() {
+            return;
+        }
+
+        // Build tokens for the full pipeline
+        let mut tokens: Vec<CommandToken> = Vec::new();
+        let mut label_parts: Vec<String> = Vec::new();
+
+        for (seg_idx, items) in all_segments.iter().enumerate() {
+            if seg_idx > 0 {
+                // Insert pipe separator between segments
+                tokens.push(CommandToken::new("|", TokenType::Argument));
+            }
+
+            // First item is the command (locked)
+            if let Some(first) = items.first() {
+                tokens.push(CommandToken::locked(&first.text));
+                label_parts.push(first.text.clone());
+            }
+
+            // Remaining items: subcommands become locked, flags become editable
+            for item in items.iter().skip(1) {
+                if item.text.starts_with('-') {
+                    tokens.push(CommandToken::new(&item.text, TokenType::Flag));
+                } else if item.text != "|" {
+                    tokens.push(CommandToken::locked(&item.text));
+                }
+            }
+        }
+
+        // Add empty argument token at the end for user input
+        tokens.push(CommandToken::new(String::new(), TokenType::Argument));
+        let last_idx = tokens.len() - 1;
+
+        // Collect suggestions from the last segment's schema
+        let suggestions = self.collect_last_segment_suggestions(&all_segments);
+
+        let config = super::command_edit::EditConfig::for_schema();
+        let mut state = CommandEditState::new(tokens, config);
+        state.selected = last_idx;
+        state.edit_buffer.clear();
+        state.suggestions = suggestions;
+
+        if let Some(store) = &self.history_store {
+            state.set_history_store(store.clone());
+        }
+
+        self.edit_command_name = Some(label_parts.join(" | "));
+        self.edit_mode = Some(state);
+        self.pipe_segments.clear();
+    }
+
+    /// Collects flag suggestions from the last segment in a pipeline.
+    fn collect_last_segment_suggestions(&self, segments: &[Vec<RibbonItem>]) -> Vec<String> {
+        let Some(last) = segments.last() else {
+            return Vec::new();
+        };
+        if last.is_empty() {
+            return Vec::new();
+        }
+
+        let command_name = &last[0].text;
+        let subcommand = last
+            .iter()
+            .skip(1)
+            .find(|i| !i.text.starts_with('-') && i.text != "|")
+            .map(|i| i.text.as_str());
+
+        let selected: Vec<String> = last
+            .iter()
+            .filter(|i| i.text.starts_with('-'))
+            .map(|i| i.text.clone())
+            .collect();
+
+        let all_flags = if let Some(sub) = subcommand {
+            let sub_idx = self.nodes.iter().position(|n| {
+                matches!(n, TreeNode::Subcommand { name, .. } if name == sub)
+            });
+            if let Some(idx) = sub_idx {
+                self.collect_flags_for_subcommand(idx)
+            } else {
+                self.collect_flags_for_command(command_name)
+            }
+        } else {
+            self.collect_flags_for_command(command_name)
+        };
+
+        all_flags
+            .into_iter()
+            .filter(|f| !selected.contains(f))
+            .collect()
     }
 
     /// Exits edit mode.
@@ -435,6 +583,80 @@ impl SchemaBrowserPanel {
         }
     }
 
+    /// Renders the always-visible filter bar in History Browser style.
+    ///
+    /// Format: ` > Type to filter...  [N schemas]` or ` > filtertext  [N matches]`
+    fn render_filter_bar(&self, buffer: &mut Buffer, area: Rect) {
+        let prefix_style = Style::default().fg(self.theme.git_fg);
+        let placeholder_style = Style::default().fg(self.theme.text_secondary);
+        let text_style = Style::default()
+            .fg(self.theme.text_primary)
+            .add_modifier(Modifier::BOLD);
+        let count_style = Style::default().fg(self.theme.text_secondary);
+        let focus_style = Style::default()
+            .fg(self.theme.text_highlight)
+            .add_modifier(Modifier::BOLD);
+
+        let mut spans = vec![Span::styled(" > ", prefix_style)];
+
+        // Show focused schema name prefix when focused
+        if let Some(name) = self.focused_schema_name() {
+            spans.push(Span::styled(name.to_string(), focus_style));
+            spans.push(Span::styled(" > ", prefix_style));
+        }
+
+        if self.filter.has_filter() {
+            spans.push(Span::styled(self.filter.text(), text_style));
+            // Cursor block
+            spans.push(Span::styled(
+                String::from(self.glyphs.progress.block_full),
+                Style::default().fg(self.theme.text_highlight),
+            ));
+        } else {
+            spans.push(Span::styled("Type to filter...", placeholder_style));
+        }
+
+        // Count of visible items
+        let count_label = if self.focused_schema.is_some() {
+            // When focused, count all visible items (not just Command nodes)
+            let visible_count = self.tree.visible_count();
+            if self.filter.has_filter() {
+                format!("  [{visible_count} matches]")
+            } else {
+                format!("  [{visible_count} items]")
+            }
+        } else {
+            // When unfocused, count visible Command nodes (schemas)
+            let visible_schemas = self
+                .tree
+                .visible()
+                .iter()
+                .filter(|&&idx| matches!(self.nodes.get(idx), Some(TreeNode::Command { .. })))
+                .count();
+            if self.filter.has_filter() {
+                format!("  [{visible_schemas} matches]")
+            } else {
+                let total_schemas = self
+                    .nodes
+                    .iter()
+                    .filter(|n| matches!(n, TreeNode::Command { .. }))
+                    .count();
+                format!("  [{total_schemas} schemas]")
+            }
+        };
+        spans.push(Span::styled(count_label, count_style));
+
+        // Show command existence hint from debounced check
+        if let Some(CommandHint::Found { .. }) = &self.command_hint {
+            let hint_style = Style::default()
+                .fg(self.theme.text_secondary)
+                .add_modifier(Modifier::ITALIC);
+            spans.push(Span::styled("  found \u{2014} ^D to discover", hint_style));
+        }
+
+        Paragraph::new(Line::from(spans)).render(area, buffer);
+    }
+
     /// Renders the edit mode UI.
     fn render_edit_mode(&self, buffer: &mut Buffer, area: Rect, edit_state: &CommandEditState) {
         let Some(layout) = compute_edit_mode_layout(area) else {
@@ -477,6 +699,8 @@ impl SchemaBrowserPanel {
     fn load_schemas(&mut self) {
         self.nodes.clear();
         self.expanded.clear();
+        self.pipe_segments.clear();
+        self.focused_schema = None;
 
         let store = match self.history_store.clone() {
             Some(s) => s,
@@ -545,6 +769,57 @@ impl SchemaBrowserPanel {
 
         drop(guard);
         self.rebuild_visible();
+    }
+
+    /// Polls the debounce timer and checks command existence if expired.
+    ///
+    /// Called from `render()` each frame. After 500ms of filter inactivity,
+    /// checks if the filter text matches a command on the system (via `which`).
+    fn poll_filter_debounce(&mut self) {
+        let changed_at = match self.filter_changed_at {
+            Some(t) => t,
+            None => return,
+        };
+
+        // Wait 500ms after last filter change
+        if changed_at.elapsed().as_millis() < 500 {
+            return;
+        }
+
+        // Timer expired — perform the check
+        self.filter_changed_at = None;
+
+        let text = self.filter.text().trim().to_string();
+        if text.is_empty() || text.contains(' ') {
+            self.command_hint = None;
+            return;
+        }
+
+        // Check if we already have a schema for this command
+        let already_known = self.nodes.iter().any(|n| {
+            matches!(n, TreeNode::Command { name, .. } if name.eq_ignore_ascii_case(&text))
+        });
+        if already_known {
+            self.command_hint = None;
+            return;
+        }
+
+        // Check command existence via `which` (synchronous, < 1ms)
+        match std::process::Command::new("which")
+            .arg(&text)
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                self.command_hint = Some(CommandHint::Found {
+                    command: text,
+                    path,
+                });
+            }
+            _ => {
+                self.command_hint = Some(CommandHint::NotFound);
+            }
+        }
     }
 
     /// Discovers a command schema from its --help output in a background thread.
@@ -690,25 +965,40 @@ impl SchemaBrowserPanel {
 
     /// Rebuilds the visible list and tree metadata from current state.
     fn rebuild_visible(&mut self) {
-        let vis = Self::compute_visibility(&self.nodes, &self.filter, &self.expanded);
+        let vis = Self::compute_visibility(
+            &self.nodes,
+            &self.filter,
+            &self.expanded,
+            self.focused_schema,
+        );
         let has_filter = self.filter.has_filter();
         let nodes = &self.nodes;
         let expanded = &self.expanded;
 
-        self.tree.rebuild(
-            nodes,
-            |idx| vis[idx],
-            |idx| {
-                if has_filter {
-                    // In filter mode, show expanded indicator when children are visible.
-                    nodes
-                        .get(idx + 1)
-                        .is_some_and(|n| n.depth() > nodes[idx].depth() && vis[idx + 1])
-                } else {
-                    expanded.contains(&idx)
+        let is_expanded = |idx: usize| -> bool {
+            if has_filter {
+                nodes
+                    .get(idx + 1)
+                    .is_some_and(|n| n.depth() > nodes[idx].depth() && vis[idx + 1])
+            } else {
+                expanded.contains(&idx)
+            }
+        };
+
+        self.tree.rebuild(nodes, |idx| vis[idx], is_expanded);
+
+        // When filtering without focus, sort command groups so that commands
+        // whose name directly matches the filter appear before commands that
+        // only match via children (subcommands, flags, etc.).
+        if has_filter && self.focused_schema.is_none() {
+            let filter = &self.filter;
+            self.tree.sort_groups(nodes, is_expanded, |node_idx| {
+                match &nodes[node_idx] {
+                    TreeNode::Command { name, .. } if filter.matches(name) => 0u8,
+                    _ => 1,
                 }
-            },
-        );
+            });
+        }
 
         // Fix guide rails: depth-0 nodes (Commands) render as headers with
         // just ▾/▸, not branch connectors, so their is_last should not
@@ -721,14 +1011,26 @@ impl SchemaBrowserPanel {
         }
     }
 
-    /// Computes per-node visibility based on filter and expansion state.
+    /// Computes per-node visibility based on filter, expansion, and focus state.
     fn compute_visibility(
         nodes: &[TreeNode],
         filter: &FilterInput,
         expanded: &HashSet<usize>,
+        focused_schema: Option<usize>,
     ) -> Vec<bool> {
         let n = nodes.len();
         let mut vis = vec![false; n];
+
+        // When focused, determine the range of nodes belonging to the focused
+        // command schema (from the Command node up to the next Command node).
+        let focus_range: Option<(usize, usize)> = focused_schema.map(|focus_idx| {
+            let start = focus_idx;
+            let end = nodes[focus_idx + 1..]
+                .iter()
+                .position(|n| matches!(n, TreeNode::Command { .. }))
+                .map_or(n, |offset| focus_idx + 1 + offset);
+            (start, end)
+        });
 
         if filter.has_filter() {
             // Filter mode: show matching nodes + parent commands for context.
@@ -737,6 +1039,17 @@ impl SchemaBrowserPanel {
             let mut cmd_already_added = false;
 
             for (i, node) in nodes.iter().enumerate() {
+                // Skip nodes outside focus range when focused
+                if let Some((start, end)) = focus_range {
+                    if i < start || i >= end {
+                        if matches!(node, TreeNode::Command { .. }) {
+                            current_cmd_idx = Some(i);
+                            cmd_already_added = false;
+                        }
+                        continue;
+                    }
+                }
+
                 match node {
                     TreeNode::Command { .. } => {
                         current_cmd_idx = Some(i);
@@ -744,6 +1057,10 @@ impl SchemaBrowserPanel {
                             vis[i] = true;
                             cmd_already_added = true;
                         } else {
+                            // When focused, always show the focused command header
+                            if focused_schema == Some(i) {
+                                vis[i] = true;
+                            }
                             cmd_already_added = false;
                         }
                     }
@@ -764,6 +1081,13 @@ impl SchemaBrowserPanel {
             let mut depth_open: Vec<bool> = vec![true]; // depth 0 always open
 
             for (i, node) in nodes.iter().enumerate() {
+                // Skip nodes outside focus range when focused
+                if let Some((start, end)) = focus_range {
+                    if i < start || i >= end {
+                        continue;
+                    }
+                }
+
                 let depth = node.depth();
 
                 while depth_open.len() <= depth {
@@ -793,42 +1117,7 @@ impl SchemaBrowserPanel {
         vis
     }
 
-    /// Handles input when the filter is active.
-    fn handle_filter_input(&mut self, key: KeyEvent) -> PanelResult {
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('d') {
-            self.discover_command();
-            return PanelResult::Continue;
-        }
-
-        match key.code {
-            KeyCode::Esc => {
-                self.filter.clear_and_deactivate();
-                self.rebuild_visible();
-                PanelResult::Continue
-            }
-            KeyCode::Enter => {
-                self.filter.deactivate();
-                PanelResult::Continue
-            }
-            KeyCode::Char(c) => {
-                self.filter.type_char(c);
-                self.rebuild_visible();
-                self.tree.scroll_mut().reset();
-                PanelResult::Continue
-            }
-            KeyCode::Backspace => {
-                let empty = self.filter.backspace();
-                if empty {
-                    self.filter.deactivate();
-                }
-                self.rebuild_visible();
-                PanelResult::Continue
-            }
-            _ => PanelResult::Continue,
-        }
-    }
-
-    /// Right / `l`: expand or move to first child.
+    /// Right: expand or move to first child.
     fn handle_expand_or_child(&mut self) -> PanelResult {
         if let Some(node_idx) = self.tree.selected_node_idx() {
             if self.nodes[node_idx].has_children() {
@@ -847,19 +1136,19 @@ impl SchemaBrowserPanel {
         PanelResult::Continue
     }
 
-    /// Left / `h`: collapse or jump to parent.
+    /// Left / `h`: collapse if expanded, otherwise jump to parent.
     fn handle_collapse_or_parent(&mut self) -> PanelResult {
         if let Some(node_idx) = self.tree.selected_node_idx() {
-            if self.nodes[node_idx].depth() > 0 {
-                // On child → jump to parent
+            if self.expanded.contains(&node_idx) {
+                // On expanded node at any depth → collapse it
+                self.expanded.remove(&node_idx);
+                self.rebuild_visible();
+            } else if self.nodes[node_idx].depth() > 0 {
+                // On collapsed/leaf child → jump to parent
                 if let Some(parent_vis) = self.tree.parent_visible_idx(&self.nodes) {
                     let count = self.tree.visible_count();
                     self.tree.scroll_mut().set_selection(parent_vis, count);
                 }
-            } else if self.expanded.contains(&node_idx) {
-                // On expanded root → collapse
-                self.expanded.remove(&node_idx);
-                self.rebuild_visible();
             }
         }
         PanelResult::Continue
@@ -877,6 +1166,216 @@ impl SchemaBrowserPanel {
                 self.rebuild_visible();
             }
         }
+    }
+
+    /// Handles Enter: focus a top-level Command or unfocus if already focused.
+    fn handle_focus_toggle(&mut self) {
+        let Some(node_idx) = self.tree.selected_node_idx() else {
+            return;
+        };
+
+        // Find the owning top-level Command for any node in the tree.
+        let command_idx = if self.nodes[node_idx].depth() == 0 {
+            if matches!(self.nodes[node_idx], TreeNode::Command { .. }) {
+                node_idx
+            } else {
+                return;
+            }
+        } else {
+            // Walk backwards to the nearest depth-0 Command ancestor
+            match (0..node_idx)
+                .rev()
+                .find(|&i| matches!(self.nodes[i], TreeNode::Command { .. }))
+            {
+                Some(idx) => idx,
+                None => return,
+            }
+        };
+
+        if self.focused_schema == Some(command_idx) {
+            self.unfocus_schema();
+        } else {
+            self.focus_schema(command_idx);
+        }
+    }
+
+    /// Focuses on a top-level Command schema: zooms in to show only that
+    /// command's subtree, auto-expands it, and enables multiselect.
+    fn focus_schema(&mut self, node_idx: usize) {
+        // Remember which node the cursor is on before rebuild
+        let cursor_node = self.tree.selected_node_idx();
+
+        self.focused_schema = Some(node_idx);
+        // Auto-expand the focused command
+        self.expanded.insert(node_idx);
+        // Enable multiselect for command construction
+        self.tree.enable_multiselect();
+        // Clear any filter so user starts fresh within the schema
+        self.filter.clear();
+        self.rebuild_visible();
+
+        // Restore cursor to the same node, or fall back to first item
+        let restored = cursor_node.and_then(|orig| {
+            self.tree
+                .visible()
+                .iter()
+                .position(|&v| v == orig)
+        });
+        if let Some(vi) = restored {
+            let count = self.tree.visible_count();
+            self.tree.scroll_mut().set_selection(vi, count);
+        } else {
+            self.tree.scroll_mut().reset();
+        }
+    }
+
+    /// Unfocuses from the current schema: returns to the full schema list,
+    /// clears checked items, and disables multiselect.
+    fn unfocus_schema(&mut self) {
+        self.focused_schema = None;
+        self.tree.disable_multiselect();
+        self.rebuild_visible();
+    }
+
+    /// Returns the name of the focused schema, if any.
+    fn focused_schema_name(&self) -> Option<&str> {
+        self.focused_schema.and_then(|idx| match &self.nodes[idx] {
+            TreeNode::Command { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+    }
+
+    /// Handles `|`: commits the current focused selections as a pipe segment,
+    /// then unfocuses so the user can search/focus the next command in the pipeline.
+    fn handle_pipe(&mut self) {
+        let current_items = self.build_current_selection_items();
+        if current_items.is_empty() {
+            return;
+        }
+        self.pipe_segments.push(PipeSegment {
+            items: current_items,
+        });
+        // Unfocus without clearing pipe_segments
+        self.focused_schema = None;
+        self.tree.disable_multiselect();
+        self.filter.clear();
+        self.command_hint = None;
+        self.filter_changed_at = None;
+        self.rebuild_visible();
+    }
+
+    /// Handles Space: toggle-check the current item for command construction.
+    fn handle_space_toggle(&mut self) {
+        let Some(node_idx) = self.tree.selected_node_idx() else {
+            return;
+        };
+        // Skip Section nodes (not selectable for command construction)
+        if matches!(self.nodes[node_idx], TreeNode::Section { .. }) {
+            return;
+        }
+        // Skip the focused Command node itself (it's auto-implied)
+        if self.focused_schema == Some(node_idx) {
+            return;
+        }
+        self.tree.toggle_checked(node_idx);
+        self.rebuild_visible();
+    }
+
+    /// Builds the full ribbon including completed pipe segments and current selections.
+    fn build_all_ribbon_items(&self) -> Vec<RibbonItem> {
+        let mut all = Vec::new();
+        for (i, seg) in self.pipe_segments.iter().enumerate() {
+            if i > 0 || !all.is_empty() {
+                // This shouldn't happen for i==0 with empty all, but guard anyway
+            }
+            all.extend(seg.items.iter().cloned());
+            all.push(RibbonItem {
+                text: "|".to_string(),
+                auto_implied: true,
+            });
+        }
+        let current = self.build_current_selection_items();
+        if !current.is_empty() {
+            all.extend(current);
+        } else if !all.is_empty() {
+            // We have pipe segments but no current selection yet — keep the trailing pipe
+            // to show the user they're building a pipeline
+        }
+        all
+    }
+
+    /// Builds the ordered list of ribbon items from the current checked state,
+    /// with auto-implied parent chain.
+    fn build_current_selection_items(&self) -> Vec<RibbonItem> {
+        let checked = self.tree.checked_indices();
+        if checked.is_empty() {
+            return Vec::new();
+        }
+
+        let mut items = Vec::new();
+        let mut implied_parents: Vec<usize> = Vec::new();
+
+        // Collect all parent commands/subcommands that need to be auto-implied
+        for &idx in checked {
+            // Walk up the tree to find parent Command/Subcommand chain
+            let mut parent_idx = idx;
+            loop {
+                // Find the parent: scan backwards for a node at shallower depth
+                let node_depth = self.nodes[parent_idx].depth();
+                if node_depth == 0 {
+                    break;
+                }
+                if let Some(p) = (0..parent_idx)
+                    .rev()
+                    .find(|&i| self.nodes[i].depth() < node_depth)
+                {
+                    if !implied_parents.contains(&p) && !checked.contains(&p) {
+                        implied_parents.push(p);
+                    }
+                    parent_idx = p;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // Also add the focused schema command as auto-implied if not checked
+        if let Some(focus_idx) = self.focused_schema {
+            if !checked.contains(&focus_idx) && !implied_parents.contains(&focus_idx) {
+                implied_parents.push(focus_idx);
+            }
+        }
+
+        // Sort all items by their position in the tree (topological order)
+        let mut all_indices: Vec<(usize, bool)> = Vec::new();
+        for &idx in &implied_parents {
+            all_indices.push((idx, true)); // auto-implied
+        }
+        for &idx in checked {
+            all_indices.push((idx, false)); // explicitly selected
+        }
+        all_indices.sort_by_key(|(idx, _)| *idx);
+        all_indices.dedup_by_key(|(idx, _)| *idx);
+
+        for (idx, auto_implied) in all_indices {
+            let text = match &self.nodes[idx] {
+                TreeNode::Command { name, .. } | TreeNode::Subcommand { name, .. } => {
+                    name.clone()
+                }
+                TreeNode::Flag { long, short, .. } => {
+                    long.clone().or_else(|| short.clone()).unwrap_or_default()
+                }
+                TreeNode::Section { .. } => continue,
+            };
+            if !text.is_empty() {
+                items.push(RibbonItem {
+                    text,
+                    auto_implied,
+                });
+            }
+        }
+
+        items
     }
 
     /// Returns the insert text for the currently selected node.
@@ -909,6 +1408,9 @@ impl Panel for SchemaBrowserPanel {
         // Poll for discovery completion
         self.poll_discovery();
 
+        // Poll debounce timer for command existence check
+        self.poll_filter_debounce();
+
         // Tick loading widget if still discovering
         if self.discovery.is_some() {
             self.loading_widget.tick();
@@ -920,20 +1422,31 @@ impl Panel for SchemaBrowserPanel {
             return;
         }
 
-        // Layout: optional filter bar + tree area
-        let show_filter = self.filter.is_active() || self.filter.has_filter();
-        let (filter_area, tree_area) = if show_filter {
-            let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(area);
-            (Some(chunks[0]), chunks[1])
-        } else {
-            (None, area)
-        };
+        // Compute ribbon height for layout (includes pipe segments)
+        let ribbon_items = self.build_all_ribbon_items();
+        let ribbon_height =
+            SelectionRibbon::compute_height(&ribbon_items, area.width, 3);
 
-        // Render filter bar
-        if let Some(fa) = filter_area {
-            let spans = self.filter.render_spans(self.theme, self.glyphs);
-            Paragraph::new(Line::from(spans)).render(fa, buffer);
+        // Tick ribbon frame for marquee animation
+        if ribbon_height > 0 {
+            self.ribbon_frame = self.ribbon_frame.wrapping_add(1);
+        } else {
+            self.ribbon_frame = 0;
         }
+
+        // Layout: filter_bar (1) + tree_area (flexible) + ribbon (0-3)
+        let chunks = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(ribbon_height),
+        ])
+        .split(area);
+        let filter_area = chunks[0];
+        let tree_area = chunks[1];
+        let ribbon_area = chunks[2];
+
+        // Render filter bar (History Browser style: > Type to filter... [N schemas])
+        self.render_filter_bar(buffer, filter_area);
 
         // Empty state
         if self.tree.visible_count() == 0 {
@@ -958,9 +1471,7 @@ impl Panel for SchemaBrowserPanel {
                     ]),
                     Line::from(""),
                     Line::from(vec![
-                        Span::styled("Press ", secondary),
-                        Span::styled("/", highlight),
-                        Span::styled(" to search, type a command, then ", secondary),
+                        Span::styled("Type a command name, then press ", secondary),
                         Span::styled("^D", highlight),
                         Span::styled(" to discover.", secondary),
                     ]),
@@ -991,7 +1502,15 @@ impl Panel for SchemaBrowserPanel {
                 let tree_line = self.tree.tree_line_at(vis_idx).unwrap();
                 let is_selected = vis_idx == self.tree.scroll().selection();
 
-                let prefix = tree_prefix(tree_line, &self.glyphs.tree);
+                let mut prefix = String::new();
+                // Add checkbox when multiselect is enabled and not a Section
+                if self.tree.multiselect_enabled()
+                    && !matches!(node, TreeNode::Section { .. })
+                    && self.focused_schema != Some(node_idx)
+                {
+                    prefix.push_str(&tree_checkbox(tree_line.is_checked, self.glyphs));
+                }
+                prefix.push_str(&tree_prefix(tree_line, &self.glyphs.tree));
                 let name = node.display_name();
 
                 let desc = match node {
@@ -1052,6 +1571,17 @@ impl Panel for SchemaBrowserPanel {
             );
             self.loading_widget.render(buffer, loading_area, self.theme);
         }
+
+        // Render selection ribbon (above footer)
+        if ribbon_height > 0 {
+            SelectionRibbon::render(
+                &ribbon_items,
+                buffer,
+                ribbon_area,
+                self.theme,
+                self.ribbon_frame,
+            );
+        }
     }
 
     fn handle_input(&mut self, key: KeyEvent) -> PanelResult {
@@ -1065,20 +1595,11 @@ impl Panel for SchemaBrowserPanel {
             return PanelResult::Continue;
         }
 
-        // If filter is active, delegate to filter handler
-        if self.filter.is_active() {
-            return self.handle_filter_input(key);
-        }
-
-        // Ctrl+ keybinds
+        // Ctrl+ keybinds (checked before char routing)
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Char('d') => {
                     self.discover_command();
-                    return PanelResult::Continue;
-                }
-                KeyCode::Char('r') => {
-                    self.load_schemas();
                     return PanelResult::Continue;
                 }
                 KeyCode::Char('e') => {
@@ -1092,47 +1613,47 @@ impl Panel for SchemaBrowserPanel {
         match key.code {
             KeyCode::Esc => {
                 if self.filter.has_filter() {
-                    // First Esc clears filter, second dismisses
+                    // Esc 1: clear filter
                     self.filter.clear_and_deactivate();
                     self.rebuild_visible();
                     PanelResult::Continue
+                } else if self.focused_schema.is_some() {
+                    // Esc 2: unfocus schema (keeps pipe segments)
+                    self.unfocus_schema();
+                    PanelResult::Continue
+                } else if !self.pipe_segments.is_empty() {
+                    // Esc 3: undo last pipe segment
+                    self.pipe_segments.pop();
+                    PanelResult::Continue
                 } else {
+                    // Esc 4: dismiss panel
                     PanelResult::Dismiss
                 }
             }
-            KeyCode::Char('j') | KeyCode::Down => {
+            KeyCode::Down => {
                 let count = self.tree.visible_count();
                 self.tree.scroll_mut().down(count);
                 PanelResult::Continue
             }
-            KeyCode::Char('k') | KeyCode::Up => {
+            KeyCode::Up => {
                 let count = self.tree.visible_count();
                 self.tree.scroll_mut().up(count);
                 PanelResult::Continue
             }
-            KeyCode::Char('l') | KeyCode::Right => self.handle_expand_or_child(),
-            KeyCode::Char('h') | KeyCode::Left => self.handle_collapse_or_parent(),
-            KeyCode::Char(' ') => {
-                self.toggle_selected();
-                PanelResult::Continue
-            }
-            KeyCode::Char('/') => {
-                self.filter.activate();
-                PanelResult::Continue
-            }
+            KeyCode::Right => self.handle_expand_or_child(),
+            KeyCode::Left => self.handle_collapse_or_parent(),
             KeyCode::Enter => {
-                if let Some(node_idx) = self.tree.selected_node_idx() {
-                    if self.nodes[node_idx].has_children() {
-                        self.toggle_selected();
-                        PanelResult::Continue
-                    } else if let Some(text) = self.selected_insert_text() {
-                        PanelResult::InsertText(text)
-                    } else {
-                        PanelResult::Continue
-                    }
+                self.handle_focus_toggle();
+                PanelResult::Continue
+            }
+            KeyCode::Char(' ') => {
+                if self.focused_schema.is_some() {
+                    self.handle_space_toggle();
                 } else {
-                    PanelResult::Continue
+                    // When not focused, Space still toggles expand/collapse
+                    self.toggle_selected();
                 }
+                PanelResult::Continue
             }
             KeyCode::PageUp => {
                 let count = self.tree.visible_count();
@@ -1153,6 +1674,33 @@ impl Panel for SchemaBrowserPanel {
                 self.tree.scroll_mut().end(count);
                 PanelResult::Continue
             }
+            // Pipe: commit current focused selections as a pipe segment
+            KeyCode::Char('|')
+                if self.focused_schema.is_some() && self.tree.checked_count() > 0 =>
+            {
+                self.handle_pipe();
+                PanelResult::Continue
+            }
+            // Always-active filter: any unbound char goes to filter
+            KeyCode::Char(c) => {
+                self.filter.type_char(c);
+                self.filter_changed_at = Some(Instant::now());
+                self.command_hint = None;
+                self.rebuild_visible();
+                self.tree.scroll_mut().reset();
+                PanelResult::Continue
+            }
+            KeyCode::Backspace => {
+                self.filter.backspace();
+                self.filter_changed_at = if self.filter.has_filter() {
+                    Some(Instant::now())
+                } else {
+                    None
+                };
+                self.command_hint = None;
+                self.rebuild_visible();
+                PanelResult::Continue
+            }
             _ => PanelResult::Continue,
         }
     }
@@ -1170,22 +1718,41 @@ impl Panel for SchemaBrowserPanel {
                 FooterEntry::action("Enter", "Run"),
                 FooterEntry::action("Esc", "Back"),
             ]
-        } else if self.filter.is_active() {
-            vec![
-                FooterEntry::action("^D", "Discover"),
-                FooterEntry::action("Enter", "Accept"),
-                FooterEntry::action("Esc", "Cancel"),
-            ]
+        } else if self.focused_schema.is_some() {
+            let has_selections = self.tree.checked_count() > 0;
+            let mut entries = vec![
+                FooterEntry::action("Space", "Select"),
+                FooterEntry::action("↑↓", "Navigate"),
+                FooterEntry::action("←→", "Expand"),
+            ];
+            if has_selections {
+                entries.push(FooterEntry::action("|", "Pipe"));
+            }
+            entries.push(FooterEntry::action("Enter", "Unfocus"));
+            entries.push(FooterEntry::action("^E", "Build"));
+            if self.filter.has_filter() {
+                entries.push(FooterEntry::action("^D", "Discover"));
+            }
+            entries.push(FooterEntry::action("Esc", "Back"));
+            entries
         } else {
-            vec![
-                FooterEntry::action("^E", "Edit"),
-                FooterEntry::action("Space", "Expand"),
-                FooterEntry::action("/", "Filter"),
-                FooterEntry::action("^D", "Discover"),
-                FooterEntry::action("^R", "Refresh"),
-                FooterEntry::action("Enter", "Select"),
-                FooterEntry::action("Esc", "Close"),
-            ]
+            let has_pipeline = !self.pipe_segments.is_empty();
+            let mut entries = vec![
+                FooterEntry::action("↑↓", "Navigate"),
+                FooterEntry::action("←→", "Expand"),
+                FooterEntry::action("Enter", "Focus"),
+            ];
+            if has_pipeline {
+                entries.push(FooterEntry::action("^E", "Build"));
+            } else {
+                entries.push(FooterEntry::action("^E", "Edit"));
+            }
+            // Show ^D only when filter has text (discovery hint context)
+            if self.filter.has_filter() {
+                entries.push(FooterEntry::action("^D", "Discover"));
+            }
+            entries.push(FooterEntry::action("Esc", if has_pipeline { "Undo" } else { "Close" }));
+            entries
         }
     }
 
@@ -1211,6 +1778,9 @@ impl Panel for SchemaBrowserPanel {
 
     fn is_animating(&self) -> bool {
         self.discovery.is_some()
+            || self.filter_changed_at.is_some()
+            || self.tree.checked_count() > 0
+            || !self.pipe_segments.is_empty()
     }
 }
 
@@ -1469,13 +2039,59 @@ mod tests {
     }
 
     #[test]
-    fn test_expand_collapse_via_enter() {
+    fn test_enter_focuses_command() {
         let mut panel = panel_with_nodes();
-        let initial = panel.tree.visible_count();
+        assert!(panel.focused_schema.is_none());
 
+        // Enter on a Command node focuses it
         let result = panel.handle_input(KeyEvent::from(KeyCode::Enter));
         assert!(matches!(result, PanelResult::Continue));
-        assert!(panel.tree.visible_count() > initial);
+        assert!(panel.focused_schema.is_some());
+        assert!(panel.tree.multiselect_enabled());
+        // Should show the focused command's subtree (more items visible)
+        assert!(panel.tree.visible_count() > 0);
+    }
+
+    #[test]
+    fn test_enter_unfocuses_focused_command() {
+        let mut panel = panel_with_nodes();
+        // Focus first
+        panel.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert!(panel.focused_schema.is_some());
+
+        // Enter again on the same focused Command unfocuses
+        panel.tree.scroll_mut().reset(); // selection at 0 = the focused Command
+        panel.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert!(panel.focused_schema.is_none());
+        assert!(!panel.tree.multiselect_enabled());
+    }
+
+    #[test]
+    fn test_esc_cascade_filter_then_unfocus_then_dismiss() {
+        let mut panel = panel_with_nodes();
+
+        // Focus a schema
+        panel.handle_input(KeyEvent::from(KeyCode::Enter));
+        assert!(panel.focused_schema.is_some());
+
+        // Type some filter text
+        panel.handle_input(KeyEvent::from(KeyCode::Char('v')));
+        assert!(panel.filter.has_filter());
+
+        // First Esc: clears filter
+        let r = panel.handle_input(KeyEvent::from(KeyCode::Esc));
+        assert!(matches!(r, PanelResult::Continue));
+        assert!(!panel.filter.has_filter());
+        assert!(panel.focused_schema.is_some()); // still focused
+
+        // Second Esc: unfocuses
+        let r = panel.handle_input(KeyEvent::from(KeyCode::Esc));
+        assert!(matches!(r, PanelResult::Continue));
+        assert!(panel.focused_schema.is_none());
+
+        // Third Esc: dismisses
+        let r = panel.handle_input(KeyEvent::from(KeyCode::Esc));
+        assert!(matches!(r, PanelResult::Dismiss));
     }
 
     #[test]
@@ -1529,81 +2145,65 @@ mod tests {
     }
 
     #[test]
-    fn test_vim_j_k_navigation() {
+    fn test_chars_go_to_filter() {
+        let mut panel = panel_with_nodes();
+        assert!(!panel.filter.has_filter());
+
+        // Typing a char goes to filter (always-active filter)
+        panel.handle_input(KeyEvent::from(KeyCode::Char('g')));
+        assert!(panel.filter.has_filter());
+        assert_eq!(panel.filter.text(), "g");
+
+        // Another char
+        panel.handle_input(KeyEvent::from(KeyCode::Char('i')));
+        assert_eq!(panel.filter.text(), "gi");
+    }
+
+    #[test]
+    fn test_arrow_navigation() {
         let mut panel = panel_with_nodes();
         assert_eq!(panel.tree.scroll().selection(), 0);
 
-        // j moves down
-        panel.handle_input(KeyEvent::from(KeyCode::Char('j')));
+        // Down arrow moves down
+        panel.handle_input(KeyEvent::from(KeyCode::Down));
         assert_eq!(panel.tree.scroll().selection(), 1);
 
-        // k moves up
-        panel.handle_input(KeyEvent::from(KeyCode::Char('k')));
+        // Up arrow moves up
+        panel.handle_input(KeyEvent::from(KeyCode::Up));
         assert_eq!(panel.tree.scroll().selection(), 0);
     }
 
     #[test]
-    fn test_vim_l_h_navigation() {
+    fn test_filter_always_active() {
         let mut panel = panel_with_nodes();
 
-        // l expands
-        panel.handle_input(KeyEvent::from(KeyCode::Char('l')));
-        assert!(panel.tree.visible_count() > 2);
-
-        // l again moves to child
-        panel.handle_input(KeyEvent::from(KeyCode::Char('l')));
-        assert_eq!(panel.tree.scroll().selection(), 1);
-
-        // h jumps to parent
-        panel.handle_input(KeyEvent::from(KeyCode::Char('h')));
-        assert_eq!(panel.tree.scroll().selection(), 0);
+        // Typing '/' goes to filter as a regular char (no activation mode)
+        panel.handle_input(KeyEvent::from(KeyCode::Char('/')));
+        assert!(panel.filter.has_filter());
+        assert_eq!(panel.filter.text(), "/");
     }
 
     #[test]
-    fn test_slash_activates_filter() {
+    fn test_esc_clears_filter() {
         let mut panel = panel_with_nodes();
-        assert!(!panel.filter.is_active());
-
-        panel.handle_input(KeyEvent::from(KeyCode::Char('/')));
-        assert!(panel.filter.is_active());
-    }
-
-    #[test]
-    fn test_filter_mode_esc_clears_and_deactivates() {
-        let mut panel = panel_with_nodes();
-        // Activate filter and type
-        panel.handle_input(KeyEvent::from(KeyCode::Char('/')));
+        // Type into always-active filter
         panel.handle_input(KeyEvent::from(KeyCode::Char('g')));
         assert!(panel.filter.has_filter());
 
         // Esc clears filter
         panel.handle_input(KeyEvent::from(KeyCode::Esc));
-        assert!(!panel.filter.is_active());
         assert!(!panel.filter.has_filter());
     }
 
     #[test]
-    fn test_filter_mode_enter_deactivates_keeps_text() {
+    fn test_backspace_removes_filter_char() {
         let mut panel = panel_with_nodes();
-        panel.handle_input(KeyEvent::from(KeyCode::Char('/')));
-        panel.handle_input(KeyEvent::from(KeyCode::Char('g')));
-
-        panel.handle_input(KeyEvent::from(KeyCode::Enter));
-        assert!(!panel.filter.is_active());
-        assert!(panel.filter.has_filter()); // text preserved
-    }
-
-    #[test]
-    fn test_filter_mode_backspace_deactivates_on_empty() {
-        let mut panel = panel_with_nodes();
-        panel.handle_input(KeyEvent::from(KeyCode::Char('/')));
         panel.handle_input(KeyEvent::from(KeyCode::Char('x')));
-        assert!(panel.filter.is_active());
+        assert!(panel.filter.has_filter());
 
         // Backspace removes char
         panel.handle_input(KeyEvent::from(KeyCode::Backspace));
-        // Now empty → deactivates
-        assert!(!panel.filter.is_active());
+        assert!(!panel.filter.has_filter());
     }
 
     #[test]
@@ -1678,7 +2278,7 @@ mod tests {
     }
 
     #[test]
-    fn test_enter_on_leaf_returns_insert_text() {
+    fn test_enter_on_leaf_is_noop() {
         let mut panel = panel_with_nodes();
         panel.expanded.insert(0);
         panel.rebuild_visible();
@@ -1689,8 +2289,9 @@ mod tests {
         let count = panel.tree.visible_count();
         panel.tree.scroll_mut().set_selection(flag_vis, count);
 
+        // Enter on non-Command node is a no-op (reserved for focus)
         let result = panel.handle_input(KeyEvent::from(KeyCode::Enter));
-        assert!(matches!(result, PanelResult::InsertText(_)));
+        assert!(matches!(result, PanelResult::Continue));
     }
 
     #[test]
@@ -1921,16 +2522,20 @@ mod tests {
     fn test_footer_entries_browse_mode() {
         let panel = panel_with_nodes();
         let entries = panel.footer_entries();
-        assert!(footer_has_label(&entries, "Filter"));
+        assert!(footer_has_label(&entries, "Navigate"));
         assert!(footer_has_label(&entries, "Expand"));
+        assert!(footer_has_label(&entries, "Focus"));
+        assert!(footer_has_label(&entries, "Edit"));
+        // ^D Discover should not appear without filter text
+        assert!(!footer_has_label(&entries, "Discover"));
     }
 
     #[test]
-    fn test_footer_entries_filter_mode() {
+    fn test_footer_entries_with_filter() {
         let mut panel = panel_with_nodes();
-        panel.filter.activate();
+        panel.filter.type_char('g');
         let entries = panel.footer_entries();
-        assert!(footer_has_label(&entries, "Cancel"));
+        // ^D Discover appears when filter has text
         assert!(footer_has_label(&entries, "Discover"));
     }
 

@@ -4,7 +4,7 @@
 //! tree metadata. No state, no I/O — just layout helpers for any tree-shaped
 //! data displayed in a TUI panel.
 
-use crate::chrome::glyphs::TreeGlyphs;
+use crate::chrome::glyphs::{GlyphSet, TreeGlyphs};
 
 /// Metadata about a single row in a flattened tree view.
 #[derive(Debug, Clone)]
@@ -20,6 +20,8 @@ pub struct TreeLine {
     pub has_children: bool,
     /// Whether this node is currently expanded.
     pub is_expanded: bool,
+    /// Whether this node is checked (multi-selected).
+    pub is_checked: bool,
 }
 
 /// Generates the prefix string for a tree line.
@@ -72,6 +74,24 @@ pub fn tree_prefix(line: &TreeLine, chars: &TreeGlyphs) -> String {
     result
 }
 
+/// Generates a checkbox prefix string for a tree line.
+///
+/// Uses the indicator glyphs for checked/unchecked state, with a trailing space.
+/// Returns an empty string if the node should not show a checkbox.
+pub fn tree_checkbox(checked: bool, glyphs: &GlyphSet) -> String {
+    if checked {
+        format!("{} ", glyphs.indicator.check_box)
+    } else {
+        format!("{} ", glyphs.indicator.empty_box)
+    }
+}
+
+/// Returns the display width of a tree checkbox prefix.
+pub fn tree_checkbox_width(glyphs: &GlyphSet) -> usize {
+    use unicode_width::UnicodeWidthStr;
+    UnicodeWidthStr::width(glyphs.indicator.check_box) + 1
+}
+
 /// Returns the display width of a tree prefix for a given depth.
 ///
 /// Depth 0: 1 column (just the expand indicator).
@@ -99,6 +119,7 @@ mod tests {
             ancestor_is_last,
             has_children,
             is_expanded,
+            is_checked: false,
         }
     }
 
