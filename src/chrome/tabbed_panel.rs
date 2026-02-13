@@ -28,6 +28,7 @@ const TAB_HISTORY_BROWSER: usize = 0;
 const TAB_FILE_BROWSER: usize = 1;
 const TAB_COMMAND_PALETTE: usize = 2;
 const TAB_SETTINGS: usize = 3;
+const BORDER_INFO_SCROLL_FRAME_INTERVAL: u8 = 4;
 
 /// A tabbed container for multiple panels.
 pub struct TabbedPanel {
@@ -43,6 +44,14 @@ pub struct TabbedPanel {
     theme: &'static Theme,
     /// Unified glyph set for the current tier.
     glyphs: &'static GlyphSet,
+    /// Current frame counter for scrolling border info text.
+    border_info_scroll_tick: u64,
+    /// Frame sub-counter used to slow marquee movement.
+    border_info_scroll_frame: u8,
+    /// Whether the current border info requires marquee animation.
+    border_info_animating: bool,
+    /// Whether border info animation is currently paused (e.g. mouse selection).
+    border_info_paused: bool,
 }
 
 impl TabbedPanel {
@@ -63,6 +72,10 @@ impl TabbedPanel {
             pending_actions: Vec::new(),
             theme,
             glyphs,
+            border_info_scroll_tick: 0,
+            border_info_scroll_frame: 0,
+            border_info_animating: false,
+            border_info_paused: false,
         }
     }
 
@@ -246,6 +259,101 @@ impl TabbedPanel {
             col += ch_w;
         }
     }
+
+    fn active_child_is_animating(&self) -> bool {
+        self.tabs
+            .get(self.active_tab)
+            .is_some_and(|panel| panel.is_animating())
+    }
+
+    fn render_border_line(
+        &mut self,
+        buffer: &mut Buffer,
+        border_area: Rect,
+        border_info: Option<&str>,
+        advance: bool,
+    ) {
+        let border = match border_info {
+            Some(info) => {
+                let needs_marquee = BorderLine::info_needs_marquee(info, border_area.width);
+                self.border_info_animating = needs_marquee;
+
+                if needs_marquee {
+                    if advance && !self.border_info_paused {
+                        self.border_info_scroll_frame =
+                            self.border_info_scroll_frame.saturating_add(1);
+                        if self.border_info_scroll_frame >= BORDER_INFO_SCROLL_FRAME_INTERVAL {
+                            self.border_info_scroll_frame = 0;
+                            self.border_info_scroll_tick =
+                                self.border_info_scroll_tick.wrapping_add(1);
+                        }
+                    }
+
+                    if self.border_info_paused {
+                        BorderLine::new(self.theme, self.glyphs.border.horizontal).with_info(info)
+                    } else {
+                        BorderLine::new(self.theme, self.glyphs.border.horizontal)
+                            .with_info(info)
+                            .with_marquee_frame(self.border_info_scroll_tick)
+                    }
+                } else {
+                    self.border_info_scroll_tick = 0;
+                    self.border_info_scroll_frame = 0;
+                    BorderLine::new(self.theme, self.glyphs.border.horizontal).with_info(info)
+                }
+            }
+            None => {
+                self.border_info_animating = false;
+                self.border_info_scroll_tick = 0;
+                self.border_info_scroll_frame = 0;
+                BorderLine::new(self.theme, self.glyphs.border.horizontal)
+            }
+        };
+
+        border.render(border_area, buffer);
+    }
+
+    /// Pauses or resumes border info marquee animation.
+    pub fn set_border_info_animation_paused(&mut self, paused: bool) {
+        self.border_info_paused = paused;
+    }
+
+    /// Returns true when the panel can update animation by redrawing only the border info row.
+    pub fn supports_partial_animation_row_render(&self) -> bool {
+        self.border_info_animating && !self.border_info_paused && !self.active_child_is_animating()
+    }
+
+    /// Renders only the animated border info row, returning the dirty row area.
+    pub fn render_border_info_animation_row(
+        &mut self,
+        buffer: &mut Buffer,
+        area: Rect,
+    ) -> Option<Rect> {
+        if area.height < 3 || area.width < 10 || !self.supports_partial_animation_row_render() {
+            return None;
+        }
+
+        let chunks = Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).split(area);
+        let (entries, border_info) = {
+            let panel = self.tabs.get(self.active_tab)?;
+            (panel.footer_entries(), panel.border_info())
+        };
+        if entries.is_empty() {
+            self.border_info_animating = false;
+            return None;
+        }
+
+        let content_chunks = Layout::vertical([
+            Constraint::Min(1),    // Panel content
+            Constraint::Length(1), // Border
+            Constraint::Length(1), // Footer
+        ])
+        .split(chunks[1]);
+
+        self.render_border_line(buffer, content_chunks[1], border_info.as_deref(), true);
+
+        Some(content_chunks[1])
+    }
 }
 
 // Note: Default is removed since TabbedPanel now requires a theme parameter
@@ -327,6 +435,9 @@ impl Panel for TabbedPanel {
             let entries = panel.footer_entries();
 
             if entries.is_empty() {
+                self.border_info_animating = false;
+                self.border_info_scroll_tick = 0;
+                self.border_info_scroll_frame = 0;
                 panel.render(buffer, chunks[1]);
             } else {
                 let content_chunks = Layout::vertical([
@@ -336,17 +447,11 @@ impl Panel for TabbedPanel {
                 ])
                 .split(chunks[1]);
 
-                panel.render(buffer, content_chunks[0]);
-
-                // Compose border widget with optional info
-                let border_info = panel.border_info();
-                let border = match border_info {
-                    Some(ref info) => {
-                        BorderLine::new(self.theme, self.glyphs.border.horizontal).with_info(info)
-                    }
-                    None => BorderLine::new(self.theme, self.glyphs.border.horizontal),
+                let border_info = {
+                    panel.render(buffer, content_chunks[0]);
+                    panel.border_info()
                 };
-                border.render(content_chunks[1], buffer);
+                self.render_border_line(buffer, content_chunks[1], border_info.as_deref(), true);
 
                 // Compose footer widget
                 FooterBar::new(&entries, self.theme).render(content_chunks[2], buffer);
@@ -430,9 +535,11 @@ impl Panel for TabbedPanel {
     }
 
     fn is_animating(&self) -> bool {
-        self.tabs
-            .get(self.active_tab)
-            .is_some_and(|panel| panel.is_animating())
+        (self.border_info_animating && !self.border_info_paused)
+            || self
+                .tabs
+                .get(self.active_tab)
+                .is_some_and(|panel| panel.is_animating())
     }
 }
 
