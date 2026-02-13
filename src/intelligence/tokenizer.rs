@@ -36,13 +36,25 @@ pub fn determine_position_type(
 
     let last_token = &preceding_tokens[preceding_tokens.len() - 1];
 
-    // Check for pipe - after pipe we suggest pipeable commands
-    if last_token.text == "|" || last_token.text.ends_with('|') {
+    // Check for pipe — type-first, text-fallback for backward compatibility
+    if last_token.token_type == TokenType::Pipe
+        || last_token.text == "|"
+        || last_token.text.ends_with('|')
+    {
         return PositionType::AfterPipe;
     }
 
-    // Check for redirect
-    if last_token.text == ">" || last_token.text == ">>" || last_token.text == "<" {
+    // Check for operator — after && || ; the next token is a new command
+    if last_token.token_type == TokenType::Operator {
+        return PositionType::Command;
+    }
+
+    // Check for redirect — type-first, text-fallback
+    if last_token.token_type == TokenType::Redirect
+        || last_token.text == ">"
+        || last_token.text == ">>"
+        || last_token.text == "<"
+    {
         return PositionType::AfterRedirect;
     }
 
@@ -230,7 +242,10 @@ pub fn find_pipe_positions(tokens: &[AnalyzedToken]) -> Vec<usize> {
         .iter()
         .enumerate()
         .filter_map(|(i, t)| {
-            if t.text == "|" || t.text.ends_with('|') {
+            if t.token_type == TokenType::Pipe
+                || t.text == "|"
+                || t.text.ends_with('|')
+            {
                 Some(i)
             } else {
                 None
@@ -245,13 +260,13 @@ pub fn split_at_pipes(tokens: &[AnalyzedToken]) -> Vec<Vec<AnalyzedToken>> {
     let mut current_segment = Vec::new();
 
     for token in tokens {
-        if token.text == "|" {
+        if token.token_type == TokenType::Pipe || token.text == "|" {
             if !current_segment.is_empty() {
                 segments.push(current_segment);
                 current_segment = Vec::new();
             }
         } else if token.text.ends_with('|') {
-            // Token like "foo|" - split it
+            // Token like "foo|" - split it (legacy text-based fallback)
             let text_without_pipe = token.text.trim_end_matches('|');
             if !text_without_pipe.is_empty() {
                 current_segment.push(AnalyzedToken {
@@ -306,6 +321,12 @@ pub fn token_type_to_string(token_type: TokenType) -> &'static str {
         TokenType::Url => "Url",
         TokenType::Argument => "Argument",
         TokenType::Locked => "Locked",
+        TokenType::Pipe => "Pipe",
+        TokenType::Redirect => "Redirect",
+        TokenType::Operator => "Operator",
+        TokenType::HeredocMarker => "HeredocMarker",
+        TokenType::HeredocBody => "HeredocBody",
+        TokenType::HeredocDelimiter => "HeredocDelimiter",
     }
 }
 
@@ -319,6 +340,12 @@ pub fn token_type_from_string(s: &str) -> TokenType {
         "Url" => TokenType::Url,
         "Argument" => TokenType::Argument,
         "Locked" => TokenType::Locked,
+        "Pipe" => TokenType::Pipe,
+        "Redirect" => TokenType::Redirect,
+        "Operator" => TokenType::Operator,
+        "HeredocMarker" => TokenType::HeredocMarker,
+        "HeredocBody" => TokenType::HeredocBody,
+        "HeredocDelimiter" => TokenType::HeredocDelimiter,
         _ => TokenType::Argument,
     }
 }
@@ -398,6 +425,12 @@ mod tests {
             TokenType::Path,
             TokenType::Url,
             TokenType::Argument,
+            TokenType::Pipe,
+            TokenType::Redirect,
+            TokenType::Operator,
+            TokenType::HeredocMarker,
+            TokenType::HeredocBody,
+            TokenType::HeredocDelimiter,
         ] {
             let s = token_type_to_string(token_type);
             let parsed = token_type_from_string(s);

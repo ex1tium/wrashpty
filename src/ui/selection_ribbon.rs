@@ -14,6 +14,11 @@ use ratatui_widgets::paragraph::Paragraph;
 use crate::chrome::theme::Theme;
 use crate::ui::scrolling_text::ScrollingText;
 
+/// Prompt prefix rendered at the start of each ribbon row (" $ ")
+const PROMPT_PREFIX: &str = " $ ";
+/// Width of the prompt prefix in display columns
+const PROMPT_PREFIX_WIDTH: usize = 3;
+
 /// A single item in the selection ribbon.
 #[derive(Debug, Clone)]
 pub struct RibbonItem {
@@ -36,7 +41,7 @@ impl SelectionRibbon {
             return 0;
         }
 
-        let usable_width = viewport_width.saturating_sub(2) as usize; // " $ " prefix
+        let usable_width = viewport_width.saturating_sub(PROMPT_PREFIX_WIDTH as u16) as usize;
         let total_text_width = Self::total_text_width(items);
 
         if total_text_width <= usable_width {
@@ -81,12 +86,12 @@ impl SelectionRibbon {
 
         // Build the full command string for width calculations
         let full_text = Self::build_command_string(items);
-        let usable_width = area.width.saturating_sub(2) as usize; // " $ " prefix
+        let usable_width = area.width.saturating_sub(PROMPT_PREFIX_WIDTH as u16) as usize;
 
         if area.height == 1 {
             // Single row — use marquee if overflowing
-            let prefixed = format!("$ {full_text}");
-            if crate::ui::text_width::display_width(&prefixed) <= usable_width + 2 {
+            let prefixed = format!("{}{}" , PROMPT_PREFIX, full_text);
+            if crate::ui::text_width::display_width(&prefixed) <= area.width as usize {
                 // Fits in one row: render with styles
                 let spans =
                     Self::build_spans(items, prompt_style, cmd_style, flag_style, pipe_style);
@@ -109,7 +114,7 @@ impl SelectionRibbon {
                 let is_last_row = row_idx == rows.len() - 1;
                 let mut spans = Vec::new();
                 if row_idx == 0 {
-                    spans.push(Span::styled(" $ ", prompt_style));
+                    spans.push(Span::styled(PROMPT_PREFIX, prompt_style));
                 } else {
                     spans.push(Span::styled("   ", bg_style));
                 }
@@ -121,13 +126,11 @@ impl SelectionRibbon {
                         .map(|i| i.text.as_str())
                         .collect::<Vec<_>>()
                         .join(" ");
-                    let prefix_width = 3; // " $ " or "   "
                     let row_display_width =
-                        crate::ui::text_width::display_width(&row_text) + prefix_width;
+                        crate::ui::text_width::display_width(&row_text) + PROMPT_PREFIX_WIDTH;
                     if row_display_width > area.width as usize {
                         // Last row overflows: use marquee for entire row
-                        let prefix = if row_idx == 0 { "$ " } else { "  " };
-                        let marquee_text = format!("{prefix}{row_text}");
+                        let marquee_text = format!("{}{}", PROMPT_PREFIX, row_text);
                         let scroller =
                             ScrollingText::new(&marquee_text).hold_frames(12).gap_cols(4);
                         let text = scroller.frame_text(area.width as usize, frame);
@@ -172,7 +175,7 @@ impl SelectionRibbon {
         flag_style: Style,
         pipe_style: Style,
     ) -> Vec<Span<'a>> {
-        let mut spans = vec![Span::styled(" $ ", prompt_style)];
+        let mut spans = vec![Span::styled(PROMPT_PREFIX, prompt_style)];
         for (i, item) in items.iter().enumerate() {
             if i > 0 {
                 spans.push(Span::raw(" "));
@@ -190,6 +193,7 @@ impl SelectionRibbon {
     }
 
     /// Wraps items into rows that fit within the given width.
+    /// The provided `usable_width` already accounts for the prompt prefix.
     fn wrap_into_rows(items: &[RibbonItem], usable_width: usize, max_rows: usize) -> Vec<Vec<&RibbonItem>> {
         let mut rows: Vec<Vec<&RibbonItem>> = vec![vec![]];
         let mut current_width = 0usize;

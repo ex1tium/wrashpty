@@ -44,8 +44,11 @@ pub fn learn_flag_values(
             continue;
         }
 
-        // Skip pipes and redirects
-        if next.text == "|"
+        // Skip pipes, redirects, and operators (type-first, text-fallback for old DB data)
+        if matches!(
+            next.token_type,
+            TokenType::Pipe | TokenType::Redirect | TokenType::Operator
+        ) || next.text == "|"
             || next.text == ">"
             || next.text == ">>"
             || next.text == "<"

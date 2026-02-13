@@ -320,11 +320,14 @@ fn count_flag_value_pairs(tokens: &[super::types::AnalyzedToken]) -> usize {
             continue;
         }
         let next = &tokens[i + 1];
-        // Skip if next is a flag (boolean flag) or pipe/redirect
+        // Skip if next is a flag (boolean flag) or pipe/redirect/operator
         if next.token_type == TokenType::Flag {
             continue;
         }
-        if next.text == "|"
+        if matches!(
+            next.token_type,
+            TokenType::Pipe | TokenType::Redirect | TokenType::Operator
+        ) || next.text == "|"
             || next.text == ">"
             || next.text == ">>"
             || next.text == "<"

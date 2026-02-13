@@ -43,6 +43,18 @@ pub enum TokenType {
     Argument,
     /// Non-editable token (e.g., filename in file browser)
     Locked,
+    /// Pipe operator: |
+    Pipe,
+    /// Redirect operator: >, >>, <, 2>, 2>>, &>, 2>&1
+    Redirect,
+    /// Shell operator: &&, ||, ;, &
+    Operator,
+    /// Heredoc opening marker: <<EOF, <<'EOF', <<-EOF (editable, paired)
+    HeredocMarker,
+    /// Heredoc body content between marker and closing delimiter (locked)
+    HeredocBody,
+    /// Heredoc closing delimiter line, e.g. EOF (editable, paired with marker)
+    HeredocDelimiter,
 }
 
 /// Quote style for tokens.
@@ -62,6 +74,8 @@ pub struct CommandToken {
     pub token_type: TokenType,
     /// Whether this token can be edited.
     pub locked: bool,
+    /// Index of the paired token (for HeredocMarker ↔ HeredocDelimiter links).
+    pub pair_index: Option<usize>,
 }
 
 impl CommandToken {
@@ -71,6 +85,7 @@ impl CommandToken {
             text: text.into(),
             token_type,
             locked: false,
+            pair_index: None,
         }
     }
 
@@ -80,15 +95,31 @@ impl CommandToken {
             text: text.into(),
             token_type: TokenType::Locked,
             locked: true,
+            pair_index: None,
         }
     }
 }
 
-/// Classifies a token based on its content and position.
-pub fn classify_token(text: &str, position: usize, prev_token: Option<&str>) -> TokenType {
+/// Classifies a token based on its content, position, and preceding token context.
+///
+/// Uses `prev_type` (when available) for context-aware classification:
+/// after a pipe or operator the next word is a new command, etc.
+pub fn classify_token(
+    text: &str,
+    position: usize,
+    prev_token: Option<&str>,
+    prev_type: Option<TokenType>,
+) -> TokenType {
+    // First token is always the command
     if position == 0 {
         return TokenType::Command;
     }
+
+    // After a pipe or operator, the next word starts a new command
+    if matches!(prev_type, Some(TokenType::Pipe | TokenType::Operator)) {
+        return TokenType::Command;
+    }
+
     if text.starts_with('-') {
         return TokenType::Flag;
     }
@@ -98,16 +129,67 @@ pub fn classify_token(text: &str, position: usize, prev_token: Option<&str>) -> 
     if text.contains('/') || text.starts_with('.') || text.starts_with('~') {
         return TokenType::Path;
     }
-    // Check for subcommand (second token after known compound commands)
-    if position == 1 {
+
+    // Check for subcommand: token right after a Command that is a compound command
+    if matches!(prev_type, Some(TokenType::Command)) {
         if let Some(cmd) = prev_token {
-            // Use canonical implementation from tokenizer
             if crate::intelligence::tokenizer::is_compound_command(cmd) {
                 return TokenType::Subcommand;
             }
         }
     }
+
     TokenType::Argument
+}
+
+/// Extracts the bare delimiter from a heredoc marker token text.
+///
+/// Given `<<EOF`, `<<'EOF'`, `<<-"EOF"`, etc., returns the bare delimiter word.
+/// Returns `None` if the marker text is malformed.
+pub fn extract_heredoc_delimiter(marker_text: &str) -> Option<String> {
+    let rest = marker_text.strip_prefix("<<")?;
+    let rest = rest.strip_prefix('-').unwrap_or(rest);
+    let rest = rest.trim();
+
+    if rest.is_empty() {
+        return None;
+    }
+
+    // Check for quoted delimiter
+    let first = rest.as_bytes()[0];
+    if first == b'\'' || first == b'"' {
+        let quote = first as char;
+        let inner = rest
+            .strip_prefix(quote)?
+            .strip_suffix(quote)
+            .unwrap_or(rest.strip_prefix(quote)?);
+        if inner.is_empty() {
+            return None;
+        }
+        return Some(inner.to_string());
+    }
+
+    Some(rest.to_string())
+}
+
+/// Reconstructs a heredoc marker with a new delimiter, preserving prefix and quote style.
+///
+/// Given old marker `<<'EOF'` and new delimiter `END`, returns `<<'END'`.
+pub fn rebuild_heredoc_marker(old_marker: &str, new_delim: &str) -> String {
+    let rest = old_marker.strip_prefix("<<").unwrap_or(old_marker);
+    let (dash, rest) = if rest.starts_with('-') {
+        ("-", &rest[1..])
+    } else {
+        ("", rest)
+    };
+    let rest = rest.trim();
+    let first = rest.as_bytes().first().copied().unwrap_or(0);
+    if first == b'\'' || first == b'"' {
+        let q = first as char;
+        format!("<<{dash}{q}{new_delim}{q}")
+    } else {
+        format!("<<{dash}{new_delim}")
+    }
 }
 
 /// Returns the style for a token based on its type.
@@ -122,6 +204,15 @@ pub fn token_type_style(token_type: TokenType, theme: &Theme) -> Style {
         TokenType::Url => Style::default().fg(theme.git_fg),
         TokenType::Argument => Style::default().fg(theme.text_primary),
         TokenType::Locked => Style::default().fg(theme.text_highlight),
+        TokenType::Pipe | TokenType::Operator => Style::default()
+            .fg(theme.text_highlight)
+            .add_modifier(Modifier::BOLD),
+        TokenType::Redirect => Style::default().fg(theme.text_highlight),
+        TokenType::HeredocMarker => Style::default()
+            .fg(theme.semantic_info)
+            .add_modifier(Modifier::ITALIC),
+        TokenType::HeredocDelimiter => Style::default().fg(theme.semantic_info),
+        TokenType::HeredocBody => Style::default().fg(theme.text_secondary),
     }
 }
 
@@ -274,64 +365,367 @@ pub fn check_dangerous_command(command: &str) -> Option<DangerWarning> {
 // Tokenizer
 // ============================================================================
 
-/// Tokenizes a shell command into words, respecting quotes.
+/// Tokenizes a shell command into words, respecting quotes and splitting operators.
+///
+/// Handles:
+/// - Quoted strings (single, double) and backslash escapes
+/// - Newlines as token boundaries (for multi-line commands merged from history)
+/// - Pipe `|`, redirect `>` `>>` `<` `2>` `&>` `2>&1`, operators `&&` `||` `;` `&`
+/// - Heredoc markers `<<EOF` `<<'EOF'` `<<-EOF` (consumed as single token)
+/// - Operators inside quotes are NOT split
 pub fn tokenize_command(command: &str) -> Vec<CommandToken> {
-    let mut raw_tokens: Vec<String> = Vec::new();
+    let chars: Vec<char> = command.chars().collect();
+    let len = chars.len();
+    // Raw tokens: (text, Some(type)) for structural tokens, (text, None) for words
+    let mut raw: Vec<(String, Option<TokenType>)> = Vec::new();
     let mut current = String::new();
     let mut in_single_quote = false;
     let mut in_double_quote = false;
     let mut escape_next = false;
+    let mut i = 0;
 
-    for ch in command.chars() {
+    while i < len {
+        let ch = chars[i];
+
         if escape_next {
             current.push(ch);
             escape_next = false;
+            i += 1;
             continue;
         }
 
+        // Inside quotes: only handle quote termination and escapes
+        if in_single_quote {
+            current.push(ch);
+            if ch == '\'' {
+                in_single_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_double_quote {
+            current.push(ch);
+            if ch == '\\' {
+                escape_next = true;
+            } else if ch == '"' {
+                in_double_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        // Outside quotes — handle structural characters
         match ch {
-            '\\' if !in_single_quote => {
+            '\\' => {
                 current.push(ch);
                 escape_next = true;
+                i += 1;
             }
-            '\'' if !in_double_quote => {
+            '\'' => {
                 current.push(ch);
-                in_single_quote = !in_single_quote;
+                in_single_quote = true;
+                i += 1;
             }
-            '"' if !in_single_quote => {
+            '"' => {
                 current.push(ch);
-                in_double_quote = !in_double_quote;
+                in_double_quote = true;
+                i += 1;
             }
-            ' ' | '\t' if !in_single_quote && !in_double_quote => {
+            ' ' | '\t' | '\n' => {
+                // Whitespace and newlines flush the current token
                 if !current.is_empty() {
-                    raw_tokens.push(current.clone());
+                    raw.push((current.clone(), None));
                     current.clear();
                 }
+                i += 1;
+            }
+            ';' => {
+                if !current.is_empty() {
+                    raw.push((current.clone(), None));
+                    current.clear();
+                }
+                raw.push((";".to_string(), Some(TokenType::Operator)));
+                i += 1;
+            }
+            '&' => {
+                if !current.is_empty() {
+                    raw.push((current.clone(), None));
+                    current.clear();
+                }
+                if i + 1 < len && chars[i + 1] == '&' {
+                    raw.push(("&&".to_string(), Some(TokenType::Operator)));
+                    i += 2;
+                } else if i + 1 < len && chars[i + 1] == '>' {
+                    // &> (redirect stdout+stderr)
+                    if i + 2 < len && chars[i + 2] == '>' {
+                        raw.push(("&>>".to_string(), Some(TokenType::Redirect)));
+                        i += 3;
+                    } else {
+                        raw.push(("&>".to_string(), Some(TokenType::Redirect)));
+                        i += 2;
+                    }
+                } else {
+                    // Background &
+                    raw.push(("&".to_string(), Some(TokenType::Operator)));
+                    i += 1;
+                }
+            }
+            '|' => {
+                if !current.is_empty() {
+                    raw.push((current.clone(), None));
+                    current.clear();
+                }
+                if i + 1 < len && chars[i + 1] == '|' {
+                    raw.push(("||".to_string(), Some(TokenType::Operator)));
+                    i += 2;
+                } else if i + 1 < len && chars[i + 1] == '&' {
+                    // |& (pipe stderr too, bash extension)
+                    raw.push(("|&".to_string(), Some(TokenType::Pipe)));
+                    i += 2;
+                } else {
+                    raw.push(("|".to_string(), Some(TokenType::Pipe)));
+                    i += 1;
+                }
+            }
+            '<' => {
+                if !current.is_empty() {
+                    raw.push((current.clone(), None));
+                    current.clear();
+                }
+                if i + 1 < len && chars[i + 1] == '<' {
+                    if i + 2 < len && chars[i + 2] == '<' {
+                        // <<< here-string
+                        raw.push(("<<<".to_string(), Some(TokenType::Redirect)));
+                        i += 3;
+                    } else {
+                        // << heredoc — consume optional - and delimiter
+                        let mut marker = String::from("<<");
+                        i += 2;
+                        let strip_tabs = if i < len && chars[i] == '-' {
+                            marker.push('-');
+                            i += 1;
+                            true
+                        } else {
+                            false
+                        };
+                        // Skip whitespace between << and delimiter
+                        while i < len && (chars[i] == ' ' || chars[i] == '\t') {
+                            i += 1;
+                        }
+                        // Consume the delimiter (possibly quoted)
+                        if i < len && (chars[i] == '\'' || chars[i] == '"') {
+                            let quote = chars[i];
+                            marker.push(quote);
+                            i += 1;
+                            while i < len && chars[i] != quote {
+                                marker.push(chars[i]);
+                                i += 1;
+                            }
+                            if i < len {
+                                marker.push(chars[i]); // closing quote
+                                i += 1;
+                            }
+                        } else {
+                            // Unquoted delimiter — word characters
+                            while i < len
+                                && !matches!(
+                                    chars[i],
+                                    ' ' | '\t' | '\n' | ';' | '&' | '|' | '>' | '<'
+                                )
+                            {
+                                marker.push(chars[i]);
+                                i += 1;
+                            }
+                        }
+
+                        // Extract the bare delimiter for body collection
+                        let bare_delim = extract_heredoc_delimiter(&marker);
+                        raw.push((marker, Some(TokenType::HeredocMarker)));
+
+                        // Now consume body + closing delimiter directly from char stream
+                        if let Some(delim) = bare_delim {
+                            // Skip to next newline (rest of the marker line is ignored)
+                            while i < len && chars[i] != '\n' {
+                                i += 1;
+                            }
+                            if i < len {
+                                i += 1; // skip the \n
+                            }
+
+                            // Collect lines until we find the closing delimiter
+                            let mut body_lines: Vec<String> = Vec::new();
+                            let mut found_closing = false;
+                            while i < len {
+                                // Read one line
+                                let line_start = i;
+                                while i < len && chars[i] != '\n' {
+                                    i += 1;
+                                }
+                                let line: String = chars[line_start..i].iter().collect();
+                                if i < len {
+                                    i += 1; // skip \n
+                                }
+
+                                // Check if this line is the closing delimiter
+                                let check_line = if strip_tabs {
+                                    line.trim_start_matches('\t')
+                                } else {
+                                    &line
+                                };
+                                if check_line == delim {
+                                    // Emit body if non-empty
+                                    if !body_lines.is_empty() {
+                                        let body_text = body_lines.join("\n");
+                                        raw.push((body_text, Some(TokenType::HeredocBody)));
+                                    }
+                                    // Emit closing delimiter
+                                    raw.push((line, Some(TokenType::HeredocDelimiter)));
+                                    found_closing = true;
+                                    break;
+                                }
+                                body_lines.push(line);
+                            }
+
+                            if !found_closing && !body_lines.is_empty() {
+                                // Unterminated heredoc: push remaining as plain tokens
+                                for line in body_lines {
+                                    if !line.is_empty() {
+                                        raw.push((line, None));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    raw.push(("<".to_string(), Some(TokenType::Redirect)));
+                    i += 1;
+                }
+            }
+            '>' => {
+                // Check for fd prefix: if current is a single digit, it's an fd redirect
+                let mut op = String::new();
+                if current.len() == 1 && current.chars().next().unwrap().is_ascii_digit() {
+                    op.push_str(&current);
+                    current.clear();
+                } else if !current.is_empty() {
+                    raw.push((current.clone(), None));
+                    current.clear();
+                }
+                op.push('>');
+                i += 1;
+                if i < len && chars[i] == '>' {
+                    op.push('>');
+                    i += 1;
+                }
+                // Check for >&N (e.g. 2>&1)
+                if i < len && chars[i] == '&' {
+                    op.push('&');
+                    i += 1;
+                    // Consume the fd number (e.g. the "1" in 2>&1)
+                    while i < len && chars[i].is_ascii_digit() {
+                        op.push(chars[i]);
+                        i += 1;
+                    }
+                }
+                raw.push((op, Some(TokenType::Redirect)));
             }
             _ => {
                 current.push(ch);
+                i += 1;
             }
         }
     }
 
     if !current.is_empty() {
-        raw_tokens.push(current);
+        raw.push((current, None));
     }
 
-    // Classify each token
-    raw_tokens
-        .iter()
-        .enumerate()
-        .map(|(i, text)| {
-            let prev = if i > 0 {
-                Some(raw_tokens[i - 1].as_str())
+    // Classification pass: assign types to non-structural tokens
+    let mut tokens: Vec<CommandToken> = Vec::with_capacity(raw.len());
+    for (idx, (text, structural_type)) in raw.into_iter().enumerate() {
+        if let Some(tt) = structural_type {
+            let mut tok = CommandToken::new(text, tt);
+            // Structural tokens are locked (non-editable) except heredoc markers
+            if !matches!(tt, TokenType::HeredocMarker | TokenType::HeredocDelimiter) {
+                tok.locked = true;
+            }
+            tokens.push(tok);
+        } else {
+            let prev_text = if idx > 0 {
+                tokens.last().map(|t| t.text.as_str())
             } else {
                 None
             };
-            let token_type = classify_token(text, i, prev);
-            CommandToken::new(text.clone(), token_type)
-        })
-        .collect()
+            // Can't borrow tokens and call classify_token at the same time,
+            // so extract what we need first
+            let prev_token_text: Option<String> = prev_text.map(|s| s.to_string());
+            let prev_type = tokens.last().map(|t| t.token_type);
+            let token_type = classify_token(
+                &text,
+                idx,
+                prev_token_text.as_deref(),
+                prev_type,
+            );
+            tokens.push(CommandToken::new(text, token_type));
+        }
+    }
+
+    // Post-processing: collect heredoc bodies
+    collect_heredoc_bodies(&mut tokens);
+
+    tokens
+}
+
+/// Post-processes tokens to set up heredoc pair indices and lock body tokens.
+///
+/// The tokenizer now collects heredoc body/delimiter inline during tokenization.
+/// This pass links HeredocMarker ↔ HeredocDelimiter via pair_index, locks body
+/// tokens, and degrades unmatched markers to Argument.
+fn collect_heredoc_bodies(tokens: &mut Vec<CommandToken>) {
+    let mut i = 0;
+    while i < tokens.len() {
+        if tokens[i].token_type != TokenType::HeredocMarker {
+            i += 1;
+            continue;
+        }
+
+        let marker_idx = i;
+
+        // Find the matching HeredocDelimiter after this marker
+        let mut delim_idx = None;
+        for j in (marker_idx + 1)..tokens.len() {
+            if tokens[j].token_type == TokenType::HeredocDelimiter {
+                delim_idx = Some(j);
+                break;
+            }
+            // Stop if we hit another marker (nested heredocs)
+            if tokens[j].token_type == TokenType::HeredocMarker {
+                break;
+            }
+        }
+
+        match delim_idx {
+            Some(di) => {
+                // Set pair_index linking marker ↔ delimiter
+                tokens[marker_idx].pair_index = Some(di);
+                tokens[di].pair_index = Some(marker_idx);
+
+                // Ensure body tokens between marker and delimiter are locked
+                for j in (marker_idx + 1)..di {
+                    if tokens[j].token_type == TokenType::HeredocBody {
+                        tokens[j].locked = true;
+                    }
+                }
+
+                i = di + 1;
+            }
+            None => {
+                // No closing delimiter found — degrade marker to Argument
+                tokens[marker_idx].token_type = TokenType::Argument;
+                i += 1;
+            }
+        }
+    }
 }
 
 // ============================================================================
@@ -650,6 +1044,12 @@ impl CommandEditState {
             Some(TokenType::Path) => "path",
             Some(TokenType::Url) => "url",
             Some(TokenType::Locked) => "file",
+            Some(TokenType::Pipe) => "pipe",
+            Some(TokenType::Redirect) => "redir",
+            Some(TokenType::Operator) => "op",
+            Some(TokenType::HeredocMarker) => "heredoc",
+            Some(TokenType::HeredocBody) => "body",
+            Some(TokenType::HeredocDelimiter) => "delim",
             Some(TokenType::Argument) | None => "arg",
         }
     }
@@ -658,12 +1058,53 @@ impl CommandEditState {
     // Navigation
     // ========================================================================
 
-    /// Saves current edit to the selected token.
+    /// Saves current edit to the selected token, syncing heredoc pairs.
     fn save_current_edit(&mut self) {
-        if let Some(token) = self.tokens.get_mut(self.selected) {
+        let sel = self.selected;
+        if let Some(token) = self.tokens.get_mut(sel) {
             if !token.locked {
                 token.text = self.edit_buffer.clone();
             }
+        }
+        // Sync heredoc pair if this is a marker or delimiter
+        self.sync_heredoc_pair(sel);
+    }
+
+    /// Syncs heredoc pair when a marker or delimiter token has been edited.
+    fn sync_heredoc_pair(&mut self, edited_idx: usize) {
+        let (token_type, pair_idx, new_text) = {
+            let Some(token) = self.tokens.get(edited_idx) else {
+                return;
+            };
+            if !matches!(
+                token.token_type,
+                TokenType::HeredocMarker | TokenType::HeredocDelimiter
+            ) {
+                return;
+            }
+            let Some(pi) = token.pair_index else {
+                return;
+            };
+            (token.token_type, pi, token.text.clone())
+        };
+
+        match token_type {
+            TokenType::HeredocMarker => {
+                // Extract new delimiter from marker, update the closing delimiter
+                if let Some(new_delim) = extract_heredoc_delimiter(&new_text) {
+                    if let Some(delim_token) = self.tokens.get_mut(pair_idx) {
+                        delim_token.text = new_delim;
+                    }
+                }
+            }
+            TokenType::HeredocDelimiter => {
+                // Update marker to use new delimiter, preserving quote style
+                if let Some(marker_token) = self.tokens.get(pair_idx) {
+                    let new_marker = rebuild_heredoc_marker(&marker_token.text, &new_text);
+                    self.tokens[pair_idx].text = new_marker;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -678,18 +1119,47 @@ impl CommandEditState {
         }
     }
 
-    /// Moves to the next token.
+    /// Moves to the next editable token, skipping locked structural tokens.
     pub fn next(&mut self) {
-        if self.selected + 1 < self.tokens.len() {
-            self.select(self.selected + 1);
+        let mut target = self.selected + 1;
+        while target < self.tokens.len() && self.is_structural_locked(target) {
+            target += 1;
+        }
+        if target < self.tokens.len() {
+            self.select(target);
         }
     }
 
-    /// Moves to the previous token.
+    /// Moves to the previous editable token, skipping locked structural tokens.
     pub fn prev(&mut self) {
-        if self.selected > 0 {
-            self.select(self.selected - 1);
+        if self.selected == 0 {
+            return;
         }
+        let mut target = self.selected - 1;
+        while target > 0 && self.is_structural_locked(target) {
+            target -= 1;
+        }
+        if !self.is_structural_locked(target) {
+            self.select(target);
+        }
+    }
+
+    /// Returns true if the token at the given index is a locked structural token
+    /// that should be skipped during navigation.
+    fn is_structural_locked(&self, idx: usize) -> bool {
+        self.tokens
+            .get(idx)
+            .map(|t| {
+                t.locked
+                    && matches!(
+                        t.token_type,
+                        TokenType::Pipe
+                            | TokenType::Redirect
+                            | TokenType::Operator
+                            | TokenType::HeredocBody
+                    )
+            })
+            .unwrap_or(false)
     }
 
     // ========================================================================
@@ -716,20 +1186,45 @@ impl CommandEditState {
 
     /// Builds the final command from the edited tokens.
     /// Locked tokens (e.g., file paths) are POSIX-quoted if they contain spaces or special chars.
+    /// Heredoc body and delimiter tokens are joined with `\n` instead of space.
     pub fn build_command(&mut self) -> String {
         self.save_current_edit();
-        self.tokens
-            .iter()
-            .filter(|t| !t.text.is_empty())
-            .map(|t| {
-                if t.locked {
-                    quote_for_shell(&t.text)
+        let non_empty: Vec<&CommandToken> =
+            self.tokens.iter().filter(|t| !t.text.is_empty()).collect();
+        let mut result = String::new();
+        let mut prev_type: Option<TokenType> = None;
+        for t in &non_empty {
+            if !result.is_empty() {
+                // Use newline before heredoc body, delimiter, or after heredoc marker
+                if matches!(
+                    t.token_type,
+                    TokenType::HeredocBody | TokenType::HeredocDelimiter
+                ) || matches!(prev_type, Some(TokenType::HeredocMarker))
+                {
+                    result.push('\n');
                 } else {
-                    t.text.clone()
+                    result.push(' ');
                 }
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
+            }
+            // Don't POSIX-quote structural tokens, heredoc body, or delimiter
+            if matches!(
+                t.token_type,
+                TokenType::HeredocBody
+                    | TokenType::HeredocDelimiter
+                    | TokenType::Pipe
+                    | TokenType::Redirect
+                    | TokenType::Operator
+                    | TokenType::HeredocMarker
+            ) {
+                result.push_str(&t.text);
+            } else if t.locked {
+                result.push_str(&quote_for_shell(&t.text));
+            } else {
+                result.push_str(&t.text);
+            }
+            prev_type = Some(t.token_type);
+        }
+        result
     }
 
     /// Reclassifies all non-locked tokens based on their position.
@@ -738,12 +1233,30 @@ impl CommandEditState {
             if self.tokens[i].locked {
                 continue;
             }
-            let prev_text = if i > 0 {
-                Some(self.tokens[i - 1].text.as_str())
+            // Skip structural tokens — their type is fixed
+            if matches!(
+                self.tokens[i].token_type,
+                TokenType::Pipe
+                    | TokenType::Redirect
+                    | TokenType::Operator
+                    | TokenType::HeredocMarker
+                    | TokenType::HeredocBody
+                    | TokenType::HeredocDelimiter
+            ) {
+                continue;
+            }
+            let prev_text: Option<String> = if i > 0 {
+                Some(self.tokens[i - 1].text.clone())
             } else {
                 None
             };
-            self.tokens[i].token_type = classify_token(&self.tokens[i].text, i, prev_text);
+            let prev_type = if i > 0 {
+                Some(self.tokens[i - 1].token_type)
+            } else {
+                None
+            };
+            self.tokens[i].token_type =
+                classify_token(&self.tokens[i].text, i, prev_text.as_deref(), prev_type);
         }
     }
 
@@ -1264,6 +1777,10 @@ pub fn render_edit_mode_shared(
             } else {
                 edit_state.edit_buffer.clone()
             }
+        } else if token.token_type == TokenType::HeredocBody {
+            // Abbreviate heredoc body in the token strip
+            let line_count = token.text.lines().count();
+            format!("\u{00ab}{line_count} lines\u{00bb}")
         } else if token.text.is_empty() {
             "_".to_string()
         } else {
@@ -1271,7 +1788,16 @@ pub fn render_edit_mode_shared(
         };
         spans.push(Span::styled(display_text, token_style));
         spans.push(Span::styled("⟧", bstyle));
-        spans.push(Span::raw("   "));
+        // Tighter spacing for structural tokens
+        let gap = if matches!(
+            token.token_type,
+            TokenType::Pipe | TokenType::Redirect | TokenType::Operator
+        ) {
+            " "
+        } else {
+            "   "
+        };
+        spans.push(Span::raw(gap));
     }
 
     let token_line = Line::from(spans);
@@ -1325,21 +1851,35 @@ pub fn render_edit_mode_shared(
     ]);
     Paragraph::new(edit_line).render(layout.edit_input, buffer);
 
-    // Result preview
-    let result_preview: String = edit_state
-        .tokens
-        .iter()
-        .enumerate()
-        .map(|(i, t)| {
-            if i == edit_state.selected {
-                edit_state.edit_buffer.clone()
+    // Result preview — shows the actual command that will be executed (no abbreviation)
+    let result_preview: String = {
+        let mut result = String::new();
+        let mut prev_tt: Option<TokenType> = None;
+        for (i, t) in edit_state.tokens.iter().enumerate() {
+            let text = if i == edit_state.selected {
+                &edit_state.edit_buffer
             } else {
-                t.text.clone()
+                &t.text
+            };
+            if text.is_empty() {
+                continue;
             }
-        })
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
+            if !result.is_empty() {
+                if matches!(
+                    t.token_type,
+                    TokenType::HeredocBody | TokenType::HeredocDelimiter
+                ) || matches!(prev_tt, Some(TokenType::HeredocMarker))
+                {
+                    result.push('\n');
+                } else {
+                    result.push(' ');
+                }
+            }
+            result.push_str(text);
+            prev_tt = Some(t.token_type);
+        }
+        result
+    };
 
     let preview_changed = result_preview != edit_state.original;
     let preview_style = if preview_changed {
@@ -1682,5 +2222,433 @@ mod tests {
         assert_eq!(apply_quotes("hello", QuoteStyle::None), "hello");
         assert_eq!(apply_quotes("hello", QuoteStyle::Single), "'hello'");
         assert_eq!(apply_quotes("hello", QuoteStyle::Double), "\"hello\"");
+    }
+
+    // ── Operator-aware tokenizer tests ──
+
+    #[test]
+    fn test_tokenize_redirect_splits_from_path() {
+        let tokens = tokenize_command("echo hello >/dev/null");
+        assert_eq!(tokens.len(), 4);
+        assert_eq!(tokens[0].text, "echo");
+        assert_eq!(tokens[0].token_type, TokenType::Command);
+        assert_eq!(tokens[1].text, "hello");
+        assert_eq!(tokens[2].text, ">");
+        assert_eq!(tokens[2].token_type, TokenType::Redirect);
+        assert_eq!(tokens[3].text, "/dev/null");
+        assert_eq!(tokens[3].token_type, TokenType::Path);
+    }
+
+    #[test]
+    fn test_tokenize_pipe_classifies_next_as_command() {
+        let tokens = tokenize_command("ls -la | grep test");
+        assert_eq!(tokens.len(), 5);
+        assert_eq!(tokens[0].token_type, TokenType::Command);
+        assert_eq!(tokens[2].text, "|");
+        assert_eq!(tokens[2].token_type, TokenType::Pipe);
+        assert_eq!(tokens[3].text, "grep");
+        assert_eq!(tokens[3].token_type, TokenType::Command);
+    }
+
+    #[test]
+    fn test_tokenize_and_operator_classifies_next_as_command() {
+        let tokens = tokenize_command("mkdir foo && cd foo");
+        assert_eq!(tokens.len(), 5);
+        assert_eq!(tokens[0].token_type, TokenType::Command);
+        assert_eq!(tokens[2].text, "&&");
+        assert_eq!(tokens[2].token_type, TokenType::Operator);
+        assert_eq!(tokens[3].text, "cd");
+        assert_eq!(tokens[3].token_type, TokenType::Command);
+    }
+
+    #[test]
+    fn test_tokenize_fd_redirect() {
+        let tokens = tokenize_command("cmd 2>/dev/null");
+        assert_eq!(tokens.len(), 3);
+        assert_eq!(tokens[1].text, "2>");
+        assert_eq!(tokens[1].token_type, TokenType::Redirect);
+        assert_eq!(tokens[2].text, "/dev/null");
+    }
+
+    #[test]
+    fn test_tokenize_fd_redirect_with_ampersand() {
+        let tokens = tokenize_command("cmd 2>&1");
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[1].text, "2>&1");
+        assert_eq!(tokens[1].token_type, TokenType::Redirect);
+    }
+
+    #[test]
+    fn test_tokenize_newline_splits_tokens() {
+        let tokens = tokenize_command("echo hello\necho world");
+        assert_eq!(tokens.len(), 4);
+        assert_eq!(tokens[0].text, "echo");
+        assert_eq!(tokens[0].token_type, TokenType::Command);
+        assert_eq!(tokens[2].text, "echo");
+        // After newline without operator, second "echo" is classified as Argument
+        // (newline is just whitespace, not a structural operator like ; or &&)
+    }
+
+    #[test]
+    fn test_tokenize_operators_inside_quotes_not_split() {
+        let tokens = tokenize_command("echo '|&&||;'");
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[0].text, "echo");
+        assert_eq!(tokens[1].text, "'|&&||;'");
+        assert_eq!(tokens[1].token_type, TokenType::Argument);
+    }
+
+    #[test]
+    fn test_tokenize_semicolon_operator() {
+        let tokens = tokenize_command("echo a; echo b");
+        assert_eq!(tokens.len(), 5);
+        assert_eq!(tokens[2].text, ";");
+        assert_eq!(tokens[2].token_type, TokenType::Operator);
+        assert_eq!(tokens[3].text, "echo");
+        assert_eq!(tokens[3].token_type, TokenType::Command);
+    }
+
+    #[test]
+    fn test_tokenize_or_operator() {
+        let tokens = tokenize_command("test -f file || echo missing");
+        assert_eq!(tokens.len(), 6);
+        assert_eq!(tokens[3].text, "||");
+        assert_eq!(tokens[3].token_type, TokenType::Operator);
+        assert_eq!(tokens[4].text, "echo");
+        assert_eq!(tokens[4].token_type, TokenType::Command);
+    }
+
+    #[test]
+    fn test_tokenize_background_ampersand() {
+        let tokens = tokenize_command("sleep 10 &");
+        assert_eq!(tokens.len(), 3);
+        assert_eq!(tokens[2].text, "&");
+        assert_eq!(tokens[2].token_type, TokenType::Operator);
+    }
+
+    #[test]
+    fn test_tokenize_heredoc_marker_unterminated_degrades() {
+        // Without a closing delimiter, heredoc marker degrades to Argument
+        let tokens = tokenize_command("cat <<EOF");
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[0].text, "cat");
+        assert_eq!(tokens[1].text, "<<EOF");
+        assert_eq!(tokens[1].token_type, TokenType::Argument);
+    }
+
+    #[test]
+    fn test_tokenize_heredoc_marker_quoted_unterminated_degrades() {
+        let tokens = tokenize_command("cat <<'EOF'");
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[1].text, "<<'EOF'");
+        assert_eq!(tokens[1].token_type, TokenType::Argument);
+    }
+
+    #[test]
+    fn test_tokenize_heredoc_marker_with_dash_unterminated_degrades() {
+        let tokens = tokenize_command("cat <<-EOF");
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[1].text, "<<-EOF");
+        assert_eq!(tokens[1].token_type, TokenType::Argument);
+    }
+
+    #[test]
+    fn test_tokenize_here_string() {
+        let tokens = tokenize_command("cat <<< 'hello'");
+        assert_eq!(tokens.len(), 3);
+        assert_eq!(tokens[1].text, "<<<");
+        assert_eq!(tokens[1].token_type, TokenType::Redirect);
+    }
+
+    #[test]
+    fn test_tokenize_append_redirect() {
+        let tokens = tokenize_command("echo text >> file.log");
+        assert_eq!(tokens.len(), 4);
+        assert_eq!(tokens[2].text, ">>");
+        assert_eq!(tokens[2].token_type, TokenType::Redirect);
+    }
+
+    #[test]
+    fn test_tokenize_ampersand_redirect() {
+        let tokens = tokenize_command("cmd &>/dev/null");
+        assert_eq!(tokens.len(), 3);
+        assert_eq!(tokens[1].text, "&>");
+        assert_eq!(tokens[1].token_type, TokenType::Redirect);
+        assert_eq!(tokens[2].text, "/dev/null");
+    }
+
+    #[test]
+    fn test_tokenize_pipe_ampersand() {
+        let tokens = tokenize_command("cmd1 |& cmd2");
+        assert_eq!(tokens.len(), 3);
+        assert_eq!(tokens[1].text, "|&");
+        assert_eq!(tokens[1].token_type, TokenType::Pipe);
+        assert_eq!(tokens[2].text, "cmd2");
+        assert_eq!(tokens[2].token_type, TokenType::Command);
+    }
+
+    #[test]
+    fn test_tokenize_complex_pipeline() {
+        let tokens = tokenize_command("cat file | grep foo | wc -l");
+        assert_eq!(tokens.len(), 8);
+        assert_eq!(tokens[0].token_type, TokenType::Command); // cat
+        assert_eq!(tokens[2].token_type, TokenType::Pipe); // |
+        assert_eq!(tokens[3].token_type, TokenType::Command); // grep
+        assert_eq!(tokens[5].token_type, TokenType::Pipe); // |
+        assert_eq!(tokens[6].token_type, TokenType::Command); // wc
+    }
+
+    #[test]
+    fn test_tokenize_backward_compatible_simple_commands() {
+        // Ensure simple commands still tokenize exactly as before
+        let tokens = tokenize_command("git commit -m 'test message'");
+        assert_eq!(tokens.len(), 4);
+        assert_eq!(tokens[0].token_type, TokenType::Command);
+        assert_eq!(tokens[1].token_type, TokenType::Subcommand);
+        assert_eq!(tokens[2].token_type, TokenType::Flag);
+        assert_eq!(tokens[3].text, "'test message'");
+    }
+
+    #[test]
+    fn test_tokenize_redirect_input() {
+        let tokens = tokenize_command("sort < input.txt");
+        assert_eq!(tokens.len(), 3);
+        assert_eq!(tokens[1].text, "<");
+        assert_eq!(tokens[1].token_type, TokenType::Redirect);
+    }
+
+    #[test]
+    fn test_tokenize_structural_tokens_are_locked() {
+        let tokens = tokenize_command("echo hello | grep world > out.txt && cat out.txt");
+        // Pipes, redirects, and operators should be locked
+        for t in &tokens {
+            if matches!(
+                t.token_type,
+                TokenType::Pipe | TokenType::Redirect | TokenType::Operator
+            ) {
+                assert!(t.locked, "Token '{}' should be locked", t.text);
+            }
+        }
+    }
+
+    // ── Heredoc body collection tests ──
+
+    #[test]
+    fn test_tokenize_heredoc_full_with_body() {
+        let tokens = tokenize_command("cat <<'EOF'\nline1\nline2\nEOF");
+        assert_eq!(tokens.len(), 4); // cat, <<'EOF', body, EOF
+        assert_eq!(tokens[0].text, "cat");
+        assert_eq!(tokens[0].token_type, TokenType::Command);
+        assert_eq!(tokens[1].text, "<<'EOF'");
+        assert_eq!(tokens[1].token_type, TokenType::HeredocMarker);
+        assert_eq!(tokens[2].text, "line1\nline2");
+        assert_eq!(tokens[2].token_type, TokenType::HeredocBody);
+        assert!(tokens[2].locked);
+        assert_eq!(tokens[3].text, "EOF");
+        assert_eq!(tokens[3].token_type, TokenType::HeredocDelimiter);
+    }
+
+    #[test]
+    fn test_tokenize_heredoc_pair_index_links_marker_to_delimiter() {
+        let tokens = tokenize_command("cat <<EOF\nhello\nEOF");
+        let marker_idx = 1;
+        let delim_idx = 3;
+        assert_eq!(tokens[marker_idx].token_type, TokenType::HeredocMarker);
+        assert_eq!(tokens[delim_idx].token_type, TokenType::HeredocDelimiter);
+        assert_eq!(tokens[marker_idx].pair_index, Some(delim_idx));
+        assert_eq!(tokens[delim_idx].pair_index, Some(marker_idx));
+    }
+
+    #[test]
+    fn test_tokenize_heredoc_build_command_roundtrip() {
+        let tokens = tokenize_command("cat <<'EOF'\nline1\nline2\nEOF");
+        let mut state = CommandEditState::new(tokens, EditConfig::default());
+        let result = state.build_command();
+        assert_eq!(result, "cat <<'EOF'\nline1\nline2\nEOF");
+    }
+
+    #[test]
+    fn test_tokenize_heredoc_with_redirect() {
+        // Real-world: tee file >/dev/null <<'EOF'\nbody\nEOF
+        let tokens =
+            tokenize_command("sudo tee /etc/file >/dev/null <<'EOF'\nTypes: deb\nEOF");
+        // sudo, tee, /etc/file, >, /dev/null, <<'EOF', body, EOF
+        assert!(tokens.iter().any(|t| t.token_type == TokenType::HeredocMarker));
+        assert!(tokens.iter().any(|t| t.token_type == TokenType::HeredocBody));
+        assert!(tokens.iter().any(|t| t.token_type == TokenType::HeredocDelimiter));
+        assert!(tokens.iter().any(|t| t.token_type == TokenType::Redirect));
+    }
+
+    #[test]
+    fn test_tokenize_heredoc_empty_body() {
+        let tokens = tokenize_command("cat <<EOF\nEOF");
+        // cat, <<EOF, EOF (no body token for empty body)
+        assert_eq!(tokens.len(), 3);
+        assert_eq!(tokens[1].token_type, TokenType::HeredocMarker);
+        assert_eq!(tokens[2].token_type, TokenType::HeredocDelimiter);
+        assert_eq!(tokens[2].text, "EOF");
+    }
+
+    #[test]
+    fn test_extract_heredoc_delimiter_variants() {
+        assert_eq!(
+            extract_heredoc_delimiter("<<EOF"),
+            Some("EOF".to_string())
+        );
+        assert_eq!(
+            extract_heredoc_delimiter("<<'EOF'"),
+            Some("EOF".to_string())
+        );
+        assert_eq!(
+            extract_heredoc_delimiter("<<\"EOF\""),
+            Some("EOF".to_string())
+        );
+        assert_eq!(
+            extract_heredoc_delimiter("<<-EOF"),
+            Some("EOF".to_string())
+        );
+        assert_eq!(
+            extract_heredoc_delimiter("<<-'HEREDOC'"),
+            Some("HEREDOC".to_string())
+        );
+        assert_eq!(extract_heredoc_delimiter("<<"), None);
+    }
+
+    #[test]
+    fn test_rebuild_heredoc_marker() {
+        assert_eq!(rebuild_heredoc_marker("<<'EOF'", "END"), "<<'END'");
+        assert_eq!(rebuild_heredoc_marker("<<EOF", "END"), "<<END");
+        assert_eq!(rebuild_heredoc_marker("<<-'EOF'", "END"), "<<-'END'");
+        assert_eq!(
+            rebuild_heredoc_marker("<<\"EOF\"", "END"),
+            "<<\"END\""
+        );
+    }
+
+    // ── Phase 5: Navigation + pair sync tests ──
+
+    #[test]
+    fn test_navigation_skips_structural_locked_tokens() {
+        let tokens = tokenize_command("echo hello | grep world");
+        let mut state = CommandEditState::new(tokens, EditConfig::default());
+        // Start at "echo" (index 0)
+        assert_eq!(state.selected_token().unwrap().text, "echo");
+        state.next(); // Should skip to "hello" (index 1)
+        assert_eq!(state.selected_token().unwrap().text, "hello");
+        state.next(); // Should skip pipe (index 2, locked) → "grep" (index 3)
+        assert_eq!(state.selected_token().unwrap().text, "grep");
+        state.next(); // → "world" (index 4)
+        assert_eq!(state.selected_token().unwrap().text, "world");
+        state.prev(); // Should skip pipe → "grep"... wait, going backward from 4 → 3 is grep
+        assert_eq!(state.selected_token().unwrap().text, "grep");
+        state.prev(); // → "hello" (skip pipe)
+        assert_eq!(state.selected_token().unwrap().text, "hello");
+    }
+
+    #[test]
+    fn test_navigation_skips_heredoc_body() {
+        let tokens = tokenize_command("cat <<EOF\nhello\nEOF");
+        let mut state = CommandEditState::new(tokens, EditConfig::default());
+        assert_eq!(state.selected_token().unwrap().text, "cat");
+        state.next(); // → <<EOF (HeredocMarker, NOT locked, navigable)
+        assert_eq!(state.selected_token().unwrap().text, "<<EOF");
+        assert_eq!(
+            state.selected_token().unwrap().token_type,
+            TokenType::HeredocMarker
+        );
+        state.next(); // Should skip body (locked) → EOF delimiter
+        assert_eq!(state.selected_token().unwrap().text, "EOF");
+        assert_eq!(
+            state.selected_token().unwrap().token_type,
+            TokenType::HeredocDelimiter
+        );
+    }
+
+    #[test]
+    fn test_heredoc_pair_sync_marker_to_delimiter() {
+        let tokens = tokenize_command("cat <<'EOF'\nhello\nEOF");
+        let mut state = CommandEditState::new(tokens, EditConfig::default());
+        // Select the marker token (index 1)
+        state.select(1);
+        assert_eq!(state.edit_buffer, "<<'EOF'");
+        // Edit the marker to use a different delimiter
+        state.edit_buffer = "<<'HEREDOC'".to_string();
+        state.save_current_edit();
+        // The closing delimiter should be updated
+        let delim = state
+            .tokens
+            .iter()
+            .find(|t| t.token_type == TokenType::HeredocDelimiter)
+            .unwrap();
+        assert_eq!(delim.text, "HEREDOC");
+    }
+
+    #[test]
+    fn test_heredoc_pair_sync_delimiter_to_marker() {
+        let tokens = tokenize_command("cat <<'EOF'\nhello\nEOF");
+        let mut state = CommandEditState::new(tokens, EditConfig::default());
+        // Find the delimiter token index
+        let delim_idx = state
+            .tokens
+            .iter()
+            .position(|t| t.token_type == TokenType::HeredocDelimiter)
+            .unwrap();
+        state.select(delim_idx);
+        assert_eq!(state.edit_buffer, "EOF");
+        // Edit the delimiter
+        state.edit_buffer = "END".to_string();
+        state.save_current_edit();
+        // The marker should be updated
+        let marker = state
+            .tokens
+            .iter()
+            .find(|t| t.token_type == TokenType::HeredocMarker)
+            .unwrap();
+        assert_eq!(marker.text, "<<'END'");
+    }
+
+    #[test]
+    fn test_delete_pipe_reclassifies_tokens() {
+        let tokens = tokenize_command("echo hello | grep world");
+        let mut state = CommandEditState::new(tokens, EditConfig::default());
+        // "grep" at index 3 should be Command (after pipe)
+        assert_eq!(state.tokens[3].token_type, TokenType::Command);
+        // Delete the pipe token (index 2) — need to select it first
+        // The pipe is locked, so delete_token won't work. This is by design:
+        // structural tokens protect the command structure. Users remove them
+        // via other editing operations, not direct deletion.
+        // Instead, test that reclassify works if we manually remove it.
+        state.tokens.remove(2); // Remove the pipe
+        state.reclassify_tokens();
+        // "grep" should now be Argument (no longer after a pipe)
+        assert_eq!(state.tokens[2].text, "grep");
+        assert_eq!(state.tokens[2].token_type, TokenType::Argument);
+    }
+
+    #[test]
+    fn test_complex_heredoc_roundtrip() {
+        // The original motivating case from the bug report
+        let cmd = "sudo tee /etc/apt/sources.list.d/vscode.sources >/dev/null <<'EOF'\nTypes: deb\nURIs: https://packages.microsoft.com/repos/code\nSuites: stable\nComponents: main\nEOF";
+        let tokens = tokenize_command(cmd);
+
+        // Verify key token types
+        assert!(tokens.iter().any(|t| t.text == "sudo" && t.token_type == TokenType::Command));
+        assert!(tokens.iter().any(|t| t.text == ">" && t.token_type == TokenType::Redirect));
+        assert!(tokens
+            .iter()
+            .any(|t| t.text == "<<'EOF'" && t.token_type == TokenType::HeredocMarker));
+        assert!(tokens
+            .iter()
+            .any(|t| t.token_type == TokenType::HeredocBody));
+        assert!(tokens
+            .iter()
+            .any(|t| t.text == "EOF" && t.token_type == TokenType::HeredocDelimiter));
+
+        // Round-trip through build_command — note: `>/dev/null` becomes `> /dev/null`
+        // (semantically identical shell syntax, operators are now separate tokens)
+        let mut state = CommandEditState::new(tokens, EditConfig::default());
+        let result = state.build_command();
+        let expected = "sudo tee /etc/apt/sources.list.d/vscode.sources > /dev/null <<'EOF'\nTypes: deb\nURIs: https://packages.microsoft.com/repos/code\nSuites: stable\nComponents: main\nEOF";
+        assert_eq!(result, expected);
     }
 }

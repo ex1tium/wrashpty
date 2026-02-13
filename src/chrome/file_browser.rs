@@ -655,7 +655,7 @@ impl FileBrowserPanel {
                 let pipe_pos = edit_state.selected + 1;
                 edit_state
                     .tokens
-                    .insert(pipe_pos, CommandToken::new("|", TokenType::Argument));
+                    .insert(pipe_pos, CommandToken::new("|", TokenType::Pipe));
                 let empty_pos = pipe_pos + 1;
                 edit_state
                     .tokens
