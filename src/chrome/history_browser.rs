@@ -972,7 +972,7 @@ impl HistoryBrowserPanel {
                 let pipe_pos = edit_state.selected + 1;
                 edit_state
                     .tokens
-                    .insert(pipe_pos, CommandToken::new("|", TokenType::Argument));
+                    .insert(pipe_pos, CommandToken::new("|", TokenType::Pipe));
                 // Point to virtual "new token" position by creating an empty token
                 let empty_pos = pipe_pos + 1;
                 edit_state

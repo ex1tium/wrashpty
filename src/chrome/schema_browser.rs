@@ -327,7 +327,7 @@ impl SchemaBrowserPanel {
         for (seg_idx, items) in all_segments.iter().enumerate() {
             if seg_idx > 0 {
                 // Insert pipe separator between segments
-                tokens.push(CommandToken::new("|", TokenType::Argument));
+                tokens.push(CommandToken::new("|", TokenType::Pipe));
             }
 
             // First item is the command (locked)
@@ -805,18 +805,14 @@ impl SchemaBrowserPanel {
         }
 
         // Check command existence via `which` (synchronous, < 1ms)
-        match std::process::Command::new("which")
-            .arg(&text)
-            .output()
-        {
-            Ok(output) if output.status.success() => {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        match which::which(&text) {
+            Ok(path) => {
                 self.command_hint = Some(CommandHint::Found {
                     command: text,
-                    path,
+                    path: path.to_string_lossy().to_string(),
                 });
             }
-            _ => {
+            Err(_) => {
                 self.command_hint = Some(CommandHint::NotFound);
             }
         }

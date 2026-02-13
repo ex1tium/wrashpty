@@ -86,6 +86,12 @@ fn classify_token_role(token: &AnalyzedToken, position: usize) -> Option<&'stati
         (TokenType::Url, _) => Some("url"),
         (TokenType::Argument, _) => Some("argument"),
         (TokenType::Locked, _) => Some("locked"),
+        (TokenType::Pipe, _) => Some("pipe"),
+        (TokenType::Redirect, _) => Some("redirect"),
+        (TokenType::Operator, _) => Some("operator"),
+        (TokenType::HeredocMarker, _) => Some("heredoc_marker"),
+        (TokenType::HeredocBody, _) => Some("heredoc_body"),
+        (TokenType::HeredocDelimiter, _) => Some("heredoc_delimiter"),
         // Command appearing after position 0 is treated as subcommand
         (TokenType::Command, _) => Some("subcommand"),
     }

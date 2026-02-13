@@ -30,6 +30,8 @@ use command_schema_core::{CommandSchema, FlagSchema, SubcommandSchema, ValueType
 use rusqlite::Connection;
 use tracing::debug;
 
+use crate::chrome::command_edit::TokenType;
+
 use super::fuzzy;
 use super::patterns;
 use super::schema_provider::{SchemaMode, SchemaProvider};
@@ -444,7 +446,21 @@ fn resolve_subcommand_path(schema: &CommandSchema, context: &SuggestionContext) 
 
     for token in context.preceding_tokens.iter().skip(1) {
         let text = token.text.as_str();
-        if text.starts_with('-') || text == "|" || text == ">" || text == ">>" || text == "<" {
+        // Break on structural tokens (type-first, text-fallback for old DB data)
+        if matches!(
+            token.token_type,
+            TokenType::Pipe
+                | TokenType::Redirect
+                | TokenType::Operator
+                | TokenType::Flag
+                | TokenType::HeredocMarker
+                | TokenType::HeredocBody
+                | TokenType::HeredocDelimiter
+        ) || text == "|"
+            || text == ">"
+            || text == ">>"
+            || text == "<"
+        {
             break;
         }
 
@@ -600,7 +616,9 @@ fn suggest_pipe_commands(conn: &Connection, context: &SuggestionContext) -> Vec<
     let base_cmd = context
         .preceding_tokens
         .iter()
-        .take_while(|t| t.text != "|" && !t.text.ends_with('|'))
+        .take_while(|t| {
+            t.token_type != TokenType::Pipe && t.text != "|" && !t.text.ends_with('|')
+        })
         .map(|t| t.text.as_str())
         .next()
         .unwrap_or("");
