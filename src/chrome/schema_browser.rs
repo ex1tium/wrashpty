@@ -512,6 +512,14 @@ impl SchemaBrowserPanel {
                     edit_state.cycle_quote();
                     return PanelResult::Continue;
                 }
+                KeyCode::Char('l') => {
+                    edit_state.toggle_lock();
+                    return PanelResult::Continue;
+                }
+                KeyCode::Char('t') => {
+                    edit_state.toggle_strip_mode();
+                    return PanelResult::Continue;
+                }
                 _ => {}
             }
         }
@@ -556,11 +564,19 @@ impl SchemaBrowserPanel {
                 PanelResult::Continue
             }
             KeyCode::Up => {
-                edit_state.cycle_suggestion(-1);
+                if edit_state.strip_vertical {
+                    edit_state.prev();
+                } else {
+                    edit_state.cycle_suggestion(-1);
+                }
                 PanelResult::Continue
             }
             KeyCode::Down => {
-                edit_state.cycle_suggestion(1);
+                if edit_state.strip_vertical {
+                    edit_state.next();
+                } else {
+                    edit_state.cycle_suggestion(1);
+                }
                 PanelResult::Continue
             }
             KeyCode::Tab => {
@@ -659,7 +675,7 @@ impl SchemaBrowserPanel {
 
     /// Renders the edit mode UI.
     fn render_edit_mode(&self, buffer: &mut Buffer, area: Rect, edit_state: &CommandEditState) {
-        let Some(layout) = compute_edit_mode_layout(area) else {
+        let Some(layout) = compute_edit_mode_layout(area, edit_state.strip_vertical) else {
             return;
         };
 

@@ -196,7 +196,7 @@ impl FileBrowserPanel {
         area: Rect,
         edit_state: &CommandEditState,
     ) {
-        let Some(layout) = compute_edit_mode_layout(area) else {
+        let Some(layout) = compute_edit_mode_layout(area, edit_state.strip_vertical) else {
             return;
         };
 
@@ -577,6 +577,14 @@ impl FileBrowserPanel {
                     edit_state.cycle_quote();
                     return Some(PanelResult::Continue);
                 }
+                KeyCode::Char('l') => {
+                    edit_state.toggle_lock();
+                    return Some(PanelResult::Continue);
+                }
+                KeyCode::Char('t') => {
+                    edit_state.toggle_strip_mode();
+                    return Some(PanelResult::Continue);
+                }
                 _ => {}
             }
         }
@@ -627,11 +635,21 @@ impl FileBrowserPanel {
                 Some(PanelResult::Continue)
             }
             KeyCode::Up => {
-                edit_state.cycle_suggestion(-1);
+                if edit_state.strip_vertical {
+                    edit_state.prev();
+                    self.update_suggestions_with_file_context();
+                } else {
+                    edit_state.cycle_suggestion(-1);
+                }
                 Some(PanelResult::Continue)
             }
             KeyCode::Down => {
-                edit_state.cycle_suggestion(1);
+                if edit_state.strip_vertical {
+                    edit_state.next();
+                    self.update_suggestions_with_file_context();
+                } else {
+                    edit_state.cycle_suggestion(1);
+                }
                 Some(PanelResult::Continue)
             }
             KeyCode::Tab => {
@@ -1000,6 +1018,8 @@ impl Panel for FileBrowserPanel {
                 FooterEntry::action("^A", "Add"),
                 FooterEntry::action("^D", "Del"),
                 FooterEntry::action("^Z", "Undo"),
+                FooterEntry::action("^L", "Lock"),
+                FooterEntry::action("^T", "View"),
                 FooterEntry::action("Enter", "Run"),
                 FooterEntry::action("Esc", "Back"),
             ];
