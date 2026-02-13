@@ -19,6 +19,7 @@ use ratatui_core::widgets::Widget;
 use ratatui_widgets::paragraph::Paragraph;
 
 use super::theme::Theme;
+use crate::ui::scrolling_text::ScrollingText;
 
 // ============================================================================
 // Data types (mirrors RenderedSegment)
@@ -232,9 +233,11 @@ impl Widget for FooterBar<'_> {
     }
 }
 
-// ============================================================================
 // BorderLine widget
 // ============================================================================
+
+const BORDER_INFO_SIDE_PADDING: u16 = 2; // " info "
+const BORDER_INFO_RIGHT_MARGIN: u16 = 1; // keep right-most border glyph visible
 
 /// Horizontal border line with optional right-aligned info text.
 ///
@@ -244,6 +247,7 @@ impl Widget for FooterBar<'_> {
 pub struct BorderLine<'a> {
     theme: &'static Theme,
     info: Option<&'a str>,
+    marquee_frame: Option<u64>,
     border_char: char,
 }
 
@@ -253,6 +257,7 @@ impl<'a> BorderLine<'a> {
         Self {
             theme,
             info: None,
+            marquee_frame: None,
             border_char,
         }
     }
@@ -261,6 +266,22 @@ impl<'a> BorderLine<'a> {
     pub fn with_info(mut self, info: &'a str) -> Self {
         self.info = Some(info);
         self
+    }
+
+    /// Sets the frame index used for marquee rendering when info overflows.
+    pub fn with_marquee_frame(mut self, frame: u64) -> Self {
+        self.marquee_frame = Some(frame);
+        self
+    }
+
+    /// Returns true if `info` overflows the available border info viewport.
+    pub fn info_needs_marquee(info: &str, area_width: u16) -> bool {
+        let viewport = Self::info_viewport_cols(area_width);
+        viewport > 0 && ScrollingText::new(info).is_overflowing(viewport)
+    }
+
+    fn info_viewport_cols(area_width: u16) -> usize {
+        area_width.saturating_sub(BORDER_INFO_SIDE_PADDING + BORDER_INFO_RIGHT_MARGIN) as usize
     }
 }
 
@@ -281,25 +302,35 @@ impl Widget for BorderLine<'_> {
 
         // Overlay right-aligned info text if present
         if let Some(info) = self.info {
-            let info_display_width = crate::ui::text_width::display_width(info) as u16;
-            let padded_width = info_display_width + 2; // " info "
-            let info_start = area.x + area.width.saturating_sub(padded_width + 1);
+            let viewport_cols = Self::info_viewport_cols(area.width);
+            if viewport_cols == 0 {
+                return;
+            }
+
+            let scroller = ScrollingText::new(info).gap_cols(6).hold_frames(8);
+            let rendered_info = match self.marquee_frame {
+                Some(frame) if scroller.is_overflowing(viewport_cols) => {
+                    scroller.frame_text(viewport_cols, frame)
+                }
+                _ => crate::ui::text_width::truncate_to_width(info, viewport_cols).into_owned(),
+            };
+
+            let overlay = format!(" {rendered_info} ");
+            let overlay_width = crate::ui::text_width::display_width(&overlay) as u16;
+            let info_start = area.x
+                + area
+                    .width
+                    .saturating_sub(overlay_width + BORDER_INFO_RIGHT_MARGIN);
             let info_style = Style::default().fg(self.theme.text_secondary);
 
             let mut col: u16 = 0;
-            // Leading space
-            if let Some(cell) = buf.cell_mut((info_start, area.y)) {
-                cell.set_char(' ');
-                cell.set_style(info_style);
-            }
-            col += 1;
-
-            for ch in info.chars() {
+            let max_x = area.x + area.width.saturating_sub(BORDER_INFO_RIGHT_MARGIN);
+            for ch in overlay.chars() {
                 let ch_w = unicode_width::UnicodeWidthChar::width(ch)
                     .unwrap_or(1)
                     .max(1) as u16;
                 let x = info_start + col;
-                if x + ch_w <= area.x + area.width {
+                if x + ch_w <= max_x {
                     if let Some(cell) = buf.cell_mut((x, area.y)) {
                         cell.set_char(ch);
                         cell.set_style(info_style);
@@ -308,7 +339,7 @@ impl Widget for BorderLine<'_> {
                     if ch_w > 1 {
                         for i in 1..ch_w {
                             let trailing_x = x + i;
-                            if trailing_x < area.x + area.width {
+                            if trailing_x < max_x {
                                 if let Some(cell) = buf.cell_mut((trailing_x, area.y)) {
                                     cell.set_char(' ');
                                     cell.set_style(info_style);
@@ -318,15 +349,6 @@ impl Widget for BorderLine<'_> {
                     }
                 }
                 col += ch_w;
-            }
-
-            // Trailing space
-            let trail_x = info_start + col;
-            if trail_x < area.x + area.width {
-                if let Some(cell) = buf.cell_mut((trail_x, area.y)) {
-                    cell.set_char(' ');
-                    cell.set_style(info_style);
-                }
             }
         }
     }

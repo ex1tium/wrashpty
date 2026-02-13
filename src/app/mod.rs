@@ -42,7 +42,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use crossterm::event::{self, Event, KeyCode};
+use crossterm::event::{self, Event, KeyCode, MouseButton, MouseEventKind};
 use portable_pty::ExitStatus;
 use ratatui_core::buffer::Buffer;
 use ratatui_core::layout::Rect;
@@ -1225,6 +1225,7 @@ impl App {
         let mut fullscreen = false;
         let mut normal_panel_height: u16 = *panel_height;
         let mut _alt_screen = AltScreenGuard::new();
+        let mut left_mouse_selecting = false;
 
         loop {
             // Only render when needed (after input or on first draw)
@@ -1445,8 +1446,32 @@ impl App {
 
                             needs_redraw = true;
                         }
+                        Ok(Event::Mouse(mouse)) => {
+                            match mouse.kind {
+                                MouseEventKind::Down(MouseButton::Left)
+                                | MouseEventKind::Drag(MouseButton::Left) => {
+                                    left_mouse_selecting = true;
+                                }
+                                MouseEventKind::Up(MouseButton::Left) => {
+                                    left_mouse_selecting = false;
+                                }
+                                _ => {}
+                            }
+
+                            // Pause marquee animation while selecting text with the mouse.
+                            if let Some(tabbed_panel) =
+                                panel.as_any_mut().downcast_mut::<TabbedPanel>()
+                            {
+                                tabbed_panel.set_border_info_animation_paused(left_mouse_selecting);
+                            }
+
+                            // Keep current frame while selecting; on release, allow redraw.
+                            if !left_mouse_selecting {
+                                needs_redraw = true;
+                            }
+                        }
                         Ok(_) => {
-                            // Mouse or other events - ignore but don't redraw
+                            // Other events - ignore but don't redraw
                         }
                         Err(e) => {
                             warn!("Error reading event: {}", e);
@@ -1457,6 +1482,51 @@ impl App {
                 Ok(false) => {
                     // Timeout expired - check if we need to redraw for animation
                     if panel.is_animating() {
+                        // Fast path: when only border-info marquee is animating, redraw just that row.
+                        if !left_mouse_selecting {
+                            if let Some(tabbed_panel) =
+                                panel.as_any_mut().downcast_mut::<TabbedPanel>()
+                            {
+                                let full_area = Rect::new(0, 0, *cols, *panel_height);
+                                let title = if fullscreen {
+                                    " Wrashpty Panel (Esc to close, F10 restore) "
+                                } else {
+                                    " Wrashpty Panel (Esc to close, F10 fullscreen) "
+                                };
+                                let block = Block::default()
+                                    .borders(Borders::ALL)
+                                    .border_style(
+                                        Style::default().fg(tabbed_panel.theme().panel_border),
+                                    )
+                                    .title(title)
+                                    .title_style(
+                                        Style::default().fg(tabbed_panel.theme().header_fg),
+                                    );
+                                let inner_area = block.inner(full_area);
+
+                                if tabbed_panel.supports_partial_animation_row_render() {
+                                    let mut delta_buffer = Buffer::empty(full_area);
+                                    if let Some(dirty_row) = tabbed_panel
+                                        .render_border_info_animation_row(
+                                            &mut delta_buffer,
+                                            inner_area,
+                                        )
+                                    {
+                                        self.chrome
+                                            .render_panel_buffer(&delta_buffer, dirty_row)
+                                            .context("Failed to render border info animation row")?;
+
+                                        {
+                                            use std::io::Write;
+                                            std::io::stdout().flush()?;
+                                        }
+
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+
                         needs_redraw = true;
                     }
                 }
