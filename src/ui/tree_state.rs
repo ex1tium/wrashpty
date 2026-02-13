@@ -5,6 +5,8 @@
 //! own the backing data or expansion state — those stay with the caller,
 //! which provides them via closures to [`TreeViewState::rebuild`].
 
+use std::collections::HashSet;
+
 use super::scrollable_list::ScrollableList;
 use super::tree_view::TreeLine;
 
@@ -31,6 +33,12 @@ pub struct TreeViewState {
     tree_lines: Vec<TreeLine>,
     /// Selection and scroll management.
     scroll: ScrollableList,
+    /// Set of checked (multi-selected) node indices for O(1) lookup.
+    checked_set: HashSet<usize>,
+    /// Checked node indices in insertion order (for ordered iteration).
+    checked_order: Vec<usize>,
+    /// Whether multiselect mode is enabled.
+    multiselect_enabled: bool,
 }
 
 impl TreeViewState {
@@ -40,6 +48,9 @@ impl TreeViewState {
             visible: Vec::new(),
             tree_lines: Vec::new(),
             scroll: ScrollableList::new(),
+            checked_set: HashSet::new(),
+            checked_order: Vec::new(),
+            multiselect_enabled: false,
         }
     }
 
@@ -67,7 +78,29 @@ impl TreeViewState {
             }
         }
 
-        // Pass 2 — compute TreeLine metadata
+        self.recompute_tree_lines(nodes, &is_expanded);
+    }
+
+    /// Rebuilds from a pre-computed ordered list of visible indices.
+    ///
+    /// Use this when the caller needs to control the display order
+    /// (e.g., sorting command groups by relevance while filtering).
+    pub fn rebuild_from_ordered<T: TreeItem>(
+        &mut self,
+        nodes: &[T],
+        ordered_visible: Vec<usize>,
+        is_expanded: impl Fn(usize) -> bool,
+    ) {
+        self.visible = ordered_visible;
+        self.recompute_tree_lines(nodes, &is_expanded);
+    }
+
+    /// Computes TreeLine metadata from the current visible list.
+    fn recompute_tree_lines<T: TreeItem>(
+        &mut self,
+        nodes: &[T],
+        is_expanded: &impl Fn(usize) -> bool,
+    ) {
         self.tree_lines.clear();
         let vis_len = self.visible.len();
 
@@ -101,6 +134,7 @@ impl TreeViewState {
                 ancestor_is_last,
                 has_children,
                 is_expanded: expanded,
+                is_checked: self.checked_set.contains(&node_idx),
             });
         }
 
@@ -191,6 +225,133 @@ impl TreeViewState {
     /// Returns a mutable reference to the inner `ScrollableList`.
     pub fn scroll_mut(&mut self) -> &mut ScrollableList {
         &mut self.scroll
+    }
+
+    // ── Reordering ──
+
+    /// Sorts top-level groups in the visible list by a caller-supplied key.
+    ///
+    /// A "group" is a depth-0 node and all its descendants (consecutive
+    /// visible entries with depth > 0 that follow it). Groups are sorted
+    /// by the key returned for their root node index, using a stable sort
+    /// so that groups with equal keys keep their original relative order.
+    ///
+    /// After sorting, tree-line metadata is recomputed.
+    pub fn sort_groups<T: TreeItem, K: Ord>(
+        &mut self,
+        nodes: &[T],
+        is_expanded: impl Fn(usize) -> bool,
+        key_fn: impl Fn(usize) -> K,
+    ) {
+        if self.visible.is_empty() {
+            return;
+        }
+
+        // Collect groups: Vec<(start_vi, end_vi_exclusive)>
+        let groups = self.collect_groups(nodes);
+        if groups.len() <= 1 {
+            return;
+        }
+
+        // Sort group ranges by the key of their root node
+        let mut sorted: Vec<_> = groups
+            .iter()
+            .map(|&(start, end)| {
+                let root_node_idx = self.visible[start];
+                (start, end, key_fn(root_node_idx))
+            })
+            .collect();
+        sorted.sort_by(|a, b| a.2.cmp(&b.2));
+
+        // Rebuild the visible list in sorted group order
+        let mut new_visible = Vec::with_capacity(self.visible.len());
+        for &(start, end, _) in &sorted {
+            new_visible.extend_from_slice(&self.visible[start..end]);
+        }
+        self.visible = new_visible;
+
+        self.recompute_tree_lines(nodes, &is_expanded);
+    }
+
+    /// Collects group boundaries from the visible list.
+    ///
+    /// Returns `(start_vi, end_vi)` pairs where each group starts at a
+    /// depth-0 node and extends to (but excludes) the next depth-0 node.
+    fn collect_groups<T: TreeItem>(&self, nodes: &[T]) -> Vec<(usize, usize)> {
+        let mut groups = Vec::new();
+        let mut group_start = None;
+
+        for (vi, &node_idx) in self.visible.iter().enumerate() {
+            if nodes[node_idx].depth() == 0 {
+                if let Some(start) = group_start {
+                    groups.push((start, vi));
+                }
+                group_start = Some(vi);
+            }
+        }
+        if let Some(start) = group_start {
+            groups.push((start, self.visible.len()));
+        }
+
+        groups
+    }
+
+    // ── Multiselect ──
+
+    /// Enables multiselect mode.
+    pub fn enable_multiselect(&mut self) {
+        self.multiselect_enabled = true;
+    }
+
+    /// Disables multiselect mode and clears all checked items.
+    pub fn disable_multiselect(&mut self) {
+        self.multiselect_enabled = false;
+        self.checked_set.clear();
+        self.checked_order.clear();
+    }
+
+    /// Returns whether multiselect mode is enabled.
+    pub fn multiselect_enabled(&self) -> bool {
+        self.multiselect_enabled
+    }
+
+    /// Toggles the checked state of a node. Returns the new checked state.
+    ///
+    /// No-op if multiselect is not enabled.
+    pub fn toggle_checked(&mut self, node_idx: usize) -> bool {
+        if !self.multiselect_enabled {
+            return false;
+        }
+        if self.checked_set.contains(&node_idx) {
+            self.checked_set.remove(&node_idx);
+            self.checked_order.retain(|&i| i != node_idx);
+            false
+        } else {
+            self.checked_set.insert(node_idx);
+            self.checked_order.push(node_idx);
+            true
+        }
+    }
+
+    /// Returns whether a node is checked.
+    pub fn is_checked(&self, node_idx: usize) -> bool {
+        self.checked_set.contains(&node_idx)
+    }
+
+    /// Returns checked node indices in insertion order.
+    pub fn checked_indices(&self) -> &[usize] {
+        &self.checked_order
+    }
+
+    /// Returns the number of checked items.
+    pub fn checked_count(&self) -> usize {
+        self.checked_set.len()
+    }
+
+    /// Clears all checked items.
+    pub fn clear_checked(&mut self) {
+        self.checked_set.clear();
+        self.checked_order.clear();
     }
 }
 
@@ -573,5 +734,55 @@ mod tests {
         let mut tree = TreeViewState::new();
         tree.rebuild(&nodes, |_| true, |_| false);
         assert!(tree.parent_visible_idx(&nodes).is_none());
+    }
+
+    // ── Sorting and reordering ──
+
+    #[test]
+    fn test_sort_groups_reorders_depth0_groups() {
+        // Two groups: group A (nodes 0,1,2) and group B (nodes 3,4)
+        // B should sort before A based on key
+        let nodes = vec![n(0, true), n(1, false), n(1, false), n(0, true), n(1, false)];
+        let mut tree = TreeViewState::new();
+        tree.rebuild(&nodes, |_| true, |_| true);
+        assert_eq!(tree.visible(), &[0, 1, 2, 3, 4]);
+
+        // Sort: group B (root=3) gets key 0, group A (root=0) gets key 1
+        tree.sort_groups(&nodes, |_| true, |node_idx| if node_idx == 3 { 0 } else { 1 });
+        assert_eq!(tree.visible(), &[3, 4, 0, 1, 2]);
+
+        // Tree lines should be recomputed correctly
+        assert_eq!(tree.tree_lines()[0].depth, 0); // node 3
+        assert_eq!(tree.tree_lines()[1].depth, 1); // node 4
+        assert_eq!(tree.tree_lines()[2].depth, 0); // node 0
+    }
+
+    #[test]
+    fn test_sort_groups_stable_order() {
+        // Three groups with same key — order should be preserved
+        let nodes = vec![n(0, false), n(0, false), n(0, false)];
+        let mut tree = TreeViewState::new();
+        tree.rebuild(&nodes, |_| true, |_| false);
+        tree.sort_groups(&nodes, |_| false, |_| 0u8);
+        assert_eq!(tree.visible(), &[0, 1, 2]);
+    }
+
+    #[test]
+    fn test_sort_groups_single_group_noop() {
+        let nodes = vec![n(0, true), n(1, false)];
+        let mut tree = TreeViewState::new();
+        tree.rebuild(&nodes, |_| true, |_| true);
+        tree.sort_groups(&nodes, |_| true, |_| 0u8);
+        assert_eq!(tree.visible(), &[0, 1]);
+    }
+
+    #[test]
+    fn test_rebuild_from_ordered() {
+        let nodes = vec![n(0, false), n(0, false), n(0, false)];
+        let mut tree = TreeViewState::new();
+        // Show in reverse order
+        tree.rebuild_from_ordered(&nodes, vec![2, 1, 0], |_| false);
+        assert_eq!(tree.visible(), &[2, 1, 0]);
+        assert_eq!(tree.visible_count(), 3);
     }
 }

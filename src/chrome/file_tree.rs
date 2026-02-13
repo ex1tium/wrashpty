@@ -458,6 +458,7 @@ impl FileTreeState {
             ancestor_is_last: ancestor_is_last.to_vec(),
             has_children,
             is_expanded,
+            is_checked: false,
         };
 
         result.push(FlatEntry {

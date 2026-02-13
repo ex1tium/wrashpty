@@ -10,6 +10,7 @@ pub mod input_widgets;
 pub mod loading_widget;
 pub mod scrollable_list;
 pub mod scrolling_text;
+pub mod selection_ribbon;
 pub mod text_width;
 pub mod tree_state;
 pub mod tree_view;

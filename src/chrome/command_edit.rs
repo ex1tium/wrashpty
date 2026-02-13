@@ -550,9 +550,26 @@ impl CommandEditState {
     /// Locked token(s) for the command path, an empty argument token for
     /// user input, and schema flags pre-populated as suggestions.
     pub fn for_schema(command: &str, subcommand: Option<&str>, flags: Vec<String>) -> Self {
+        Self::for_schema_with_selections(command, subcommand, &[], flags)
+    }
+
+    /// Creates edit state with pre-selected flags already inserted as tokens.
+    ///
+    /// `selected_flags` are added as flag tokens between the command/subcommand
+    /// and the empty argument token. Remaining `suggestions` are available for
+    /// autocomplete.
+    pub fn for_schema_with_selections(
+        command: &str,
+        subcommand: Option<&str>,
+        selected_flags: &[String],
+        suggestions: Vec<String>,
+    ) -> Self {
         let mut tokens = vec![CommandToken::locked(command)];
         if let Some(sub) = subcommand {
             tokens.push(CommandToken::locked(sub));
+        }
+        for flag in selected_flags {
+            tokens.push(CommandToken::new(flag.clone(), TokenType::Flag));
         }
         tokens.push(CommandToken::new(String::new(), TokenType::Argument));
         let last_idx = tokens.len() - 1;
@@ -560,7 +577,7 @@ impl CommandEditState {
         // Select the empty argument token for editing
         state.selected = last_idx;
         state.edit_buffer.clear();
-        state.suggestions = flags;
+        state.suggestions = suggestions;
         state
     }
 
