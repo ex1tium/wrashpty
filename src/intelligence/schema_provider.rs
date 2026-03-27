@@ -6,7 +6,7 @@
 //! - [`FullSchemaProvider`] — backed by `command-schema-db` (bundled),
 //!   `command-schema-sqlite` (learned), and `command-schema-discovery`
 //!   (manual scan).
-//! - [`StubSchemaProvider`] — zero-cost stub when the feature is compiled out.
+//! - `StubSchemaProvider` — zero-cost stub when the feature is compiled out.
 //!
 //! The lookup order for `FullSchemaProvider` is:
 //! **learned** (SQLite `cs_*` tables) → **bundled** (in-memory `SchemaDatabase`) → `None`.

@@ -533,6 +533,12 @@ pub struct HistoryBrowserPanel {
     glyphs: &'static GlyphSet,
 }
 
+struct RenderRowContext<'a> {
+    area: Rect,
+    cols: &'a ColumnWidths,
+    show_metadata: bool,
+}
+
 impl HistoryBrowserPanel {
     /// Creates a new empty history browser.
     pub fn new(theme: &'static Theme, glyphs: &'static GlyphSet) -> Self {
@@ -1173,13 +1179,13 @@ impl HistoryBrowserPanel {
     fn render_row_line(
         &self,
         buffer: &mut Buffer,
-        area: Rect,
         record: &HistoryRecord,
         command_text: &str,
-        cols: &ColumnWidths,
         is_selected: bool,
-        show_metadata: bool,
+        ctx: RenderRowContext<'_>,
     ) {
+        let area = ctx.area;
+        let cols = ctx.cols;
         let base_style = if is_selected {
             Style::default().bg(self.theme.selection_bg)
         } else {
@@ -1188,7 +1194,7 @@ impl HistoryBrowserPanel {
         let dim = Style::default().fg(self.theme.text_secondary);
         // Keep multiline rendering stable: continuation lines never draw
         // column separators, regardless of selection state.
-        let hide_separators = !show_metadata;
+        let hide_separators = !ctx.show_metadata;
 
         // Fill background for selected row
         if is_selected {
@@ -1237,7 +1243,7 @@ impl HistoryBrowserPanel {
         x += 1;
 
         // When column
-        let time_text = if show_metadata {
+        let time_text = if ctx.show_metadata {
             self.format_relative_time(record)
         } else {
             String::new()
@@ -1273,7 +1279,7 @@ impl HistoryBrowserPanel {
         x += 1;
 
         // Duration column
-        let dur_text = if show_metadata {
+        let dur_text = if ctx.show_metadata {
             self.format_duration(record)
         } else {
             String::new()
@@ -1310,7 +1316,7 @@ impl HistoryBrowserPanel {
 
         // Count column (only in dedupe/frequency modes)
         if cols.count > 0 {
-            let count_text = if show_metadata {
+            let count_text = if ctx.show_metadata {
                 format!("{:>4}", record.execution_count)
             } else {
                 String::new()
@@ -1352,7 +1358,7 @@ impl HistoryBrowserPanel {
         }
 
         // Status column (last)
-        let (status_text, status_color) = if show_metadata {
+        let (status_text, status_color) = if ctx.show_metadata {
             self.format_exit_status(record)
         } else {
             ("", self.theme.text_secondary)
@@ -1487,12 +1493,14 @@ impl Panel for HistoryBrowserPanel {
                 let row_area = Rect::new(chunks[3].x, y, chunks[3].width, 1);
                 self.render_row_line(
                     buffer,
-                    row_area,
                     record,
                     command_line,
-                    &cols,
                     is_selected,
-                    line_idx == 0,
+                    RenderRowContext {
+                        area: row_area,
+                        cols: &cols,
+                        show_metadata: line_idx == 0,
+                    },
                 );
                 y += 1;
             }
