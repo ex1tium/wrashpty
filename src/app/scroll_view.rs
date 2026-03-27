@@ -2003,7 +2003,6 @@ impl App {
 }
 
 #[cfg(test)]
-#[allow(dead_code)]
 mod tests {
     use super::{
         ScrollAction, filter_offset_for_line_with_viewport, resolve_fold_target_line,

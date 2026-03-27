@@ -28,8 +28,6 @@ pub enum CommandAction {
     OpenPanel,
     /// Open the Settings panel on the Help subtab.
     OpenSettingsHelp,
-    /// Exit the application.
-    Exit,
 }
 
 /// Whether a command needs confirmation before executing.
