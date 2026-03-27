@@ -209,7 +209,7 @@ CREATE TABLE IF NOT EXISTS ci_commands (
     timestamp INTEGER NOT NULL,
     session_id INTEGER,                  -- ci_sessions.id (nullable)
     FOREIGN KEY (base_command_id) REFERENCES ci_tokens(id),
-    FOREIGN KEY (session_id) REFERENCES ci_sessions(id)
+    FOREIGN KEY (session_id) REFERENCES ci_sessions(id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS idx_ci_commands_hash ON ci_commands(command_hash);
 CREATE INDEX IF NOT EXISTS idx_ci_commands_base ON ci_commands(base_command_id);
@@ -226,11 +226,12 @@ CREATE TABLE IF NOT EXISTS ci_sequences (
     context_token_id INTEGER NOT NULL,   -- The preceding token
     context_position INTEGER NOT NULL,   -- Position in command (0, 1, 2, ...)
     base_command_id INTEGER,             -- The base command (git, docker, etc.)
+    base_command_key INTEGER GENERATED ALWAYS AS (COALESCE(base_command_id, -1)) STORED,
     next_token_id INTEGER NOT NULL,      -- What comes next
     frequency INTEGER DEFAULT 1,
     success_count INTEGER DEFAULT 0,
     last_seen INTEGER NOT NULL,
-    UNIQUE(context_token_id, context_position, base_command_id, next_token_id),
+    UNIQUE(context_token_id, context_position, base_command_key, next_token_id),
     FOREIGN KEY (context_token_id) REFERENCES ci_tokens(id),
     FOREIGN KEY (base_command_id) REFERENCES ci_tokens(id),
     FOREIGN KEY (next_token_id) REFERENCES ci_tokens(id)
@@ -273,12 +274,13 @@ CREATE TABLE IF NOT EXISTS ci_flag_values (
     id INTEGER PRIMARY KEY,
     base_command_id INTEGER NOT NULL,
     subcommand_id INTEGER,               -- Nullable for commands without subcommands
+    subcommand_key INTEGER GENERATED ALWAYS AS (COALESCE(subcommand_id, -1)) STORED,
     flag_text TEXT NOT NULL,
     value_text TEXT NOT NULL,
     value_type TEXT,                     -- port, path, number, url, etc.
     frequency INTEGER DEFAULT 1,
     last_seen INTEGER NOT NULL,
-    UNIQUE(base_command_id, subcommand_id, flag_text, value_text),
+    UNIQUE(base_command_id, subcommand_key, flag_text, value_text),
     FOREIGN KEY (base_command_id) REFERENCES ci_tokens(id),
     FOREIGN KEY (subcommand_id) REFERENCES ci_tokens(id)
 );
@@ -633,7 +635,7 @@ Cache entries are invalidated (deleted or refreshed) when:
 1. **Command Learning:** After `learn_command()` completes, invalidate cache entries
    matching the learned command's base command:
    ```sql
-   DELETE FROM ci_suggestion_cache WHERE cache_key LIKE '{base_command}:%';
+   DELETE FROM ci_suggestion_cache WHERE cache_key LIKE '%:{base_command}:%';
    ```
 
 2. **Pattern Updates:** After user pattern CRUD operations, invalidate all cache:

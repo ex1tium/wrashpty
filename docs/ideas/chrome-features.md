@@ -14,7 +14,7 @@ This document defines the Chrome feature set for wrashpty - a system of expandab
 
 ### Separation of Concerns
 
-```
+```text
 ┌────────────────────────────────────────────────────────────┐
 │ CHROME LAYER (rows 1 to N when expanded)                   │
 │ - Context bar (always row 1)                               │

@@ -161,7 +161,7 @@ test_format_duration      # which case?
 test_new                  # what type? what state?
 ```
 
-When writing or modifying tests, always apply this convention. When touching a test file, rename any non-conforming tests in the same `mod tests` block.
+When writing or modifying tests, always apply this convention. When touching a test file, only rename non-conforming tests in the same `mod tests` block during a substantial refactor or a dedicated cleanup PR; for focused bug fixes, keep the diff narrow and apply the convention to new or directly edited tests to avoid unrelated churn and merge conflicts.
 
 ### What to Test
 

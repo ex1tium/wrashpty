@@ -718,6 +718,9 @@ impl App {
             }
         }
 
+        self.command_registry
+            .expire_pending_confirmation(&mut self.chrome);
+
         // Redraw context bar right before reedline takes over
         // This ensures the bar is visible even if flush_pending wrote output that scrolled.
         // Note: We do NOT call position_cursor_in_scroll_region() here because:

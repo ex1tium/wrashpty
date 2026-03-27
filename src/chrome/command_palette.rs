@@ -15,6 +15,7 @@ use ratatui_widgets::paragraph::Paragraph;
 use regex::Regex;
 use tracing::debug;
 
+use super::file_browser::shell_quote;
 use super::footer_bar::FooterEntry;
 use super::panel::{Panel, PanelResult};
 use super::theme::Theme;
@@ -181,7 +182,7 @@ impl CommandPalettePanel {
                 self.items.push(CommandItem {
                     name: name.clone(),
                     description: crate::ui::text_width::truncate_to_width(&desc, 50).into_owned(),
-                    command: format!("npm run {}", name),
+                    command: format!("npm run -- {}", shell_quote(name)),
                     source: CommandSource::PackageJson,
                     frecency_score: 60.0,
                 });
@@ -307,7 +308,7 @@ impl CommandPalettePanel {
                 self.items.push(CommandItem {
                     name: name.to_string(),
                     description: format!("Script in {}/", dir_name),
-                    command: relative_path,
+                    command: shell_quote(&relative_path),
                     source: CommandSource::Script,
                     frecency_score: 40.0,
                 });
@@ -535,6 +536,7 @@ impl Panel for CommandPalettePanel {
 mod tests {
     use super::super::theme::AMBER_THEME;
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
     fn test_command_palette_panel_new_initial_state_empty_selection() {
@@ -549,6 +551,25 @@ mod tests {
         assert_eq!(CommandSource::Makefile.icon(), "M");
         assert_eq!(CommandSource::PackageJson.icon(), "N");
         assert_eq!(CommandSource::CargoToml.icon(), "C");
+    }
+
+    #[test]
+    fn test_load_package_json_scripts_when_name_contains_shell_metacharacters_quotes_name() {
+        let temp = tempdir().expect("temp dir");
+        std::fs::write(
+            temp.path().join("package.json"),
+            r#"{"scripts":{"build; touch /tmp/nope":"echo ok"}}"#,
+        )
+        .expect("package.json");
+
+        let mut panel = CommandPalettePanel::new(&AMBER_THEME);
+        panel.load_package_json_scripts(temp.path());
+
+        assert_eq!(panel.items.len(), 1);
+        assert_eq!(
+            panel.items[0].command,
+            "npm run -- 'build; touch /tmp/nope'"
+        );
     }
 
     #[test]

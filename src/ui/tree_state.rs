@@ -742,13 +742,23 @@ mod tests {
     fn test_sort_groups_reorders_depth0_groups() {
         // Two groups: group A (nodes 0,1,2) and group B (nodes 3,4)
         // B should sort before A based on key
-        let nodes = vec![n(0, true), n(1, false), n(1, false), n(0, true), n(1, false)];
+        let nodes = vec![
+            n(0, true),
+            n(1, false),
+            n(1, false),
+            n(0, true),
+            n(1, false),
+        ];
         let mut tree = TreeViewState::new();
         tree.rebuild(&nodes, |_| true, |_| true);
         assert_eq!(tree.visible(), &[0, 1, 2, 3, 4]);
 
         // Sort: group B (root=3) gets key 0, group A (root=0) gets key 1
-        tree.sort_groups(&nodes, |_| true, |node_idx| if node_idx == 3 { 0 } else { 1 });
+        tree.sort_groups(
+            &nodes,
+            |_| true,
+            |node_idx| if node_idx == 3 { 0 } else { 1 },
+        );
         assert_eq!(tree.visible(), &[3, 4, 0, 1, 2]);
 
         // Tree lines should be recomputed correctly

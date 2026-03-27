@@ -63,9 +63,9 @@ CREATE TABLE ci_command_hierarchy (
     -- Position in command (0 = base, 1 = subcommand, etc.)
     position INTEGER NOT NULL,
 
-    -- Parent token ID (NULL for position 0)
-    -- For "git commit": commit's parent is git
-    parent_token_id INTEGER,
+    -- Parent hierarchy node ID (NULL for position 0)
+    -- This captures the full learned prefix, not just the immediate token text.
+    parent_node_id INTEGER,
 
     -- Base command ID (for fast filtering)
     base_command_id INTEGER,
@@ -78,13 +78,13 @@ CREATE TABLE ci_command_hierarchy (
     -- Semantic classification learned over time
     role TEXT,  -- 'subcommand', 'flag', 'argument', 'value'
 
-    UNIQUE(token_id, position, parent_token_id, base_command_id),
+    UNIQUE(token_id, position, parent_node_id, base_command_id),
     FOREIGN KEY (token_id) REFERENCES ci_tokens(id),
-    FOREIGN KEY (parent_token_id) REFERENCES ci_tokens(id),
+    FOREIGN KEY (parent_node_id) REFERENCES ci_command_hierarchy(id),
     FOREIGN KEY (base_command_id) REFERENCES ci_tokens(id)
 );
 
-CREATE INDEX idx_hierarchy_parent ON ci_command_hierarchy(parent_token_id, position);
+CREATE INDEX idx_hierarchy_parent ON ci_command_hierarchy(parent_node_id, position);
 CREATE INDEX idx_hierarchy_base ON ci_command_hierarchy(base_command_id, position);
 ```
 
@@ -135,7 +135,7 @@ fn suggest_children(
         FROM ci_command_hierarchy h
         JOIN ci_tokens t ON t.id = h.token_id
         WHERE h.position = ?1
-          AND h.parent_token_id = (SELECT id FROM ci_tokens WHERE text = ?2)
+          AND h.parent_node_id = ?2
           AND h.base_command_id = (SELECT id FROM ci_tokens WHERE text = ?3)
         ORDER BY h.frequency DESC
         LIMIT 20

@@ -506,7 +506,7 @@ pub static UNICODE_GLYPHS: GlyphSet = GlyphSet {
         diamond: "\u{25c6}",    // ◆
         check_box: "\u{2611}",  // ☑
         empty_box: "\u{2610}",  // ☐
-        lock: "\u{02E1}",      // ˡ (modifier letter small l)
+        lock: "\u{02E1}",       // ˡ (modifier letter small l)
     },
     progress: ProgressGlyphs {
         bar: ['▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'],
@@ -585,7 +585,7 @@ pub static EMOJI_GLYPHS: GlyphSet = GlyphSet {
         diamond: "💠",
         check_box: "☑\u{fe0f}", // ☑️
         empty_box: "☐",
-        lock: "\u{1f512}",     // 🔒
+        lock: "\u{1f512}", // 🔒
     },
     progress: UNICODE_GLYPHS.progress,
     nav: NavGlyphs {

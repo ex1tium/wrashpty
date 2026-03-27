@@ -244,7 +244,19 @@ impl HelpView {
 
     /// Loads discovered project commands as help sections, grouped by source.
     pub fn load_project_commands(&mut self, items: &[CommandItem]) {
+        let project_titles = [
+            "Cargo Commands",
+            "npm Scripts",
+            "Makefile Targets",
+            "Just Recipes",
+            "Project Scripts",
+        ];
+        self.sections
+            .retain(|section| !project_titles.contains(&section.title.as_str()));
+
         if items.is_empty() {
+            self.recalculate_total_lines();
+            self.rebuild_filter();
             return;
         }
 
@@ -774,9 +786,10 @@ mod tests {
     }
 
     #[test]
-    fn test_load_project_commands_empty_is_noop() {
+    fn test_load_project_commands_when_empty_removes_project_sections() {
         let mut view = HelpView::new(&AMBER_THEME, GlyphTier::Unicode);
         let initial_count = view.sections.len();
+        view.load_project_commands(&make_test_items());
         view.load_project_commands(&[]);
         assert_eq!(view.sections.len(), initial_count);
     }

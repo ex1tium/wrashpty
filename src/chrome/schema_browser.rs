@@ -307,11 +307,8 @@ impl SchemaBrowserPanel {
     /// including any completed pipe segments.
     fn enter_edit_mode_from_selections(&mut self) {
         // Collect all segments: completed pipes + current selection
-        let mut all_segments: Vec<Vec<RibbonItem>> = self
-            .pipe_segments
-            .iter()
-            .map(|s| s.items.clone())
-            .collect();
+        let mut all_segments: Vec<Vec<RibbonItem>> =
+            self.pipe_segments.iter().map(|s| s.items.clone()).collect();
         let current = self.build_current_selection_items();
         if !current.is_empty() {
             all_segments.push(current);
@@ -391,9 +388,10 @@ impl SchemaBrowserPanel {
             .collect();
 
         let all_flags = if let Some(sub) = subcommand {
-            let sub_idx = self.nodes.iter().position(|n| {
-                matches!(n, TreeNode::Subcommand { name, .. } if name == sub)
-            });
+            let sub_idx = self
+                .nodes
+                .iter()
+                .position(|n| matches!(n, TreeNode::Subcommand { name, .. } if name == sub));
             if let Some(idx) = sub_idx {
                 self.collect_flags_for_subcommand(idx)
             } else {
@@ -812,9 +810,9 @@ impl SchemaBrowserPanel {
         }
 
         // Check if we already have a schema for this command
-        let already_known = self.nodes.iter().any(|n| {
-            matches!(n, TreeNode::Command { name, .. } if name.eq_ignore_ascii_case(&text))
-        });
+        let already_known = self.nodes.iter().any(
+            |n| matches!(n, TreeNode::Command { name, .. } if name.eq_ignore_ascii_case(&text)),
+        );
         if already_known {
             self.command_hint = None;
             return;
@@ -1004,12 +1002,11 @@ impl SchemaBrowserPanel {
         // only match via children (subcommands, flags, etc.).
         if has_filter && self.focused_schema.is_none() {
             let filter = &self.filter;
-            self.tree.sort_groups(nodes, is_expanded, |node_idx| {
-                match &nodes[node_idx] {
+            self.tree
+                .sort_groups(nodes, is_expanded, |node_idx| match &nodes[node_idx] {
                     TreeNode::Command { name, .. } if filter.matches(name) => 0u8,
                     _ => 1,
-                }
-            });
+                });
         }
 
         // Fix guide rails: depth-0 nodes (Commands) render as headers with
@@ -1227,12 +1224,8 @@ impl SchemaBrowserPanel {
         self.rebuild_visible();
 
         // Restore cursor to the same node, or fall back to first item
-        let restored = cursor_node.and_then(|orig| {
-            self.tree
-                .visible()
-                .iter()
-                .position(|&v| v == orig)
-        });
+        let restored =
+            cursor_node.and_then(|orig| self.tree.visible().iter().position(|&v| v == orig));
         if let Some(vi) = restored {
             let count = self.tree.visible_count();
             self.tree.scroll_mut().set_selection(vi, count);
@@ -1371,19 +1364,14 @@ impl SchemaBrowserPanel {
 
         for (idx, auto_implied) in all_indices {
             let text = match &self.nodes[idx] {
-                TreeNode::Command { name, .. } | TreeNode::Subcommand { name, .. } => {
-                    name.clone()
-                }
+                TreeNode::Command { name, .. } | TreeNode::Subcommand { name, .. } => name.clone(),
                 TreeNode::Flag { long, short, .. } => {
                     long.clone().or_else(|| short.clone()).unwrap_or_default()
                 }
                 TreeNode::Section { .. } => continue,
             };
             if !text.is_empty() {
-                items.push(RibbonItem {
-                    text,
-                    auto_implied,
-                });
+                items.push(RibbonItem { text, auto_implied });
             }
         }
 
@@ -1436,8 +1424,7 @@ impl Panel for SchemaBrowserPanel {
 
         // Compute ribbon height for layout (includes pipe segments)
         let ribbon_items = self.build_all_ribbon_items();
-        let ribbon_height =
-            SelectionRibbon::compute_height(&ribbon_items, area.width, 3);
+        let ribbon_height = SelectionRibbon::compute_height(&ribbon_items, area.width, 3);
 
         // Tick ribbon frame for marquee animation
         if ribbon_height > 0 {
@@ -1763,7 +1750,10 @@ impl Panel for SchemaBrowserPanel {
             if self.filter.has_filter() {
                 entries.push(FooterEntry::action("^D", "Discover"));
             }
-            entries.push(FooterEntry::action("Esc", if has_pipeline { "Undo" } else { "Close" }));
+            entries.push(FooterEntry::action(
+                "Esc",
+                if has_pipeline { "Undo" } else { "Close" },
+            ));
             entries
         }
     }

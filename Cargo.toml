@@ -48,10 +48,10 @@ getrandom = "0.2"
 anyhow = "1.0"
 thiserror = { workspace = true }
 
-# Zero-allocation collections for hot paths
+# Zero-allocation collections for hot paths; mature crate, pinned minor is sufficient, see docs/dependencies.md
 smallvec = "1.15.1"
 
-# ANSI styling (used by reedline)
+# ANSI styling for prompt/chrome rendering; stable release line used by shells, see docs/dependencies.md
 nu-ansi-term = "0.50"
 
 # Temporary file handling
@@ -94,17 +94,17 @@ chrono = { workspace = true }
 # Lazy static initialization
 once_cell = "1.19"
 
-# Clipboard access (for yank/copy feature)
+# Clipboard access for yank/copy; actively maintained cross-platform crate, see docs/dependencies.md
 arboard = "3"
 
-# Cross-platform command lookup
+# Cross-platform command lookup for discovery/execution helpers; widely used utility crate, see docs/dependencies.md
 which = "6"
 
 # Command schema integration (core types always available; heavy crates optional)
-command-schema-core = { git = "https://github.com/ex1tium/command-schema.git" }
-command-schema-discovery = { git = "https://github.com/ex1tium/command-schema.git", optional = true }
-command-schema-sqlite = { git = "https://github.com/ex1tium/command-schema.git", optional = true }
-command-schema-db = { git = "https://github.com/ex1tium/command-schema.git", optional = true }
+command-schema-core = { git = "https://github.com/ex1tium/command-schema.git", rev = "de7010360178b33c5e873ab302d9361f4c2e9741" }
+command-schema-discovery = { git = "https://github.com/ex1tium/command-schema.git", rev = "de7010360178b33c5e873ab302d9361f4c2e9741", optional = true }
+command-schema-sqlite = { git = "https://github.com/ex1tium/command-schema.git", rev = "de7010360178b33c5e873ab302d9361f4c2e9741", optional = true }
+command-schema-db = { git = "https://github.com/ex1tium/command-schema.git", rev = "de7010360178b33c5e873ab302d9361f4c2e9741", optional = true }
 
 [dev-dependencies]
 rexpect = "0.5"

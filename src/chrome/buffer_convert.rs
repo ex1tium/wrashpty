@@ -4,6 +4,8 @@
 //! ANSI escape sequences for direct terminal output, bypassing ratatui's
 //! Terminal abstraction to avoid conflicts with reedline.
 
+use std::borrow::Cow;
+
 use ratatui_core::buffer::Buffer;
 use ratatui_core::layout::Rect;
 use ratatui_core::style::{Color, Modifier, Style};
@@ -50,7 +52,8 @@ pub fn buffer_to_ansi(buffer: &Buffer, area: Rect) -> String {
                 }
 
                 let symbol = cell.symbol();
-                result.push_str(symbol);
+                let sanitized = sanitize_symbol(symbol);
+                result.push_str(&sanitized);
 
                 // If this symbol is wider than 1 column, skip the continuation cells
                 let w = UnicodeWidthStr::width(symbol);
@@ -65,6 +68,28 @@ pub fn buffer_to_ansi(buffer: &Buffer, area: Rect) -> String {
     result.push_str("\x1b[0m");
 
     result
+}
+
+fn sanitize_symbol(symbol: &str) -> Cow<'_, str> {
+    if !symbol
+        .chars()
+        .any(|ch| ch.is_control() || ('\u{7f}'..='\u{9f}').contains(&ch))
+    {
+        return Cow::Borrowed(symbol);
+    }
+
+    Cow::Owned(
+        symbol
+            .chars()
+            .map(|ch| {
+                if ch.is_control() || ('\u{7f}'..='\u{9f}').contains(&ch) {
+                    '\u{FFFD}'
+                } else {
+                    ch
+                }
+            })
+            .collect(),
+    )
 }
 
 /// Converts a ratatui `Style` to ANSI escape codes.
@@ -194,6 +219,18 @@ mod tests {
 
         // Should contain red foreground color code
         assert!(ansi.contains("31"));
+    }
+
+    #[test]
+    fn test_buffer_to_ansi_when_symbol_contains_escape_replaces_control_bytes() {
+        let area = Rect::new(0, 0, 1, 1);
+        let mut buffer = Buffer::empty(area);
+        buffer[(0, 0)].set_symbol("\u{1b}");
+
+        let ansi = buffer_to_ansi(&buffer, area);
+
+        assert!(!ansi.contains("\u{1b}\u{1b}"));
+        assert!(ansi.contains('\u{FFFD}'));
     }
 
     #[test]

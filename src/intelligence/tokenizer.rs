@@ -242,10 +242,7 @@ pub fn find_pipe_positions(tokens: &[AnalyzedToken]) -> Vec<usize> {
         .iter()
         .enumerate()
         .filter_map(|(i, t)| {
-            if t.token_type == TokenType::Pipe
-                || t.text == "|"
-                || t.text.ends_with('|')
-            {
+            if t.token_type == TokenType::Pipe || t.text == "|" || t.text.ends_with('|') {
                 Some(i)
             } else {
                 None
