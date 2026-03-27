@@ -51,6 +51,8 @@ pub struct DirEntry {
     pub path: PathBuf,
     /// Whether this is a directory.
     pub is_dir: bool,
+    /// Whether this entry is a symlink.
+    pub is_symlink: bool,
     /// File size in bytes.
     pub size: u64,
     /// Last modification time.
@@ -258,8 +260,15 @@ impl FileTreeState {
     }
 
     /// Toggles spotlight dimming.
-    pub fn toggle_spotlight(&mut self) {
+    pub fn toggle_spotlight(&mut self, selected_index: Option<usize>) {
         self.spotlight = !self.spotlight;
+        if let Some(selected_index) = selected_index {
+            self.update_focus(selected_index);
+        } else if !self.spotlight {
+            for entry in &mut self.flattened {
+                entry.in_focus_path = true;
+            }
+        }
     }
 
     /// Sets the git status for the tree.
@@ -359,8 +368,12 @@ impl FileTreeState {
                     }
 
                     let entry_path = dir_entry.path();
-                    let metadata = dir_entry.metadata().ok();
-                    let is_dir = entry_path.is_dir();
+                    let file_type = dir_entry.file_type().ok();
+                    let is_symlink = file_type
+                        .as_ref()
+                        .is_some_and(std::fs::FileType::is_symlink);
+                    let is_dir = file_type.as_ref().is_some_and(std::fs::FileType::is_dir);
+                    let metadata = fs::symlink_metadata(&entry_path).ok();
                     let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
                     let modified = metadata.as_ref().and_then(|m| m.modified().ok());
 
@@ -379,6 +392,7 @@ impl FileTreeState {
                         name,
                         path: entry_path,
                         is_dir,
+                        is_symlink,
                         size,
                         modified,
                         mode,
@@ -565,6 +579,7 @@ mod tests {
             name: name.to_string(),
             path: PathBuf::from(parent).join(name),
             is_dir: false,
+            is_symlink: false,
             size: 100,
             modified: None,
             mode: 0o644,
@@ -576,6 +591,7 @@ mod tests {
             name: name.to_string(),
             path: PathBuf::from(parent).join(name),
             is_dir: true,
+            is_symlink: false,
             size: 0,
             modified: None,
             mode: 0o755,
@@ -847,6 +863,38 @@ mod tests {
         // (it's at a different level than main.rs)
         // Actually, siblings at same depth... README is depth 0, main.rs is depth 1
         // So README.md should NOT be focused
+    }
+
+    #[test]
+    fn test_toggle_spotlight_with_selection_updates_focus_flags() {
+        let mut tree = mock_tree(vec![
+            dir_entry("src", "/test"),
+            file_entry("README.md", "/test"),
+        ]);
+
+        tree.toggle_spotlight(Some(1));
+
+        assert!(tree.spotlight);
+        assert!(tree.entries()[1].in_focus_path);
+    }
+
+    #[test]
+    fn test_flatten_symlink_directory_not_treated_as_expandable_directory() {
+        let mut tree = mock_tree(vec![DirEntry {
+            name: "linked".to_string(),
+            path: PathBuf::from("/test/linked"),
+            is_dir: false,
+            is_symlink: true,
+            size: 0,
+            modified: None,
+            mode: 0o755,
+        }]);
+
+        tree.expanded.insert(PathBuf::from("/test/linked"));
+        tree.flatten();
+
+        assert!(!tree.entries()[0].tree_line.has_children);
+        assert!(!tree.entries()[0].tree_line.is_expanded);
     }
 
     #[test]

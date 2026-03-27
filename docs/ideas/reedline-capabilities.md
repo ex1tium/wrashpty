@@ -17,7 +17,7 @@ Reedline is a modern line editor library for Rust, built as a readline/libedit r
 
 ## Architecture Overview
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │                        Reedline                              │
 │                                                              │
@@ -95,7 +95,7 @@ pub trait Prompt {
 
 #### Example Rich Prompt
 
-```
+```text
   ✓ ~/projects/wrashpty  main ●  2.3s  k8s:prod
   │
   └─▶ $

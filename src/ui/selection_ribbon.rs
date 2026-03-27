@@ -90,7 +90,7 @@ impl SelectionRibbon {
 
         if area.height == 1 {
             // Single row — use marquee if overflowing
-            let prefixed = format!("{}{}" , PROMPT_PREFIX, full_text);
+            let prefixed = format!("{}{}", PROMPT_PREFIX, full_text);
             if crate::ui::text_width::display_width(&prefixed) <= area.width as usize {
                 // Fits in one row: render with styles
                 let spans =
@@ -131,8 +131,9 @@ impl SelectionRibbon {
                     if row_display_width > area.width as usize {
                         // Last row overflows: use marquee for entire row
                         let marquee_text = format!("{}{}", PROMPT_PREFIX, row_text);
-                        let scroller =
-                            ScrollingText::new(&marquee_text).hold_frames(12).gap_cols(4);
+                        let scroller = ScrollingText::new(&marquee_text)
+                            .hold_frames(12)
+                            .gap_cols(4);
                         let text = scroller.frame_text(area.width as usize, frame);
                         let line = Line::from(Span::styled(text, cmd_style));
                         Paragraph::new(line).render(row_area, buffer);
@@ -194,7 +195,11 @@ impl SelectionRibbon {
 
     /// Wraps items into rows that fit within the given width.
     /// The provided `usable_width` already accounts for the prompt prefix.
-    fn wrap_into_rows(items: &[RibbonItem], usable_width: usize, max_rows: usize) -> Vec<Vec<&RibbonItem>> {
+    fn wrap_into_rows(
+        items: &[RibbonItem],
+        usable_width: usize,
+        max_rows: usize,
+    ) -> Vec<Vec<&RibbonItem>> {
         let mut rows: Vec<Vec<&RibbonItem>> = vec![vec![]];
         let mut current_width = 0usize;
 
@@ -268,9 +273,7 @@ mod tests {
 
     #[test]
     fn test_compute_height_multi_row() {
-        let items: Vec<RibbonItem> = (0..20)
-            .map(|i| item(&format!("--flag-{i}")))
-            .collect();
+        let items: Vec<RibbonItem> = (0..20).map(|i| item(&format!("--flag-{i}"))).collect();
         let h = SelectionRibbon::compute_height(&items, 40, 3);
         assert!(h > 1);
     }
@@ -301,7 +304,12 @@ mod tests {
 
     #[test]
     fn test_wrap_into_rows_overflow() {
-        let items = vec![item("git"), item("commit"), item("--verbose"), item("--message")];
+        let items = vec![
+            item("git"),
+            item("commit"),
+            item("--verbose"),
+            item("--message"),
+        ];
         let rows = SelectionRibbon::wrap_into_rows(&items, 15, 3);
         assert!(rows.len() > 1);
     }

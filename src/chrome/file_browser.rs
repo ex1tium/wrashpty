@@ -306,12 +306,36 @@ impl FileBrowserPanel {
         }
         let icons = &self.glyphs.icon;
         let entries = [
-            (GitFileStatus::Modified, icons.git_modified, self.theme.git_modified_fg),
-            (GitFileStatus::Added, icons.git_added, self.theme.git_added_fg),
-            (GitFileStatus::Deleted, icons.git_deleted, self.theme.git_deleted_fg),
-            (GitFileStatus::Untracked, icons.git_untracked, self.theme.git_untracked_fg),
-            (GitFileStatus::Renamed, icons.git_renamed, self.theme.git_renamed_fg),
-            (GitFileStatus::Conflict, icons.git_conflict, self.theme.git_conflict_fg),
+            (
+                GitFileStatus::Modified,
+                icons.git_modified,
+                self.theme.git_modified_fg,
+            ),
+            (
+                GitFileStatus::Added,
+                icons.git_added,
+                self.theme.git_added_fg,
+            ),
+            (
+                GitFileStatus::Deleted,
+                icons.git_deleted,
+                self.theme.git_deleted_fg,
+            ),
+            (
+                GitFileStatus::Untracked,
+                icons.git_untracked,
+                self.theme.git_untracked_fg,
+            ),
+            (
+                GitFileStatus::Renamed,
+                icons.git_renamed,
+                self.theme.git_renamed_fg,
+            ),
+            (
+                GitFileStatus::Conflict,
+                icons.git_conflict,
+                self.theme.git_conflict_fg,
+            ),
         ];
         let mut parts = Vec::new();
         for (status, icon, color) in entries {
@@ -947,7 +971,8 @@ impl Panel for FileBrowserPanel {
                 PanelResult::Continue
             }
             KeyCode::Char('m') => {
-                self.tree.toggle_spotlight();
+                let selected_tree_idx = self.display_to_tree_index(self.scroll.selection());
+                self.tree.toggle_spotlight(selected_tree_idx);
                 PanelResult::Continue
             }
             KeyCode::Char('r') => {

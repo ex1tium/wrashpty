@@ -555,22 +555,22 @@ impl Chrome {
     ///
     /// # Arguments
     ///
-    /// * `_total_rows` - Total terminal height (unused, kept for API compatibility)
+    /// * `total_rows` - Total terminal height
     ///
     /// # Errors
     ///
     /// Returns an error if escape sequences cannot be written to stdout.
-    pub fn clear_bars(&self, _total_rows: u16) -> io::Result<()> {
+    pub fn clear_bars(&self, total_rows: u16) -> io::Result<()> {
         // Lock stdout for atomic writes - prevents interleaving with other threads.
         let stdout = io::stdout();
         let mut out = stdout.lock();
 
-        // Clear top bar (context bar)
-        write!(out, "\x1b[1;1H")?; // Move to row 1
-        write!(out, "\x1b[K")?; // Clear line
+        for row in 1..=total_rows {
+            write!(out, "\x1b[{};1H\x1b[K", row)?;
+        }
 
         out.flush()?;
-        debug!("Context bar cleared");
+        debug!(rows = total_rows, "Chrome bars cleared");
         Ok(())
     }
 

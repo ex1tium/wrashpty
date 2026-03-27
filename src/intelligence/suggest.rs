@@ -616,9 +616,7 @@ fn suggest_pipe_commands(conn: &Connection, context: &SuggestionContext) -> Vec<
     let base_cmd = context
         .preceding_tokens
         .iter()
-        .take_while(|t| {
-            t.token_type != TokenType::Pipe && t.text != "|" && !t.text.ends_with('|')
-        })
+        .take_while(|t| t.token_type != TokenType::Pipe && t.text != "|" && !t.text.ends_with('|'))
         .map(|t| t.text.as_str())
         .next()
         .unwrap_or("");

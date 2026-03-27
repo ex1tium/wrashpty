@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tracing::warn;
 
@@ -78,9 +78,11 @@ pub struct CommandRegistry {
     commands: Vec<CommandDef>,
     /// Maps names and aliases to command index.
     lookup: HashMap<&'static str, usize>,
-    /// Pending confirmation: (command index, confirmation word).
-    pending_confirmation: Option<(usize, &'static str)>,
+    /// Pending confirmation: (command index, confirmation word, expires_at).
+    pending_confirmation: Option<(usize, &'static str, Instant)>,
 }
+
+const CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl fmt::Debug for CommandRegistry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -203,9 +205,11 @@ impl CommandRegistry {
     ) -> Option<CommandAction> {
         let trimmed = input.trim();
 
+        self.expire_pending_confirmation(chrome);
+
         // Check for pending confirmation first
-        if let Some((cmd_idx, confirm_word)) = self.pending_confirmation.take() {
-            if trimmed == confirm_word {
+        if let Some((cmd_idx, confirm_word, expires_at)) = self.pending_confirmation.take() {
+            if Instant::now() <= expires_at && trimmed == confirm_word {
                 chrome.clear_notifications();
                 let def = &self.commands[cmd_idx];
                 let mut ctx = CommandContext {
@@ -251,11 +255,11 @@ impl CommandRegistry {
 
         // Handle confirmation flow
         if let Confirmation::Required(word) = def.confirmation {
-            self.pending_confirmation = Some((idx, word));
+            self.pending_confirmation = Some((idx, word, Instant::now() + CONFIRMATION_TIMEOUT));
             chrome.notify(
                 format!("Type '{}' to confirm: {}", word, def.description),
                 NotificationStyle::Warning,
-                Duration::from_secs(10),
+                CONFIRMATION_TIMEOUT,
             );
             return Some(CommandAction::Handled);
         }
@@ -277,9 +281,23 @@ impl CommandRegistry {
         self.pending_confirmation = None;
     }
 
+    /// Clears a stale pending confirmation and the matching toast state.
+    pub fn expire_pending_confirmation(&mut self, chrome: &mut Chrome) {
+        if matches!(
+            self.pending_confirmation,
+            Some((_, _, expires_at)) if Instant::now() > expires_at
+        ) {
+            self.pending_confirmation = None;
+            chrome.clear_notifications();
+        }
+    }
+
     /// Returns whether a confirmation is pending.
     pub fn has_pending_confirmation(&self) -> bool {
-        self.pending_confirmation.is_some()
+        matches!(
+            self.pending_confirmation,
+            Some((_, _, expires_at)) if Instant::now() <= expires_at
+        )
     }
 
     /// Returns all command definitions for help display.
@@ -594,6 +612,18 @@ mod tests {
         // Wrong word clears pending (returns None because it's not a colon command,
         // but the pending confirmation is consumed by the attempt)
         let _ = registry.dispatch("nope", &mut chrome, &store);
+        assert!(!registry.has_pending_confirmation());
+    }
+
+    #[test]
+    fn test_dispatch_when_confirmation_expired_clears_pending() {
+        let mut registry = CommandRegistry::new();
+        let mut chrome = make_test_chrome();
+        let store = make_test_store();
+
+        registry.pending_confirmation = Some((1, "wipe", Instant::now() - Duration::from_secs(1)));
+
+        assert_eq!(registry.dispatch("wipe", &mut chrome, &store), None);
         assert!(!registry.has_pending_confirmation());
     }
 

@@ -300,7 +300,7 @@ checksum = "55b672471b4e9f9e95499ea597ff64941a309b2cdbffcc46f2cc5e2d971fd335"
 [[package]]
 name = "command-schema-core"
 version = "0.1.0"
-source = "git+https://github.com/ex1tium/command-schema.git#de7010360178b33c5e873ab302d9361f4c2e9741"
+source = "git+https://github.com/ex1tium/command-schema.git?rev=de7010360178b33c5e873ab302d9361f4c2e9741#de7010360178b33c5e873ab302d9361f4c2e9741"
 dependencies = [
  "serde",
  "serde_json",
@@ -310,7 +310,7 @@ dependencies = [
 [[package]]
 name = "command-schema-db"
 version = "0.1.0"
-source = "git+https://github.com/ex1tium/command-schema.git#de7010360178b33c5e873ab302d9361f4c2e9741"
+source = "git+https://github.com/ex1tium/command-schema.git?rev=de7010360178b33c5e873ab302d9361f4c2e9741#de7010360178b33c5e873ab302d9361f4c2e9741"
 dependencies = [
  "command-schema-core",
  "flate2",
@@ -324,7 +324,7 @@ dependencies = [
 [[package]]
 name = "command-schema-discovery"
 version = "0.1.0"
-source = "git+https://github.com/ex1tium/command-schema.git#de7010360178b33c5e873ab302d9361f4c2e9741"
+source = "git+https://github.com/ex1tium/command-schema.git?rev=de7010360178b33c5e873ab302d9361f4c2e9741#de7010360178b33c5e873ab302d9361f4c2e9741"
 dependencies = [
  "chrono",
  "command-schema-core",
@@ -341,7 +341,7 @@ dependencies = [
 [[package]]
 name = "command-schema-sqlite"
 version = "0.1.0"
-source = "git+https://github.com/ex1tium/command-schema.git#de7010360178b33c5e873ab302d9361f4c2e9741"
+source = "git+https://github.com/ex1tium/command-schema.git?rev=de7010360178b33c5e873ab302d9361f4c2e9741#de7010360178b33c5e873ab302d9361f4c2e9741"
 dependencies = [
  "command-schema-core",
  "command-schema-db",

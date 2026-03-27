@@ -304,6 +304,10 @@ pub enum DiscoveryResult {
 pub struct DiscoveryHandle {
     /// Channel to receive the result when ready.
     receiver: Receiver<DiscoveryResult>,
+    /// Shutdown signal for cooperative thread termination.
+    shutdown_tx: Sender<()>,
+    /// Completion signal emitted when the worker thread exits.
+    done_rx: Receiver<()>,
     /// Thread handle for cleanup on drop.
     thread_handle: Option<JoinHandle<()>>,
 }
@@ -328,9 +332,12 @@ impl DiscoveryHandle {
 
 impl Drop for DiscoveryHandle {
     fn drop(&mut self) {
-        // Ensure thread is joined to avoid leaking
+        let _ = self.shutdown_tx.send(());
+
         if let Some(handle) = self.thread_handle.take() {
-            let _ = handle.join();
+            if self.done_rx.recv_timeout(Duration::from_millis(100)).is_ok() {
+                let _ = handle.join();
+            }
         }
     }
 }

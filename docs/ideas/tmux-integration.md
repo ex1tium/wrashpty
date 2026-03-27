@@ -9,7 +9,7 @@ wrashpty instances running in different tmux panes can communicate and share dat
 
 ## How tmux Works (Context)
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────┐
 │                    tmux server                              │
 │            (persistent background process)                  │
@@ -86,7 +86,7 @@ tmux show-option -pv @wrashpty_cwd
 
 wrashpty instances could communicate directly:
 
-```
+```text
 ~/.wrashpty/
 ├── sockets/
 │   ├── %0.sock      # Pane %0's socket
@@ -125,7 +125,7 @@ impl History for SharedHistory {
 
 **User experience:**
 
-```
+```text
 # Pane 1: ~/projects/foo
 $ make build
 $ make test
@@ -141,6 +141,9 @@ $ <up arrow>  # Only shows commands from bar project
 
 ```rust
 fn broadcast_to_panes(command: &str) -> io::Result<()> {
+    let current_pane = tmux_command(&["display-message", "-p", "#{pane_id}"])?
+        .trim()
+        .to_string();
     let panes = tmux_command(&["list-panes", "-F", "#{pane_id}"])?;
 
     for pane in panes.lines() {
@@ -154,7 +157,7 @@ fn broadcast_to_panes(command: &str) -> io::Result<()> {
 
 **User experience:**
 
-```
+```bash
 $ @all cd /new/directory    # All panes cd together
 $ @all export DEBUG=1       # Set env in all panes
 ```
@@ -171,13 +174,14 @@ set -g status-right '#(tmux show-option -pv @wrashpty_status)'
 wrashpty updates this on state changes:
 
 ```rust
-fn update_tmux_status(&self) {
+fn update_tmux_status(&self) -> io::Result<()> {
     let status = format!("{} {} {}",
         self.cwd.file_name(),
         self.git_branch.as_deref().unwrap_or(""),
         if self.last_exit == 0 { "✓" } else { "✗" }
     );
-    tmux_command(&["set-option", "-p", "@wrashpty_status", &status]);
+    tmux_command(&["set-option", "-p", "@wrashpty_status", &status])?;
+    Ok(())
 }
 ```
 
@@ -186,18 +190,23 @@ fn update_tmux_status(&self) {
 When you `cd` in one pane, others can optionally follow:
 
 ```rust
-fn on_precmd(&mut self, cwd: &Path) {
+fn on_precmd(&mut self, cwd: &Path) -> io::Result<()> {
     if Some(cwd) != self.last_cwd.as_ref() {
         self.last_cwd = Some(cwd.to_owned());
 
         // Publish to tmux
-        tmux_command(&["set-option", "-p", "@wrashpty_cwd", cwd.to_str().unwrap()]);
+        let Some(cwd_str) = cwd.to_str() else {
+            tracing::warn!(path = %cwd.display(), "Skipping tmux cwd publish for non-UTF-8 path");
+            return Ok(());
+        };
+        tmux_command(&["set-option", "-p", "@wrashpty_cwd", cwd_str])?;
 
         // Optionally notify linked panes
         if self.sync_enabled {
             self.broadcast_cwd_change(cwd);
         }
     }
+    Ok(())
 }
 ```
 

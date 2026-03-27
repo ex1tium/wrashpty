@@ -662,12 +662,7 @@ pub fn tokenize_command(command: &str) -> Vec<CommandToken> {
             // so extract what we need first
             let prev_token_text: Option<String> = prev_text.map(|s| s.to_string());
             let prev_type = tokens.last().map(|t| t.token_type);
-            let token_type = classify_token(
-                &text,
-                idx,
-                prev_token_text.as_deref(),
-                prev_type,
-            );
+            let token_type = classify_token(&text, idx, prev_token_text.as_deref(), prev_type);
             tokens.push(CommandToken::new(text, token_type));
         }
     }
@@ -1882,12 +1877,10 @@ pub fn render_edit_mode_shared(
             } else {
                 3
             };
-            let token_width =
-                superscript_len + 1 + text_display_width + 1 + lock_width + gap_width;
+            let token_width = superscript_len + 1 + text_display_width + 1 + lock_width + gap_width;
 
             if i == edit_state.selected {
-                selected_x_end =
-                    selected_x_start + superscript_len + 1 + text_display_width + 1;
+                selected_x_end = selected_x_start + superscript_len + 1 + text_display_width + 1;
                 break;
             }
             selected_x_start += token_width;
@@ -2694,12 +2687,23 @@ mod tests {
     #[test]
     fn test_tokenize_heredoc_with_redirect() {
         // Real-world: tee file >/dev/null <<'EOF'\nbody\nEOF
-        let tokens =
-            tokenize_command("sudo tee /etc/file >/dev/null <<'EOF'\nTypes: deb\nEOF");
+        let tokens = tokenize_command("sudo tee /etc/file >/dev/null <<'EOF'\nTypes: deb\nEOF");
         // sudo, tee, /etc/file, >, /dev/null, <<'EOF', body, EOF
-        assert!(tokens.iter().any(|t| t.token_type == TokenType::HeredocMarker));
-        assert!(tokens.iter().any(|t| t.token_type == TokenType::HeredocBody));
-        assert!(tokens.iter().any(|t| t.token_type == TokenType::HeredocDelimiter));
+        assert!(
+            tokens
+                .iter()
+                .any(|t| t.token_type == TokenType::HeredocMarker)
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|t| t.token_type == TokenType::HeredocBody)
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|t| t.token_type == TokenType::HeredocDelimiter)
+        );
         assert!(tokens.iter().any(|t| t.token_type == TokenType::Redirect));
     }
 
@@ -2715,10 +2719,7 @@ mod tests {
 
     #[test]
     fn test_extract_heredoc_delimiter_variants() {
-        assert_eq!(
-            extract_heredoc_delimiter("<<EOF"),
-            Some("EOF".to_string())
-        );
+        assert_eq!(extract_heredoc_delimiter("<<EOF"), Some("EOF".to_string()));
         assert_eq!(
             extract_heredoc_delimiter("<<'EOF'"),
             Some("EOF".to_string())
@@ -2727,10 +2728,7 @@ mod tests {
             extract_heredoc_delimiter("<<\"EOF\""),
             Some("EOF".to_string())
         );
-        assert_eq!(
-            extract_heredoc_delimiter("<<-EOF"),
-            Some("EOF".to_string())
-        );
+        assert_eq!(extract_heredoc_delimiter("<<-EOF"), Some("EOF".to_string()));
         assert_eq!(
             extract_heredoc_delimiter("<<-'HEREDOC'"),
             Some("HEREDOC".to_string())
@@ -2743,10 +2741,7 @@ mod tests {
         assert_eq!(rebuild_heredoc_marker("<<'EOF'", "END"), "<<'END'");
         assert_eq!(rebuild_heredoc_marker("<<EOF", "END"), "<<END");
         assert_eq!(rebuild_heredoc_marker("<<-'EOF'", "END"), "<<-'END'");
-        assert_eq!(
-            rebuild_heredoc_marker("<<\"EOF\"", "END"),
-            "<<\"END\""
-        );
+        assert_eq!(rebuild_heredoc_marker("<<\"EOF\"", "END"), "<<\"END\"");
     }
 
     // ── Phase 5: Navigation + pair sync tests ──
@@ -2866,17 +2861,31 @@ mod tests {
         let tokens = tokenize_command(cmd);
 
         // Verify key token types
-        assert!(tokens.iter().any(|t| t.text == "sudo" && t.token_type == TokenType::Command));
-        assert!(tokens.iter().any(|t| t.text == ">" && t.token_type == TokenType::Redirect));
-        assert!(tokens
-            .iter()
-            .any(|t| t.text == "<<'EOF'" && t.token_type == TokenType::HeredocMarker));
-        assert!(tokens
-            .iter()
-            .any(|t| t.token_type == TokenType::HeredocBody));
-        assert!(tokens
-            .iter()
-            .any(|t| t.text == "EOF" && t.token_type == TokenType::HeredocDelimiter));
+        assert!(
+            tokens
+                .iter()
+                .any(|t| t.text == "sudo" && t.token_type == TokenType::Command)
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|t| t.text == ">" && t.token_type == TokenType::Redirect)
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|t| t.text == "<<'EOF'" && t.token_type == TokenType::HeredocMarker)
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|t| t.token_type == TokenType::HeredocBody)
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|t| t.text == "EOF" && t.token_type == TokenType::HeredocDelimiter)
+        );
 
         // Round-trip through build_command — note: `>/dev/null` becomes `> /dev/null`
         // (semantically identical shell syntax, operators are now separate tokens)

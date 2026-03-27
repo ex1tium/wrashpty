@@ -130,7 +130,9 @@ impl App {
             let proc_cwd = format!("/proc/{}/cwd", pid);
             match std::fs::read_link(&proc_cwd) {
                 Ok(cwd) => return cwd,
-                Err(e) => debug!(pid = %pid, path = %proc_cwd, error = %e, "failed to read shell cwd, falling back to parent process cwd"),
+                Err(e) => {
+                    debug!(pid = %pid, path = %proc_cwd, error = %e, "failed to read shell cwd, falling back to parent process cwd")
+                }
             }
         }
         // Fallback to parent process cwd
@@ -217,9 +219,6 @@ impl App {
     pub(super) fn transition_to_injecting(&mut self) -> Result<()> {
         info!(from = ?self.mode, to = ?Mode::Injecting, "Mode transition");
 
-        // Record command start time for duration tracking
-        self.command_start_time = Some(Instant::now());
-
         // Ensure raw mode is active - reedline may have toggled terminal modes.
         // This is critical for control character passthrough during command injection.
         self.terminal_guard
@@ -252,6 +251,7 @@ impl App {
             effective_rows, "PTY size synchronized for command execution"
         );
 
+        self.command_start_time = Some(Instant::now());
         self.mode = Mode::Injecting;
         self.injection_start = Some(Instant::now());
         Ok(())
@@ -441,5 +441,4 @@ impl App {
 
         result
     }
-
 }
