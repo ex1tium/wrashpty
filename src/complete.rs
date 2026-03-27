@@ -735,18 +735,89 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_git_complete_in_git_repo() {
-        let completer = GitCompleter::new();
-        // This test runs in the wrashpty repo, so .git should exist
-        let suggestions = completer.complete_git_branch("");
-        // Should find at least one branch (main or master)
-        // If not in a git repo, this will be empty which is fine
-        if Path::new(".git").exists() {
-            assert!(
-                !suggestions.is_empty(),
-                "Expected branches in git repository"
-            );
+        use tempfile::TempDir;
+
+        struct CurrentDirGuard(PathBuf);
+
+        impl Drop for CurrentDirGuard {
+            fn drop(&mut self) {
+                let _ = env::set_current_dir(&self.0);
+            }
         }
+
+        let temp_dir = TempDir::new().expect("temp dir");
+        let repo_path = temp_dir.path();
+
+        assert!(
+            Command::new("git")
+                .args(["init"])
+                .current_dir(repo_path)
+                .status()
+                .expect("git init")
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args(["config", "user.email", "ci@example.invalid"])
+                .current_dir(repo_path)
+                .status()
+                .expect("git config user.email")
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args(["config", "user.name", "CI"])
+                .current_dir(repo_path)
+                .status()
+                .expect("git config user.name")
+                .success()
+        );
+
+        fs::write(repo_path.join("README.md"), "test\n").expect("write README");
+        assert!(
+            Command::new("git")
+                .args(["add", "README.md"])
+                .current_dir(repo_path)
+                .status()
+                .expect("git add")
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args(["commit", "-m", "init"])
+                .current_dir(repo_path)
+                .status()
+                .expect("git commit")
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args(["branch", "test-branch"])
+                .current_dir(repo_path)
+                .status()
+                .expect("git branch test-branch")
+                .success()
+        );
+
+        let current_dir = env::current_dir().expect("current dir");
+        let _restore_dir = CurrentDirGuard(current_dir);
+        env::set_current_dir(repo_path).expect("change to temp repo");
+
+        let completer = GitCompleter::new();
+        let suggestions = completer.complete_git_branch("");
+
+        assert!(
+            suggestions
+                .iter()
+                .any(|suggestion| suggestion.value == "test-branch"),
+            "Expected test-branch in suggestions, got {:?}",
+            suggestions
+                .iter()
+                .map(|suggestion| suggestion.value.as_str())
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
