@@ -63,8 +63,8 @@ impl GlyphTier {
         }
     }
 
-    /// Parses a tier from a persisted label string.
-    pub fn from_label(s: &str) -> Option<Self> {
+    /// Parses a tier from a persisted label string, returning `None` if unrecognised.
+    pub fn try_from_label(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "ascii" => Some(Self::Ascii),
             "unicode" => Some(Self::Unicode),
@@ -350,6 +350,7 @@ impl GlyphSet {
 // Tier 1: ASCII — pure 7-bit ASCII, serial-safe
 // ---------------------------------------------------------------------------
 
+/// ASCII-only glyph set used as the default minimal fallback, safe on any terminal.
 pub static ASCII_GLYPHS: GlyphSet = GlyphSet {
     tree: TreeGlyphs {
         vertical: "|",
@@ -456,6 +457,7 @@ pub static ASCII_GLYPHS: GlyphSet = GlyphSet {
 // Tier 2: Unicode — box-drawing + geometric shapes, modern terminals
 // ---------------------------------------------------------------------------
 
+/// Unicode glyph set using box-drawing characters and geometric shapes for modern terminals.
 pub static UNICODE_GLYPHS: GlyphSet = GlyphSet {
     tree: TreeGlyphs {
         vertical: "│",
@@ -562,6 +564,7 @@ pub static UNICODE_GLYPHS: GlyphSet = GlyphSet {
 // Tier 3: Emoji — standard Unicode emoji, most modern terminals
 // ---------------------------------------------------------------------------
 
+/// Emoji glyph set adding standard Unicode emoji indicators for terminals with emoji support.
 pub static EMOJI_GLYPHS: GlyphSet = GlyphSet {
     // Tree and border share the Unicode tier (emoji doesn't improve these)
     tree: UNICODE_GLYPHS.tree,
@@ -629,6 +632,7 @@ pub static EMOJI_GLYPHS: GlyphSet = GlyphSet {
 // Tier 4: NerdFont — patched font glyphs from the Private Use Area
 // ---------------------------------------------------------------------------
 
+/// Nerd Font glyph set using Private Use Area codepoints from patched fonts for rich iconography.
 pub static NERD_FONT_GLYPHS: GlyphSet = GlyphSet {
     tree: UNICODE_GLYPHS.tree,
     border: UNICODE_GLYPHS.border,
@@ -736,12 +740,18 @@ mod tests {
 
     #[test]
     fn test_glyph_tier_from_label() {
-        assert_eq!(GlyphTier::from_label("ascii"), Some(GlyphTier::Ascii));
-        assert_eq!(GlyphTier::from_label("Unicode"), Some(GlyphTier::Unicode));
-        assert_eq!(GlyphTier::from_label("EMOJI"), Some(GlyphTier::Emoji));
-        assert_eq!(GlyphTier::from_label("NerdFont"), Some(GlyphTier::NerdFont));
-        assert_eq!(GlyphTier::from_label("nerd"), Some(GlyphTier::NerdFont));
-        assert_eq!(GlyphTier::from_label("bogus"), None);
+        assert_eq!(GlyphTier::try_from_label("ascii"), Some(GlyphTier::Ascii));
+        assert_eq!(
+            GlyphTier::try_from_label("Unicode"),
+            Some(GlyphTier::Unicode)
+        );
+        assert_eq!(GlyphTier::try_from_label("EMOJI"), Some(GlyphTier::Emoji));
+        assert_eq!(
+            GlyphTier::try_from_label("NerdFont"),
+            Some(GlyphTier::NerdFont)
+        );
+        assert_eq!(GlyphTier::try_from_label("nerd"), Some(GlyphTier::NerdFont));
+        assert_eq!(GlyphTier::try_from_label("bogus"), None);
     }
 
     #[test]
@@ -752,7 +762,7 @@ mod tests {
             GlyphTier::Emoji,
             GlyphTier::NerdFont,
         ] {
-            assert_eq!(GlyphTier::from_label(tier.label()), Some(tier));
+            assert_eq!(GlyphTier::try_from_label(tier.label()), Some(tier));
         }
     }
 

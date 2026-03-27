@@ -4,6 +4,12 @@ DEVOPS_CSV ?= schemas/command-lists/dev-devops-toolchains.csv
 CUSTOM_CSV ?= schemas/command-lists/custom-tools.csv
 COMMAND_SCHEMA_BIN ?= command-schema-discovery
 
+# Normalize one or more CSV files into a deduplicated comma-separated command list.
+# Usage: commands="$$($(call CSV_NORMALIZE,file1.csv file2.csv))"
+define CSV_NORMALIZE
+cat $(1) | tr ',' '\n' | sed 's/\r//g' | sed '/^[[:space:]]*$$/d' | awk '!seen[$$0]++' | paste -sd, -
+endef
+
 # Install the extractor CLI with:
 #   cargo install --git https://github.com/ex1tium/command-schema.git command-schema-discovery
 # or override COMMAND_SCHEMA_BIN=/path/to/command-schema-discovery when running make.
@@ -13,37 +19,37 @@ COMMAND_SCHEMA_BIN ?= command-schema-discovery
 .PHONY: schema-validate schema-snapshot-test
 
 schema-extract-superuser:
-	@commands="$$(cat "$(SUPERUSER_CSV)" | tr ',' '\n' | sed 's/\r//g' | sed '/^[[:space:]]*$$/d' | awk '!seen[$$0]++' | paste -sd, -)"; \
+	@commands="$$($(call CSV_NORMALIZE,"$(SUPERUSER_CSV)"))"; \
 	"$(COMMAND_SCHEMA_BIN)" extract --commands "$$commands" --output "$(SCHEMA_OUTPUT)"
 
 schema-extract-devops:
-	@commands="$$(cat "$(DEVOPS_CSV)" | tr ',' '\n' | sed 's/\r//g' | sed '/^[[:space:]]*$$/d' | awk '!seen[$$0]++' | paste -sd, -)"; \
+	@commands="$$($(call CSV_NORMALIZE,"$(DEVOPS_CSV)"))"; \
 	"$(COMMAND_SCHEMA_BIN)" extract --commands "$$commands" --output "$(SCHEMA_OUTPUT)"
 
 schema-extract-custom:
-	@commands="$$(cat "$(CUSTOM_CSV)" | tr ',' '\n' | sed 's/\r//g' | sed '/^[[:space:]]*$$/d' | awk '!seen[$$0]++' | paste -sd, -)"; \
+	@commands="$$($(call CSV_NORMALIZE,"$(CUSTOM_CSV)"))"; \
 	if [ -z "$$commands" ]; then echo "custom-tools.csv is empty"; exit 1; fi; \
 	"$(COMMAND_SCHEMA_BIN)" extract --commands "$$commands" --output "$(SCHEMA_OUTPUT)"
 
 schema-extract-all:
-	@commands="$$(cat "$(SUPERUSER_CSV)" "$(DEVOPS_CSV)" "$(CUSTOM_CSV)" | tr ',' '\n' | sed 's/\r//g' | sed '/^[[:space:]]*$$/d' | awk '!seen[$$0]++' | paste -sd, -)"; \
+	@commands="$$($(call CSV_NORMALIZE,"$(SUPERUSER_CSV)" "$(DEVOPS_CSV)" "$(CUSTOM_CSV)"))"; \
 	"$(COMMAND_SCHEMA_BIN)" extract --commands "$$commands" --output "$(SCHEMA_OUTPUT)"
 
 schema-extract-superuser-installed:
-	@commands="$$(cat "$(SUPERUSER_CSV)" | tr ',' '\n' | sed 's/\r//g' | sed '/^[[:space:]]*$$/d' | awk '!seen[$$0]++' | paste -sd, -)"; \
+	@commands="$$($(call CSV_NORMALIZE,"$(SUPERUSER_CSV)"))"; \
 	"$(COMMAND_SCHEMA_BIN)" extract --commands "$$commands" --installed-only --output "$(SCHEMA_OUTPUT)"
 
 schema-extract-devops-installed:
-	@commands="$$(cat "$(DEVOPS_CSV)" | tr ',' '\n' | sed 's/\r//g' | sed '/^[[:space:]]*$$/d' | awk '!seen[$$0]++' | paste -sd, -)"; \
+	@commands="$$($(call CSV_NORMALIZE,"$(DEVOPS_CSV)"))"; \
 	"$(COMMAND_SCHEMA_BIN)" extract --commands "$$commands" --installed-only --output "$(SCHEMA_OUTPUT)"
 
 schema-extract-custom-installed:
-	@commands="$$(cat "$(CUSTOM_CSV)" | tr ',' '\n' | sed 's/\r//g' | sed '/^[[:space:]]*$$/d' | awk '!seen[$$0]++' | paste -sd, -)"; \
+	@commands="$$($(call CSV_NORMALIZE,"$(CUSTOM_CSV)"))"; \
 	if [ -z "$$commands" ]; then echo "custom-tools.csv is empty"; exit 1; fi; \
 	"$(COMMAND_SCHEMA_BIN)" extract --commands "$$commands" --installed-only --output "$(SCHEMA_OUTPUT)"
 
 schema-extract-all-installed:
-	@commands="$$(cat "$(SUPERUSER_CSV)" "$(DEVOPS_CSV)" "$(CUSTOM_CSV)" | tr ',' '\n' | sed 's/\r//g' | sed '/^[[:space:]]*$$/d' | awk '!seen[$$0]++' | paste -sd, -)"; \
+	@commands="$$($(call CSV_NORMALIZE,"$(SUPERUSER_CSV)" "$(DEVOPS_CSV)" "$(CUSTOM_CSV)"))"; \
 	"$(COMMAND_SCHEMA_BIN)" extract --commands "$$commands" --installed-only --output "$(SCHEMA_OUTPUT)"
 
 schema-validate:
@@ -56,7 +62,14 @@ schema-snapshot-test:
 	@"$(COMMAND_SCHEMA_BIN)" extract \
 		--commands "git,cargo,apt,ls,tar,stty" \
 		--output "schemas/test-snapshot"
-	@echo "Comparing with curated schemas..."
-	@diff -r schemas/test-snapshot schemas/curated || \
-		(rm -rf schemas/test-snapshot; echo "Schema differences detected. Review changes."; exit 1)
-	@rm -rf schemas/test-snapshot
+	@echo "Comparing with curated schemas (subset only)..."
+	@mkdir -p schemas/curated-subset && \
+		for f in schemas/test-snapshot/*.json; do \
+			name=$$(basename "$$f"); \
+			if [ -f "schemas/curated/$$name" ]; then \
+				cp "schemas/curated/$$name" schemas/curated-subset/; \
+			fi; \
+		done
+	@diff -r schemas/test-snapshot schemas/curated-subset || \
+		(rm -rf schemas/test-snapshot schemas/curated-subset; echo "Schema differences detected. Review changes."; exit 1)
+	@rm -rf schemas/test-snapshot schemas/curated-subset

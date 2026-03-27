@@ -60,6 +60,16 @@ fn tmux_command(args: &[&str]) -> io::Result<String> {
     let output = Command::new("tmux")
         .args(args)
         .output()?;
+    if !output.status.success() {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!(
+                "tmux exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        ));
+    }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
@@ -158,8 +168,8 @@ fn broadcast_to_panes(command: &str) -> io::Result<()> {
 **User experience:**
 
 ```bash
-$ @all cd /new/directory    # All panes cd together
-$ @all export DEBUG=1       # Set env in all panes
+@all cd /new/directory    # All panes cd together
+@all export DEBUG=1       # Set env in all panes
 ```
 
 ### Feature 3: Pane Status in tmux Status Line
@@ -218,10 +228,20 @@ impl Completer for CrossPaneCompleter {
         let mut suggestions = vec![];
 
         // Get commands from other panes' recent history
-        let panes = tmux_command(&["list-panes", "-F", "#{pane_id}"]).unwrap_or_default();
+        let panes = match tmux_command(&["list-panes", "-F", "#{pane_id}"]) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("warn: list-panes failed: {e}");
+                return suggestions;
+            }
+        };
         for pane in panes.lines() {
-            if let Ok(recent) = tmux_command(&["show-option", "-pv", "-t", pane, "@wrashpty_recent"]) {
-                // Add to suggestions with "from pane X" description
+            match tmux_command(&["show-option", "-pv", "-t", pane, "@wrashpty_recent"]) {
+                Ok(recent) => {
+                    // Add to suggestions with "from pane X" description
+                    let _ = recent;
+                }
+                Err(e) => eprintln!("warn: show-option failed for pane {pane}: {e}"),
             }
         }
 

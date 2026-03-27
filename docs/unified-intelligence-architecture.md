@@ -135,7 +135,12 @@ fn suggest_children(
         FROM ci_command_hierarchy h
         JOIN ci_tokens t ON t.id = h.token_id
         WHERE h.position = ?1
-          AND h.parent_node_id = ?2
+          AND (
+              CASE WHEN ?2 IS NULL
+                   THEN h.parent_node_id IS NULL
+                   ELSE h.parent_node_id = (SELECT id FROM ci_tokens WHERE text = ?2)
+              END
+          )
           AND h.base_command_id = (SELECT id FROM ci_tokens WHERE text = ?3)
         ORDER BY h.frequency DESC
         LIMIT 20

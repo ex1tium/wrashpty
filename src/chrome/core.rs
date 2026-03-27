@@ -27,6 +27,11 @@ use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
+use crossterm::QueueableCommand;
+use crossterm::cursor::{MoveTo, RestorePosition, SavePosition};
+use crossterm::style::{Print, ResetColor};
+use crossterm::terminal::{Clear, ClearType};
+
 use ratatui_core::buffer::Buffer;
 use ratatui_core::layout::Rect;
 use tracing::{debug, info, warn};
@@ -497,12 +502,14 @@ impl Chrome {
         let mut out = stdout.lock();
 
         // Save cursor, move to row 1, clear entire line, draw content, restore cursor
-        write!(out, "\x1b[s")?; // Save cursor position
-        write!(out, "\x1b[1;1H")?; // Move to row 1, column 1
-        write!(out, "\x1b[2K")?; // Clear ENTIRE line (not just to end)
+        out.queue(SavePosition)?;
+        out.queue(MoveTo(0, 0))?;
+        out.queue(Clear(ClearType::CurrentLine))?;
         // Use theme background for the bar
-        write!(out, "{}{}\x1b[0m", bar_bg, content)?;
-        write!(out, "\x1b[u")?; // Restore cursor position
+        out.queue(Print(&bar_bg))?;
+        out.queue(Print(&content))?;
+        out.queue(ResetColor)?;
+        out.queue(RestorePosition)?;
         out.flush()?;
 
         debug!("Context bar rendered");
@@ -565,12 +572,13 @@ impl Chrome {
         let stdout = io::stdout();
         let mut out = stdout.lock();
 
-        for row in 1..=total_rows {
+        let rows_to_clear = self.panel_height().min(total_rows);
+        for row in 1..=rows_to_clear {
             write!(out, "\x1b[{};1H\x1b[K", row)?;
         }
 
         out.flush()?;
-        debug!(rows = total_rows, "Chrome bars cleared");
+        debug!(rows = rows_to_clear, "Chrome bars cleared");
         Ok(())
     }
 

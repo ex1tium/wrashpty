@@ -214,7 +214,7 @@ impl SpinnerStyle {
 
 | Style | Frame Sequence | Description |
 |-------|---------------|-------------|
-| **Ascii** | `- \ | /` | Classic spinner, works everywhere |
+| **Ascii** | `-`, `\|`, `/` | Classic spinner, works everywhere |
 | **Block** | `▏ ▎ ▍ ▌ ▋ ▊ ▉ █` | Vertical block segments using existing `ProgressGlyphs.bar` |
 | **Braille** | `⡿ ⣟ ⣯ ⣷ ⣾ ⣽` | Rotating braille pinwheel |
 | **Dots** | `⠁ ⠃ ⠇ ⡇` | Growing vertical dots |
@@ -358,10 +358,18 @@ impl SchemaBrowserPanel {
         };
 
         let (tx, rx) = mpsc::channel();
+        let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
+        let (done_tx, done_rx) = mpsc::channel::<()>();
         let cmd_for_thread = command.clone();
 
         let handle = thread::spawn(move || {
             let result = {
+                // Check for early shutdown before doing any work.
+                if shutdown_rx.try_recv().is_ok() {
+                    let _ = done_tx.send(());
+                    return;
+                }
+
                 let mut guard = match store.lock() {
                     Ok(g) => g,
                     Err(_) => {
@@ -369,6 +377,7 @@ impl SchemaBrowserPanel {
                             command: cmd_for_thread,
                             message: "Failed to acquire history store lock".to_string(),
                         });
+                        let _ = done_tx.send(());
                         return;
                     }
                 };
@@ -384,10 +393,13 @@ impl SchemaBrowserPanel {
                 }
             };
             let _ = tx.send(result);
+            let _ = done_tx.send(());
         });
 
         self.discovery = Some(DiscoveryHandle {
             receiver: rx,
+            shutdown_tx,
+            done_rx,
             thread_handle: Some(handle),
         });
         self.loading_widget = Some(LoadingWidget::with_label("Discovering schema..."));
@@ -629,7 +641,7 @@ loop {
 
 ## 6. File Structure
 
-```
+```text
 src/
 ├── ui/
 │   ├── mod.rs           # Add: pub mod loading_widget;

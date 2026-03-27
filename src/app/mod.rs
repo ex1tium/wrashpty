@@ -419,7 +419,7 @@ impl App {
 
             // Restore persisted glyph tier preference
             if let Ok(Some(tier_str)) = store.get_setting("glyph_tier") {
-                if let Some(tier) = crate::chrome::glyphs::GlyphTier::from_label(&tier_str) {
+                if let Some(tier) = crate::chrome::glyphs::GlyphTier::try_from_label(&tier_str) {
                     self.chrome.set_glyph_tier(tier);
                 }
             }
