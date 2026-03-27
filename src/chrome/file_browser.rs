@@ -734,7 +734,7 @@ impl FileBrowserPanel {
                 let _ = self.navigate_to(&path);
                 PanelResult::Continue
             } else {
-                PanelResult::InsertText(entry.entry.path.to_string_lossy().to_string())
+                PanelResult::InsertText(shell_quote(&entry.entry.path.to_string_lossy()))
             }
         } else {
             PanelResult::Continue
