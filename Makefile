@@ -14,9 +14,17 @@ endef
 #   cargo install --git https://github.com/ex1tium/command-schema.git command-schema-discovery
 # or override COMMAND_SCHEMA_BIN=/path/to/command-schema-discovery when running make.
 
+.PHONY: all test clean
 .PHONY: schema-extract-superuser schema-extract-devops schema-extract-custom schema-extract-all
 .PHONY: schema-extract-superuser-installed schema-extract-devops-installed schema-extract-custom-installed schema-extract-all-installed
 .PHONY: schema-validate schema-snapshot-test
+
+all: schema-extract-all schema-validate
+
+test: schema-snapshot-test
+
+clean:
+	rm -rf schemas/test-snapshot schemas/curated-subset
 
 schema-extract-superuser:
 	@commands="$$($(call CSV_NORMALIZE,"$(SUPERUSER_CSV)"))"; \
