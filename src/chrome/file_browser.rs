@@ -8,7 +8,7 @@ use std::time::SystemTime;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui_core::buffer::Buffer;
 use ratatui_core::layout::{Constraint, Layout, Rect};
-use ratatui_core::style::{Modifier, Style};
+use ratatui_core::style::{Color, Modifier, Style};
 use ratatui_core::text::{Line, Span};
 use ratatui_core::widgets::Widget;
 use ratatui_widgets::list::{List, ListItem};
@@ -295,102 +295,53 @@ impl FileBrowserPanel {
         Paragraph::new(Line::from(spans)).render(area, buffer);
     }
 
-    /// Builds a plain-text git summary string for width calculation.
-    fn build_git_summary(&self) -> String {
+    /// Returns formatted git summary parts as `(text, color)` pairs, one per present status.
+    fn git_summary_parts(&self) -> Vec<(String, Color)> {
         let Some(git_status) = self.tree.git_status() else {
-            return String::new();
+            return vec![];
         };
-
         let summary = git_status.summary();
         if summary.is_empty() {
-            return String::new();
+            return vec![];
         }
-
         let icons = &self.glyphs.icon;
+        let entries = [
+            (GitFileStatus::Modified, icons.git_modified, self.theme.git_modified_fg),
+            (GitFileStatus::Added, icons.git_added, self.theme.git_added_fg),
+            (GitFileStatus::Deleted, icons.git_deleted, self.theme.git_deleted_fg),
+            (GitFileStatus::Untracked, icons.git_untracked, self.theme.git_untracked_fg),
+            (GitFileStatus::Renamed, icons.git_renamed, self.theme.git_renamed_fg),
+            (GitFileStatus::Conflict, icons.git_conflict, self.theme.git_conflict_fg),
+        ];
         let mut parts = Vec::new();
-        if let Some(&count) = summary.get(&GitFileStatus::Modified) {
-            parts.push(format!("{}{}", icons.git_modified, count));
+        for (status, icon, color) in entries {
+            if let Some(&count) = summary.get(&status) {
+                parts.push((format!("{}{}", icon, count), color));
+            }
         }
-        if let Some(&count) = summary.get(&GitFileStatus::Added) {
-            parts.push(format!("{}{}", icons.git_added, count));
-        }
-        if let Some(&count) = summary.get(&GitFileStatus::Deleted) {
-            parts.push(format!("{}{}", icons.git_deleted, count));
-        }
-        if let Some(&count) = summary.get(&GitFileStatus::Untracked) {
-            parts.push(format!("{}{}", icons.git_untracked, count));
-        }
-        if let Some(&count) = summary.get(&GitFileStatus::Renamed) {
-            parts.push(format!("{}{}", icons.git_renamed, count));
-        }
-        if let Some(&count) = summary.get(&GitFileStatus::Conflict) {
-            parts.push(format!("{}{}", icons.git_conflict, count));
-        }
+        parts
+    }
 
-        parts.join(" ")
+    /// Builds a plain-text git summary string for width calculation.
+    fn build_git_summary(&self) -> String {
+        self.git_summary_parts()
+            .into_iter()
+            .map(|(text, _)| text)
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     /// Builds colored spans for the git summary.
     fn build_git_summary_spans(&self) -> Vec<Span<'static>> {
-        let Some(git_status) = self.tree.git_status() else {
-            return vec![];
-        };
-
-        let summary = git_status.summary();
-        if summary.is_empty() {
-            return vec![];
-        }
-
         let mut spans = Vec::new();
         let mut first = true;
-
-        let icons = &self.glyphs.icon;
-        let entries: Vec<(GitFileStatus, &str, ratatui_core::style::Color)> = vec![
-            (
-                GitFileStatus::Modified,
-                icons.git_modified,
-                self.theme.git_modified_fg,
-            ),
-            (
-                GitFileStatus::Added,
-                icons.git_added,
-                self.theme.git_added_fg,
-            ),
-            (
-                GitFileStatus::Deleted,
-                icons.git_deleted,
-                self.theme.git_deleted_fg,
-            ),
-            (
-                GitFileStatus::Untracked,
-                icons.git_untracked,
-                self.theme.git_untracked_fg,
-            ),
-            (
-                GitFileStatus::Renamed,
-                icons.git_renamed,
-                self.theme.git_renamed_fg,
-            ),
-            (
-                GitFileStatus::Conflict,
-                icons.git_conflict,
-                self.theme.git_conflict_fg,
-            ),
-        ];
-
-        for (status, marker, color) in entries {
-            if let Some(&count) = summary.get(&status) {
-                if !first {
-                    spans.push(Span::raw(" "));
-                }
-                first = false;
-                spans.push(Span::styled(
-                    format!("{}{}", marker, count),
-                    Style::default().fg(color),
-                ));
+        for (text, color) in self.git_summary_parts() {
+            if !first {
+                spans.push(Span::raw(" "));
             }
+            first = false;
+            spans.push(Span::styled(text, Style::default().fg(color)));
         }
-
         spans
     }
 
