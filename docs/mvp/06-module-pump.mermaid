@@ -1,11 +1,11 @@
 graph TB
     subgraph pump_public["pump.rs — Public API"]
         new_pump["Pump::new pty_master_fd"]
-        poll_once["poll_once parser timeout -> Result PumpEvent"]
+        poll_once["poll_once parser timeout -> Result PumpResult"]
     end
 
     subgraph pump_types["Types"]
-        event["PumpEvent\n- Continue\n- Marker: MarkerEvent\n- ChildOutput\n- ChildExited"]
+        event["PumpResult\n- Continue: captured_bytes: Vec<u8>\n- MarkerDetected: MarkerVec, captured_bytes: Vec<u8>\n- PtyEof"]
     end
 
     subgraph pump_internal["Internal Data Flow"]

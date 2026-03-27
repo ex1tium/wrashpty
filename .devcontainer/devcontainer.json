@@ -1,0 +1,20 @@
+{
+	"name": "Rust config",
+	"image": "mcr.microsoft.com/devcontainers/rust:1-bookworm",
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"rust-lang.rust-analyzer",
+				"tamasfe.even-better-toml",
+				"fill-labs.dependi",
+				"vadimcn.vscode-lldb"
+			],
+			"settings": {
+				"lldb.executable": "/usr/bin/lldb",
+				"vsicons.projectDetection.autoReloadPartial": true
+			}
+		}
+	},
+	"postCreateCommand": "sudo apt-get update && cargo install cargo-edit cargo-watch",
+	"remoteUser": "vscode"
+}
