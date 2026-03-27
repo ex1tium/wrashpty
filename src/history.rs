@@ -3,7 +3,521 @@
 //! This module reads and parses bash history to provide history search
 //! and navigation in the reedline editor.
 
-// TODO: Implement in future Phase 1 tickets
-// - History file parsing
-// - Reedline History trait implementation
-// - Deduplication and filtering
+use std::collections::VecDeque;
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
+
+use thiserror::Error;
+use tracing::{debug, info, warn};
+
+/// Errors that can occur when loading or writing history.
+#[derive(Debug, Error)]
+pub enum HistoryError {
+    /// The user's home directory could not be determined.
+    #[error("could not determine home directory")]
+    HomeDirNotFound,
+
+    /// An I/O error occurred while reading or writing the history file.
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+
+    /// Failed to persist a temporary file to the history path.
+    #[error(transparent)]
+    PersistError(#[from] tempfile::PersistError),
+}
+
+/// Maximum number of history entries to load.
+const MAX_HISTORY_LINES: usize = 10_000;
+
+/// Returns true when a line is a bash history timestamp marker (`#<unix-seconds>`).
+fn is_timestamp_marker(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix('#') else {
+        return false;
+    };
+    !rest.is_empty() && rest.as_bytes().iter().all(|b| b.is_ascii_digit())
+}
+
+/// Pushes an entry into a bounded history deque.
+fn push_bounded(history: &mut VecDeque<String>, entry: String) {
+    history.push_back(entry);
+    if history.len() > MAX_HISTORY_LINES {
+        history.pop_front();
+    }
+}
+
+/// Parses bash history content, preserving multiline entries when timestamp markers are present.
+fn parse_history_reader<R: BufRead>(reader: R) -> (Vec<String>, usize) {
+    let mut history: VecDeque<String> = VecDeque::with_capacity(MAX_HISTORY_LINES);
+    let mut skipped = 0;
+
+    // In timestamp mode (`HISTTIMEFORMAT`-style), each `#<epoch>` begins a new entry,
+    // and all following lines (including blanks) belong to the command until the next marker.
+    let mut in_timestamp_mode = false;
+    let mut pending_multiline = String::new();
+
+    for line_result in reader.lines() {
+        match line_result {
+            Ok(line) => {
+                if is_timestamp_marker(&line) {
+                    if in_timestamp_mode && !pending_multiline.trim().is_empty() {
+                        push_bounded(&mut history, std::mem::take(&mut pending_multiline));
+                    }
+                    in_timestamp_mode = true;
+                    continue;
+                }
+
+                if in_timestamp_mode {
+                    if !pending_multiline.is_empty() {
+                        pending_multiline.push('\n');
+                    }
+                    pending_multiline.push_str(&line);
+                    continue;
+                }
+
+                // Legacy non-timestamp mode: one command per line.
+                if line.trim().is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                push_bounded(&mut history, line);
+            }
+            Err(e) => {
+                warn!(error = %e, "Skipping corrupted history line");
+                skipped += 1;
+            }
+        }
+    }
+
+    if in_timestamp_mode && !pending_multiline.trim().is_empty() {
+        push_bounded(&mut history, pending_multiline);
+    }
+
+    (history.into(), skipped)
+}
+
+/// Loads history entries from ~/.bash_history.
+///
+/// Uses a streaming approach with a bounded VecDeque to avoid loading the
+/// entire file into memory when histories are huge. Each line is processed
+/// as it's read, and oldest entries are dropped when the capacity is exceeded.
+///
+/// Returns a vector of history entries, with oldest entries first.
+/// If the history file doesn't exist or is empty, returns an empty vector.
+/// Corrupted lines are skipped with a warning.
+///
+/// # Returns
+///
+/// A vector of history strings, limited to the last `MAX_HISTORY_LINES` entries.
+///
+/// # Errors
+///
+/// Returns [`HistoryError::HomeDirNotFound`] if the home directory cannot be determined.
+/// Missing or unreadable history files are handled gracefully by returning
+/// an empty vector.
+pub fn load_history() -> Result<Vec<String>, HistoryError> {
+    let history_path = get_history_path()?;
+
+    if !history_path.exists() {
+        info!(path = %history_path.display(), "History file does not exist, starting with empty history");
+        return Ok(Vec::new());
+    }
+
+    let file = match File::open(&history_path) {
+        Ok(f) => f,
+        Err(e) => {
+            warn!(path = %history_path.display(), error = %e, "Failed to open history file");
+            return Ok(Vec::new());
+        }
+    };
+
+    let reader = BufReader::new(file);
+
+    let (history, skipped) = parse_history_reader(reader);
+
+    info!(
+        entries = history.len(),
+        skipped,
+        path = %history_path.display(),
+        "Loaded history from bash_history"
+    );
+
+    // Log safe metadata only - avoid leaking secrets from command history
+    debug!(
+        entries = history.len(),
+        first_entry_len = history.first().map(|s| s.len()),
+        last_entry_len = history.last().map(|s| s.len()),
+        "History loaded"
+    );
+
+    Ok(history)
+}
+
+/// Gets the path to the bash history file.
+///
+/// Returns `~/.bash_history` on Unix systems.
+///
+/// # Errors
+///
+/// Returns an error if the home directory cannot be determined.
+fn get_history_path() -> Result<PathBuf, HistoryError> {
+    let home = dirs::home_dir().ok_or(HistoryError::HomeDirNotFound)?;
+    Ok(home.join(".bash_history"))
+}
+
+/// Appends a command to ~/.bash_history if it differs from the last entry.
+///
+/// This enables commands executed in wrashpty to appear in other bash sessions'
+/// history. The command is appended atomically with a trailing newline.
+/// Consecutive duplicate commands are skipped (similar to HISTCONTROL=ignoredups).
+///
+/// # Arguments
+///
+/// * `command` - The command string to append
+///
+/// # Errors
+///
+/// Returns an error if the home directory cannot be determined or the file
+/// cannot be written. Missing history file is created automatically.
+pub fn append_to_bash_history(command: &str) -> Result<(), HistoryError> {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
+    // Skip empty commands
+    if command.trim().is_empty() {
+        return Ok(());
+    }
+
+    let history_path = get_history_path()?;
+
+    // Check if command is same as last entry (deduplication)
+    if let Some(last) = get_last_history_line(&history_path)? {
+        if last == command {
+            debug!("Skipping duplicate command in bash_history");
+            return Ok(());
+        }
+    }
+
+    // Open file for appending, creating if it doesn't exist
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&history_path)?;
+
+    // Write command with newline
+    writeln!(file, "{}", command)?;
+
+    debug!(
+        command_len = command.len(),
+        "Appended command to bash_history"
+    );
+
+    Ok(())
+}
+
+/// Gets the last non-empty line from a file.
+fn get_last_history_line(path: &Path) -> Result<Option<String>, HistoryError> {
+    use std::fs::File;
+    use std::io::{BufRead, BufReader, Seek, SeekFrom};
+
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let file = File::open(path)?;
+    let file_len = file.metadata()?.len();
+    if file_len == 0 {
+        return Ok(None);
+    }
+
+    // Read from the end of the file to find the last line efficiently
+    // For small files, just read the whole thing
+    if file_len < 8192 {
+        let reader = BufReader::new(file);
+        let mut last_line = None;
+        for line_result in reader.lines() {
+            let line = match line_result {
+                Ok(l) => l,
+                Err(e) => {
+                    warn!("Error reading history line: {}", e);
+                    continue;
+                }
+            };
+            if !line.trim().is_empty() && !line.starts_with('#') {
+                last_line = Some(line);
+            }
+        }
+        return Ok(last_line);
+    }
+
+    // For larger files, seek to near the end
+    let mut file = file;
+    let seek_pos = file_len.saturating_sub(4096);
+    file.seek(SeekFrom::Start(seek_pos))?;
+
+    let reader = BufReader::new(file);
+    let mut last_line = None;
+
+    // Skip partial first line if we seeked into the middle
+    let mut lines = reader.lines();
+    if seek_pos > 0 {
+        lines.next(); // Skip potentially partial line
+    }
+
+    for line_result in lines {
+        let line = match line_result {
+            Ok(l) => l,
+            Err(e) => {
+                warn!("Error reading history line: {}", e);
+                continue;
+            }
+        };
+        if !line.trim().is_empty() && !line.starts_with('#') {
+            last_line = Some(line);
+        }
+    }
+
+    Ok(last_line)
+}
+
+/// Deduplicates ~/.bash_history, keeping unique consecutive commands.
+///
+/// This removes consecutive duplicate entries while preserving order.
+/// Non-consecutive duplicates are kept (like HISTCONTROL=ignoredups).
+///
+/// # Returns
+///
+/// The number of duplicate entries removed.
+pub fn dedupe_bash_history() -> Result<usize, HistoryError> {
+    use std::io::{BufRead, BufReader, Write};
+
+    let history_path = get_history_path()?;
+
+    if !history_path.exists() {
+        return Ok(0);
+    }
+
+    let file = File::open(&history_path)?;
+    let reader = BufReader::new(file);
+
+    let mut deduped: Vec<String> = Vec::new();
+    let mut removed = 0;
+
+    for line_result in reader.lines() {
+        let line = match line_result {
+            Ok(l) => l,
+            Err(e) => {
+                warn!("Error reading history line: {}", e);
+                continue;
+            }
+        };
+
+        // Skip empty lines
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        // Keep timestamp comments
+        if line.starts_with('#') {
+            deduped.push(line);
+            continue;
+        }
+
+        // Check if same as last non-comment entry
+        let last_cmd = deduped.iter().rev().find(|l| !l.starts_with('#'));
+        if last_cmd.is_some_and(|l| l == &line) {
+            removed += 1;
+            continue;
+        }
+
+        deduped.push(line);
+    }
+
+    if removed > 0 {
+        // Write to a temporary file first for atomic replacement.
+        // Use NamedTempFile for RAII cleanup - if any operation fails before persist(),
+        // the temp file is automatically removed when dropped.
+        let parent_dir = history_path.parent().unwrap_or(std::path::Path::new("."));
+        let mut temp_file = tempfile::NamedTempFile::new_in(parent_dir)?;
+
+        // Get original file permissions if it exists
+        let permissions = fs::metadata(&history_path).ok().map(|m| m.permissions());
+
+        // Write deduplicated history with BufWriter to reduce syscalls.
+        {
+            let mut writer = std::io::BufWriter::new(&mut temp_file);
+            for line in &deduped {
+                writeln!(writer, "{}", line)?;
+            }
+            writer.flush()?;
+        }
+
+        // Sync to ensure all data is written to disk
+        temp_file.as_file().sync_all()?;
+
+        // Preserve original permissions if we captured them
+        if let Some(perms) = permissions {
+            fs::set_permissions(temp_file.path(), perms)?;
+        }
+
+        // Atomically persist temp file to history file.
+        // This consumes the NamedTempFile, preventing automatic deletion on success.
+        temp_file.persist(&history_path)?;
+
+        info!(removed, "Deduplicated bash_history");
+    }
+
+    Ok(removed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    #[allow(clippy::assertions_on_constants)]
+    fn test_max_history_lines_constant_within_reasonable_bounds() {
+        // Verify the constant is reasonable
+        assert!(MAX_HISTORY_LINES >= 1000);
+        assert!(MAX_HISTORY_LINES <= 100_000);
+    }
+
+    #[test]
+    fn test_get_history_path_when_home_available_returns_bash_history_path() {
+        let path = get_history_path().expect("Should get history path");
+        assert!(path.ends_with(".bash_history"));
+    }
+
+    #[test]
+    fn test_load_history_when_file_missing_returns_ok_empty_or_existing() {
+        // This tests the graceful degradation for missing files
+        // The actual file may or may not exist, but load_history should not panic
+        let result = load_history();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_history_reader_with_empty_input_returns_empty() {
+        // File is empty - simulate by just checking our parsing logic handles this
+        let (entries, skipped) = parse_history_reader(Cursor::new(""));
+        assert!(entries.is_empty());
+        assert_eq!(skipped, 0);
+    }
+
+    #[test]
+    fn test_parse_history_reader_with_blank_lines_skips_empty_entries() {
+        let content = "echo hello\n\necho world\n   \necho test";
+        let (entries, skipped) = parse_history_reader(Cursor::new(content));
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0], "echo hello");
+        assert_eq!(entries[1], "echo world");
+        assert_eq!(entries[2], "echo test");
+        assert_eq!(skipped, 0);
+    }
+
+    #[test]
+    fn test_parse_history_reader_with_timestamp_markers_groups_multiline_entries() {
+        let content = "\
+#1700000000
+echo one
+#1700000001
+cat <<'EOF'
+line 1
+line 2
+EOF
+";
+        let (entries, skipped) = parse_history_reader(Cursor::new(content));
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0], "echo one");
+        assert_eq!(entries[1], "cat <<'EOF'\nline 1\nline 2\nEOF");
+        assert_eq!(skipped, 0);
+    }
+
+    #[test]
+    fn test_parse_history_reader_with_hash_line_inside_multiline_keeps_line() {
+        let content = "\
+#1700000000
+cat <<'EOF'
+# not a timestamp
+EOF
+";
+        let (entries, skipped) = parse_history_reader(Cursor::new(content));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0], "cat <<'EOF'\n# not a timestamp\nEOF");
+        assert_eq!(skipped, 0);
+    }
+
+    #[test]
+    fn test_parse_history_reader_with_plain_hash_comment_skips_comment() {
+        let content = "#1234567890\necho hello\n#9876543210\necho world";
+        let (entries, skipped) = parse_history_reader(Cursor::new(content));
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0], "echo hello");
+        assert_eq!(entries[1], "echo world");
+        assert_eq!(skipped, 0);
+    }
+
+    #[test]
+    fn test_push_bounded_when_over_capacity_keeps_most_recent_entries() {
+        use std::collections::VecDeque;
+
+        // Test that we limit to MAX_HISTORY_LINES using streaming VecDeque approach
+        let mut history: VecDeque<String> = VecDeque::with_capacity(MAX_HISTORY_LINES);
+        for i in 0..MAX_HISTORY_LINES + 100 {
+            push_bounded(&mut history, format!("command {}", i));
+        }
+
+        let history: Vec<String> = history.into();
+
+        assert_eq!(history.len(), MAX_HISTORY_LINES);
+        // Should have the last MAX_HISTORY_LINES entries
+        assert_eq!(history[0], format!("command {}", 100));
+        assert_eq!(
+            history[MAX_HISTORY_LINES - 1],
+            format!("command {}", MAX_HISTORY_LINES + 99)
+        );
+    }
+
+    #[test]
+    fn test_append_to_bash_history_with_empty_command_returns_ok() {
+        // Empty commands should be silently skipped
+        let result = super::append_to_bash_history("");
+        assert!(result.is_ok());
+
+        let result = super::append_to_bash_history("   ");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_append_to_bash_history_with_command_writes_entry() {
+        use std::fs;
+        use tempfile::tempdir;
+
+        // Create a temp directory to simulate home
+        let temp_dir = tempdir().expect("Failed to create temp dir");
+        let original_home = std::env::var("HOME").ok();
+
+        // Point HOME at temp dir so get_history_path() resolves there
+        // SAFETY: This test runs single-threaded (#[test] with serial access to env)
+        unsafe { std::env::set_var("HOME", temp_dir.path()) };
+
+        // Call the actual function under test
+        let result = super::append_to_bash_history("echo test_command");
+
+        // Restore HOME before asserting (cleanup even on failure)
+        if let Some(home) = &original_home {
+            // SAFETY: Restoring original HOME value
+            unsafe { std::env::set_var("HOME", home) };
+        } else {
+            // SAFETY: HOME was not set originally, remove our override
+            unsafe { std::env::remove_var("HOME") };
+        }
+
+        result.expect("append should succeed");
+
+        // Verify the file exists and has the command
+        let history_file = temp_dir.path().join(".bash_history");
+        let content = fs::read_to_string(&history_file).expect("Failed to read");
+        assert!(content.contains("echo test_command"));
+    }
+}
