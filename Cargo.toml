@@ -1,44 +1,116 @@
+[workspace]
+members = ["."]
+
+[workspace.dependencies]
+serde = "1.0"
+serde_json = "1.0"
+thiserror = "1.0"
+regex = "1.10"
+wait-timeout = "0.2"
+tracing = "0.1"
+chrono = "0.4"
+clap = "4.5"
+
 [package]
 name = "wrashpty"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.86"
+
+[features]
+default = ["command-schema"]
+command-schema = [
+    "dep:command-schema-discovery",
+    "dep:command-schema-sqlite",
+    "dep:command-schema-db",
+]
+bundled-schemas = ["command-schema", "command-schema-db/bundled-schemas"]
 
 [dependencies]
 # PTY and terminal control
 portable-pty = "0.8"
-reedline = "0.28"
-crossterm = "0.27"
+reedline = { version = "0.45", features = ["sqlite"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+crossterm = "0.29"
 
 # POSIX syscalls and signal handling
-nix = { version = "0.27", features = ["term", "signal", "poll"] }
+nix = { version = "0.27", features = ["term", "signal", "poll", "fs"] }
 signal-hook = "0.3"
 libc = "0.2"
+
+# Process timeout handling
+wait-timeout = { workspace = true }
 
 # Cryptographic session tokens
 getrandom = "0.2"
 
 # Error handling
 anyhow = "1.0"
-thiserror = "1.0"
+thiserror = { workspace = true }
+
+# Zero-allocation collections for hot paths
+smallvec = "1.15.1"
+
+# ANSI styling (used by reedline)
+nu-ansi-term = "0.50"
 
 # Temporary file handling
 tempfile = "3.8"
 
 # Logging
-tracing = "0.1"
+tracing = { workspace = true }
 tracing-subscriber = "0.3"
 
 # Path resolution
 dirs = "5.0"
 
-# Unicode display width
-unicode-width = "0.1"
+# Unicode display width and segmentation
+unicode-width = "0.2.2"
+unicode-segmentation = "1.11"
+
+# TUI rendering primitives (Buffer, Rect, Style, Layout)
+ratatui-core = "0.1"
+# TUI widgets (Block, List, Paragraph, Tabs)
+ratatui-widgets = "0.3"
+
+# Regex for Makefile/config parsing
+regex = { workspace = true }
+
+# Serialization
+serde = { workspace = true, features = ["derive"] }
+
+# JSON parsing for package.json
+serde_json = { workspace = true }
+
+# TOML parsing for Cargo.toml
+toml = "0.8"
+
+# CLI argument parsing
+clap = { workspace = true, features = ["derive"] }
+
+# Time formatting for context bar
+chrono = { workspace = true }
+
+# Lazy static initialization
+once_cell = "1.19"
+
+# Clipboard access (for yank/copy feature)
+arboard = "3"
+
+# Cross-platform command lookup
+which = "6"
+
+# Command schema integration (core types always available; heavy crates optional)
+command-schema-core = { git = "https://github.com/ex1tium/command-schema.git" }
+command-schema-discovery = { git = "https://github.com/ex1tium/command-schema.git", optional = true }
+command-schema-sqlite = { git = "https://github.com/ex1tium/command-schema.git", optional = true }
+command-schema-db = { git = "https://github.com/ex1tium/command-schema.git", optional = true }
 
 [dev-dependencies]
 rexpect = "0.5"
 assert_cmd = "2.0"
 proptest = "1.4"
+serial_test = "3.2"
 
 [profile.release]
 lto = "thin"
