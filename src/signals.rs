@@ -16,7 +16,6 @@
 //! mechanism. The actual signal handlers only write a byte to a pipe; all
 //! processing happens in the main thread via [`SignalHandler::check_signals`].
 
-use std::io::{Error as IoError, ErrorKind};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
@@ -118,23 +117,7 @@ impl SignalHandler {
     pub fn check_signals(&mut self) -> Vec<SignalEvent> {
         let mut events = Vec::new();
 
-        // Non-blocking check for pending signals using poll_pending with a
-        // non-blocking callback that checks if the pipe has data available.
-        let pending = self
-            .signals
-            .poll_pending(&mut Self::has_signals_nonblocking);
-
-        let pending = match pending {
-            Ok(Some(p)) => p,
-            Ok(None) => return events, // No signals pending
-            Err(e) => {
-                // Log error but don't propagate - signal handling should be best-effort
-                tracing::warn!("Error polling signals: {}", e);
-                return events;
-            }
-        };
-
-        for signal in pending {
+        for signal in self.signals.pending() {
             match signal {
                 SIGWINCH => {
                     debug!("SIGWINCH received");
@@ -156,35 +139,6 @@ impl SignalHandler {
         }
 
         events
-    }
-
-    /// Non-blocking check if the signal pipe has data available.
-    ///
-    /// Returns `Ok(true)` if there's data to read, `Ok(false)` if not.
-    fn has_signals_nonblocking(read: &mut UnixStream) -> Result<bool, IoError> {
-        // Use recv with MSG_PEEK | MSG_DONTWAIT to check for data without blocking
-        let mut buf = [0u8; 1];
-        let result = unsafe {
-            libc::recv(
-                read.as_raw_fd(),
-                buf.as_mut_ptr() as *mut libc::c_void,
-                1,
-                libc::MSG_PEEK | libc::MSG_DONTWAIT,
-            )
-        };
-
-        if result > 0 {
-            Ok(true)
-        } else if result == 0 {
-            Ok(false)
-        } else {
-            let err = IoError::last_os_error();
-            if err.kind() == ErrorKind::WouldBlock {
-                Ok(false)
-            } else {
-                Err(err)
-            }
-        }
     }
 
     /// Returns whether a shutdown signal has been received.

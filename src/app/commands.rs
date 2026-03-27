@@ -301,9 +301,22 @@ fn cmd_panel(_ctx: &mut CommandContext) -> CommandAction {
     CommandAction::OpenPanel
 }
 
+fn notify_history_store_lock_failure(
+    chrome: &mut Chrome,
+    action: &str,
+    error: impl fmt::Display,
+) -> CommandAction {
+    chrome.notify(
+        format!("Failed to {action}: history store lock poisoned ({error})"),
+        NotificationStyle::Error,
+        Duration::from_secs(5),
+    );
+    CommandAction::Handled
+}
+
 fn cmd_wipe(ctx: &mut CommandContext) -> CommandAction {
-    if let Ok(store) = ctx.history_store.lock() {
-        match store.wipe("wipe") {
+    match ctx.history_store.lock() {
+        Ok(store) => match store.wipe("wipe") {
             Ok(()) => {
                 ctx.chrome.notify(
                     "History database deleted",
@@ -318,14 +331,15 @@ fn cmd_wipe(ctx: &mut CommandContext) -> CommandAction {
                     Duration::from_secs(5),
                 );
             }
-        }
+        },
+        Err(e) => return notify_history_store_lock_failure(ctx.chrome, "delete history", e),
     }
     CommandAction::Handled
 }
 
 fn cmd_dedupe(ctx: &mut CommandContext) -> CommandAction {
-    if let Ok(store) = ctx.history_store.lock() {
-        match store.dedupe_all() {
+    match ctx.history_store.lock() {
+        Ok(store) => match store.dedupe_all() {
             Ok((sqlite_removed, bash_removed)) => {
                 let msg = format!(
                     "Removed {} duplicates (SQLite: {}, bash_history: {})",
@@ -343,14 +357,15 @@ fn cmd_dedupe(ctx: &mut CommandContext) -> CommandAction {
                     Duration::from_secs(5),
                 );
             }
-        }
+        },
+        Err(e) => return notify_history_store_lock_failure(ctx.chrome, "dedupe history", e),
     }
     CommandAction::Handled
 }
 
 fn cmd_wipe_ci(ctx: &mut CommandContext) -> CommandAction {
-    if let Ok(mut store) = ctx.history_store.lock() {
-        match store.reset_intelligence() {
+    match ctx.history_store.lock() {
+        Ok(mut store) => match store.reset_intelligence() {
             Ok(()) => {
                 ctx.chrome.notify(
                     "Intelligence database reset",
@@ -365,6 +380,9 @@ fn cmd_wipe_ci(ctx: &mut CommandContext) -> CommandAction {
                     Duration::from_secs(5),
                 );
             }
+        },
+        Err(e) => {
+            return notify_history_store_lock_failure(ctx.chrome, "reset intelligence", e);
         }
     }
     CommandAction::Handled
@@ -373,9 +391,14 @@ fn cmd_wipe_ci(ctx: &mut CommandContext) -> CommandAction {
 fn set_glyph_tier(ctx: &mut CommandContext, tier: GlyphTier) -> CommandAction {
     ctx.chrome.set_glyph_tier(tier);
     // Persist preference
-    if let Ok(store) = ctx.history_store.lock() {
-        if let Err(e) = store.set_setting("glyph_tier", tier.label()) {
-            warn!("Failed to persist glyph tier: {e}");
+    match ctx.history_store.lock() {
+        Ok(store) => {
+            if let Err(e) = store.set_setting("glyph_tier", tier.label()) {
+                warn!("Failed to persist glyph tier: {e}");
+            }
+        }
+        Err(e) => {
+            return notify_history_store_lock_failure(ctx.chrome, "persist glyph tier setting", e);
         }
     }
     ctx.chrome.notify(

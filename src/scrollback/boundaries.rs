@@ -346,6 +346,36 @@ impl CommandBoundaries {
             }
         }
     }
+
+    /// Removes or clamps boundary metadata so every referenced line still exists.
+    ///
+    /// Call this after destructive in-place edits like erase-below, where the
+    /// scrollback buffer shrinks without dropping lines from the front.
+    pub fn truncate_to_len(&mut self, new_len: usize) {
+        if new_len == 0 {
+            self.clear();
+            return;
+        }
+
+        self.command_starts.retain(|&line| line < new_len);
+        self.prompt_lines.retain(|&line| line < new_len);
+
+        self.records.retain(|record| record.output_start < new_len);
+        for record in &mut self.records {
+            if record.prompt_line.is_some_and(|line| line >= new_len) {
+                record.prompt_line = None;
+            }
+        }
+
+        if let Some(pending) = &mut self.pending {
+            if pending.output_start >= new_len {
+                self.pending = None;
+                self.pending_seeded = false;
+            } else if pending.prompt_line.is_some_and(|line| line >= new_len) {
+                pending.prompt_line = None;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -404,6 +434,36 @@ mod tests {
         bounds.clear();
         assert!(bounds.command_starts.is_empty());
         assert!(bounds.prompt_lines.is_empty());
+    }
+
+    #[test]
+    fn test_truncate_to_len_when_out_of_range_prunes_boundaries() {
+        let mut bounds = CommandBoundaries::new();
+        bounds.command_starts = vec![2, 7, 11];
+        bounds.prompt_lines = vec![5, 9, 13];
+        bounds.records.push(CommandRecord {
+            output_start: 2,
+            prompt_line: Some(5),
+            ..Default::default()
+        });
+        bounds.records.push(CommandRecord {
+            output_start: 7,
+            prompt_line: Some(12),
+            ..Default::default()
+        });
+        bounds.records.push(CommandRecord {
+            output_start: 11,
+            prompt_line: Some(13),
+            ..Default::default()
+        });
+
+        bounds.truncate_to_len(10);
+
+        assert_eq!(bounds.command_starts, vec![2, 7]);
+        assert_eq!(bounds.prompt_lines, vec![5, 9]);
+        assert_eq!(bounds.records.len(), 2);
+        assert_eq!(bounds.records[0].prompt_line, Some(5));
+        assert_eq!(bounds.records[1].prompt_line, None);
     }
 
     #[test]

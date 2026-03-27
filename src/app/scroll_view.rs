@@ -431,7 +431,12 @@ impl App {
             self.render_legend_for_context(crate::scrollback::HelpContext::GoToLine)?;
 
             // Wait for input
-            if event::poll(std::time::Duration::from_millis(100))? {
+            let has_event = event::poll(std::time::Duration::from_millis(100))?;
+            if self.handle_scroll_modal_signals()? {
+                return Ok(false);
+            }
+
+            if has_event {
                 if let Event::Key(key) = event::read()? {
                     // Only handle press events
                     if key.kind != KeyEventKind::Press {
@@ -504,7 +509,13 @@ impl App {
             self.render_legend_for_context(crate::scrollback::HelpContext::Search)?;
 
             // Wait for input
-            if event::poll(std::time::Duration::from_millis(100))? {
+            let has_event = event::poll(std::time::Duration::from_millis(100))?;
+            if self.handle_scroll_modal_signals()? {
+                self.viewer_state.last_search_lines = None;
+                return Ok(false);
+            }
+
+            if has_event {
                 if let Event::Key(key) = event::read()? {
                     // Only handle press events
                     if key.kind != KeyEventKind::Press {
@@ -736,7 +747,12 @@ impl App {
             self.render_legend_for_context(crate::scrollback::HelpContext::Filter)?;
 
             // Wait for input
-            if event::poll(std::time::Duration::from_millis(100))? {
+            let has_event = event::poll(std::time::Duration::from_millis(100))?;
+            if self.handle_scroll_modal_signals()? {
+                return Ok(false);
+            }
+
+            if has_event {
                 if let Event::Key(key) = event::read()? {
                     // Only handle press events
                     if key.kind != KeyEventKind::Press {
@@ -977,7 +993,12 @@ impl App {
             self.render_legend_for_context(crate::scrollback::HelpContext::Search)?;
 
             // Wait for input
-            if event::poll(std::time::Duration::from_millis(100))? {
+            let has_event = event::poll(std::time::Duration::from_millis(100))?;
+            if self.handle_scroll_modal_signals()? {
+                return Ok((filter_offset, scrolled_to_match));
+            }
+
+            if has_event {
                 if let Event::Key(key) = event::read()? {
                     // Only handle press events
                     if key.kind != KeyEventKind::Press {
@@ -1550,15 +1571,29 @@ impl App {
                 if lines_back > 0 && lines_back <= len {
                     self.scrollback_buffer
                         .replace_line(len - lines_back, content);
+                    self.viewer_state
+                        .boundaries
+                        .truncate_to_len(self.scrollback_buffer.len());
                 }
             }
             crate::scrollback::CapturedLine::EraseBelow { lines_back } => {
                 let len = self.scrollback_buffer.len();
                 if lines_back > 0 && lines_back <= len {
                     self.scrollback_buffer.erase_from(len - lines_back);
+                    self.viewer_state
+                        .boundaries
+                        .truncate_to_len(self.scrollback_buffer.len());
                 }
             }
         }
+    }
+
+    /// Processes pending signals while a mini-input modal is active.
+    ///
+    /// Returns true when shutdown was requested and the modal should exit.
+    fn handle_scroll_modal_signals(&mut self) -> Result<bool> {
+        self.handle_signals()?;
+        Ok(self.should_shutdown())
     }
 
     /// Renders the bottom legend for a modal scrollback context when enabled.
