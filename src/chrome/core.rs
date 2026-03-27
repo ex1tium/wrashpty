@@ -294,41 +294,6 @@ impl Chrome {
         }
     }
 
-    /// Called when entering Passthrough mode.
-    ///
-    /// **MANDATORY**: Always emits scroll region reset (`\x1b[r`) regardless of
-    /// chrome state. This is critical for preventing terminal corruption from
-    /// full-screen applications like vim and htop.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if escape sequence cannot be written to stdout.
-    pub fn enter_passthrough_mode(&mut self) -> io::Result<()> {
-        // ALWAYS reset scroll region on Passthrough entry - defense against corruption
-        self.reset_scroll_region()?;
-        debug!("Scroll region reset for Passthrough mode");
-        Ok(())
-    }
-
-    /// Called when entering Edit mode.
-    ///
-    /// Sets up scroll region if chrome is active to reserve space for bars.
-    ///
-    /// # Arguments
-    ///
-    /// * `total_rows` - Total terminal height in rows
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if escape sequence cannot be written to stdout.
-    pub fn enter_edit_mode(&mut self, total_rows: u16) -> io::Result<()> {
-        if self.is_active() {
-            self.setup_scroll_region(total_rows)?;
-            debug!(total_rows, "Scroll region set for Edit mode with chrome");
-        }
-        Ok(())
-    }
-
     /// Sets up the scroll region for chrome display.
     ///
     /// Emits DECSTBM sequence to set scroll region from row 2 to row N,

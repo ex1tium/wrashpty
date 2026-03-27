@@ -1571,9 +1571,6 @@ impl App {
                 if lines_back > 0 && lines_back <= len {
                     self.scrollback_buffer
                         .replace_line(len - lines_back, content);
-                    self.viewer_state
-                        .boundaries
-                        .truncate_to_len(self.scrollback_buffer.len());
                 }
             }
             crate::scrollback::CapturedLine::EraseBelow { lines_back } => {
