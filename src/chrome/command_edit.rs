@@ -177,8 +177,8 @@ pub fn extract_heredoc_delimiter(marker_text: &str) -> Option<String> {
 /// Given old marker `<<'EOF'` and new delimiter `END`, returns `<<'END'`.
 pub fn rebuild_heredoc_marker(old_marker: &str, new_delim: &str) -> String {
     let rest = old_marker.strip_prefix("<<").unwrap_or(old_marker);
-    let (dash, rest) = if rest.starts_with('-') {
-        ("-", &rest[1..])
+    let (dash, rest) = if let Some(stripped) = rest.strip_prefix('-') {
+        ("-", stripped)
     } else {
         ("", rest)
     };
@@ -678,7 +678,7 @@ pub fn tokenize_command(command: &str) -> Vec<CommandToken> {
 /// The tokenizer now collects heredoc body/delimiter inline during tokenization.
 /// This pass links HeredocMarker ↔ HeredocDelimiter via pair_index, locks body
 /// tokens, and degrades unmatched markers to Argument.
-fn collect_heredoc_bodies(tokens: &mut Vec<CommandToken>) {
+fn collect_heredoc_bodies(tokens: &mut [CommandToken]) {
     let mut i = 0;
     while i < tokens.len() {
         if tokens[i].token_type != TokenType::HeredocMarker {
@@ -690,13 +690,13 @@ fn collect_heredoc_bodies(tokens: &mut Vec<CommandToken>) {
 
         // Find the matching HeredocDelimiter after this marker
         let mut delim_idx = None;
-        for j in (marker_idx + 1)..tokens.len() {
-            if tokens[j].token_type == TokenType::HeredocDelimiter {
+        for (j, token) in tokens.iter().enumerate().skip(marker_idx + 1) {
+            if token.token_type == TokenType::HeredocDelimiter {
                 delim_idx = Some(j);
                 break;
             }
             // Stop if we hit another marker (nested heredocs)
-            if tokens[j].token_type == TokenType::HeredocMarker {
+            if token.token_type == TokenType::HeredocMarker {
                 break;
             }
         }

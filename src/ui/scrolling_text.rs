@@ -53,9 +53,7 @@ impl<'a> ScrollingText<'a> {
         }
 
         let mut units: Vec<&str> = self.text.graphemes(true).collect();
-        for _ in 0..self.gap_cols {
-            units.push(" ");
-        }
+        units.extend(std::iter::repeat_n(" ", self.gap_cols));
 
         if units.is_empty() {
             return String::new();

@@ -318,7 +318,7 @@ pub struct Template {
     /// Database ID.
     pub id: i64,
 
-    /// Template pattern with placeholders (e.g., "docker run -p <PORT>:<PORT> <IMAGE>").
+    /// Template pattern with placeholders (e.g., `docker run -p <PORT>:<PORT> <IMAGE>`).
     pub pattern: String,
 
     /// Base command name.
