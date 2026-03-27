@@ -48,7 +48,7 @@ The codebase already provides solid foundations:
 
 ## Architecture Overview
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                            UI Layer                                      │
 │  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────────────┐  │
@@ -124,7 +124,7 @@ The codebase already provides solid foundations:
 
 ## Module Structure
 
-```
+```text
 src/
 ├── intelligence/                        # Command Intelligence Engine
 │   ├── mod.rs                           # Module root, CommandIntelligence struct
@@ -635,7 +635,7 @@ Cache entries are invalidated (deleted or refreshed) when:
 1. **Command Learning:** After `learn_command()` completes, invalidate cache entries
    matching the learned command's base command:
    ```sql
-   DELETE FROM ci_suggestion_cache WHERE cache_key LIKE '%:{base_command}:%';
+   DELETE FROM ci_suggestion_cache WHERE cache_key LIKE '%:' || :base_command || ':%';
    ```
 
 2. **Pattern Updates:** After user pattern CRUD operations, invalidate all cache:
@@ -754,7 +754,7 @@ pub struct SuggestionContext {
     pub last_command: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PositionType {
     /// First token position (command)
     Command,
@@ -763,7 +763,7 @@ pub enum PositionType {
     Subcommand,
 
     /// After a flag that expects a value
-    FlagValue { flag: &str },
+    FlagValue { flag: String },
 
     /// After a pipe operator
     AfterPipe,
