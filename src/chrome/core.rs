@@ -967,8 +967,8 @@ impl Chrome {
         self.expire_notifications();
 
         // Check for active notification
-        if let Some(notif) = self.notifications.front().cloned() {
-            self.render_notification(cols, &notif)
+        if let Some(notif) = self.notifications.front() {
+            self.render_notification(cols, notif)
         } else {
             self.render_context_bar(cols, state)
         }
