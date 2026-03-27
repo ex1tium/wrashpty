@@ -128,8 +128,9 @@ impl App {
     pub(super) fn get_shell_cwd(&self) -> PathBuf {
         if let Some(pid) = self.pty.child_pid() {
             let proc_cwd = format!("/proc/{}/cwd", pid);
-            if let Ok(cwd) = std::fs::read_link(&proc_cwd) {
-                return cwd;
+            match std::fs::read_link(&proc_cwd) {
+                Ok(cwd) => return cwd,
+                Err(e) => debug!(pid = %pid, path = %proc_cwd, error = %e, "failed to read shell cwd, falling back to parent process cwd"),
             }
         }
         // Fallback to parent process cwd
@@ -441,56 +442,4 @@ impl App {
         result
     }
 
-    /// Toggles chrome display mode.
-    ///
-    /// Switches between Headless and Full modes with full terminal update.
-    /// This can be called from keybinding handlers in future tickets.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if terminal operations fail.
-    #[allow(dead_code)]
-    pub(super) fn toggle_chrome(&mut self) -> Result<()> {
-        let (cols, rows) =
-            TerminalGuard::get_size().context("Failed to get terminal size for chrome toggle")?;
-
-        self.chrome
-            .toggle_with_terminal_update(cols, rows)
-            .context("Failed to toggle chrome")?;
-
-        // Render context bar immediately after enabling chrome
-        if self.chrome.is_active() {
-            let timestamp = chrono::Local::now().format("%H:%M").to_string();
-            let state = self.topbar_state(&timestamp);
-
-            if let Err(e) = self
-                .chrome
-                .render_context_bar_with_notifications(cols, &state)
-            {
-                warn!("Failed to render context bar after toggle: {}", e);
-            }
-        }
-
-        // Calculate new effective rows based on chrome state
-        // Subtract 1 for top bar when chrome is active
-        let effective_rows = if self.chrome.is_active() {
-            rows.saturating_sub(1)
-        } else {
-            rows
-        };
-
-        // Resize PTY to new effective rows
-        self.pty
-            .resize(cols, effective_rows)
-            .context("Failed to resize PTY after chrome toggle")?;
-
-        debug!(
-            cols,
-            effective_rows,
-            chrome_active = self.chrome.is_active(),
-            "PTY resized after chrome toggle"
-        );
-
-        Ok(())
-    }
 }

@@ -209,7 +209,6 @@ pub struct App {
     startup_time: Instant,
 
     /// Session token for marker validation (16 hex chars as bytes).
-    #[allow(dead_code)]
     session_token: [u8; 16],
 
     /// Path to the generated bashrc file (for cleanup).
@@ -875,10 +874,6 @@ impl App {
                         }
                         commands::CommandAction::OpenSettingsHelp => {
                             self.open_panel_settings_help()?;
-                            return Ok(());
-                        }
-                        commands::CommandAction::Exit => {
-                            self.transition_to_terminating();
                             return Ok(());
                         }
                     }
