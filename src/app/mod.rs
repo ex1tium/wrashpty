@@ -51,7 +51,7 @@ use tracing::{debug, info, warn};
 use crate::chrome::panel::{Panel, PanelResult};
 use crate::chrome::settings_view::SettingAction;
 use crate::chrome::tabbed_panel::TabbedPanel;
-use crate::chrome::{Chrome, NotificationStyle, SizeCheckResult};
+use crate::chrome::{Chrome, NotificationStyle};
 use crate::config::Config;
 use crate::editor::{Editor, EditorResult};
 use crate::history_store::HistoryStore;
@@ -715,24 +715,7 @@ impl App {
         if self.pending_resize {
             self.pending_resize = false;
             if let Ok((cols, rows)) = TerminalGuard::get_size() {
-                match self.chrome.check_minimum_size(cols, rows) {
-                    SizeCheckResult::Suspended => {
-                        if let Err(e) = self.chrome.clear_bars(rows) {
-                            warn!("Failed to clear chrome bars on suspend: {}", e);
-                        }
-                        if let Err(e) = Chrome::reset_scroll_region() {
-                            warn!("Failed to reset scroll region on suspend: {}", e);
-                        }
-                        debug!("Chrome suspended due to small terminal (deferred)");
-                    }
-                    SizeCheckResult::Resumed | SizeCheckResult::NoChange => {
-                        if self.chrome.is_active() {
-                            if let Err(e) = self.chrome.setup_scroll_region_preserve_cursor(rows) {
-                                warn!("Failed to reapply scroll region on resize: {}", e);
-                            }
-                        }
-                    }
-                }
+                self.sync_chrome_for_terminal_size(cols, rows, true);
             }
         }
 

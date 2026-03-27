@@ -66,25 +66,10 @@ impl App {
             }
         };
 
-        // Check minimum size and auto-suspend chrome if needed
-        let _ = self.chrome.check_minimum_size(cols, rows);
-
         let coming_from_passthrough = from_mode == Mode::Passthrough;
+        self.sync_chrome_for_terminal_size(cols, rows, coming_from_passthrough);
 
         if self.chrome.is_active() {
-            if coming_from_passthrough {
-                // Coming from Passthrough: cursor is at end of command output.
-                // Re-establish scroll region using cursor-preserving variant.
-                if let Err(e) = self.chrome.setup_scroll_region_preserve_cursor(rows) {
-                    warn!("Failed to restore scroll region: {}", e);
-                }
-            } else {
-                // Initial startup: set up scroll region
-                if let Err(e) = self.chrome.enter_edit_mode(rows) {
-                    warn!("Failed to set up chrome scroll region: {}", e);
-                }
-            }
-
             // SINGLE RENDER POINT: Render context bar BEFORE reedline starts
             let timestamp = chrono::Local::now().format("%H:%M").to_string();
             let state = self.topbar_state(&timestamp);
@@ -244,14 +229,11 @@ impl App {
         let (cols, rows) =
             TerminalGuard::get_size().context("Failed to get terminal size for transition")?;
 
+        self.sync_chrome_for_terminal_size(cols, rows, true);
+
         // CRITICAL: Re-establish scroll region BEFORE command output flows.
         // Reedline/crossterm RESETS the scroll region during Edit mode.
         // Without this, command output will overflow to the footer row.
-        if self.chrome.is_active() {
-            if let Err(e) = self.chrome.setup_scroll_region_preserve_cursor(rows) {
-                warn!("Failed to re-establish scroll region for Injecting: {}", e);
-            }
-        }
 
         // Use effective_rows to keep output within scroll region
         // Subtract 1 for top bar when chrome is active
@@ -352,6 +334,8 @@ impl App {
                 let (cols, rows) =
                     TerminalGuard::get_size().context("Failed to get terminal size for resize")?;
 
+                let resize_state = self.sync_chrome_for_terminal_size(cols, rows, true);
+
                 // Calculate effective rows to match scroll region
                 // Subtract 1 for top bar when chrome is active
                 let effective_rows = if self.chrome.is_active() {
@@ -366,12 +350,13 @@ impl App {
                     .context("Failed to resize PTY")?;
 
                 // Update chrome for new terminal dimensions
-                if self.chrome.is_active() {
-                    // Reapply scroll region for new size (preserving cursor)
-                    if let Err(e) = self.chrome.setup_scroll_region_preserve_cursor(rows) {
-                        warn!("Failed to reapply scroll region on resize: {}", e);
-                    }
-
+                if self.chrome.is_active()
+                    && matches!(
+                        resize_state,
+                        crate::chrome::SizeCheckResult::Resumed
+                            | crate::chrome::SizeCheckResult::NoChange
+                    )
+                {
                     // Redraw context bar for new dimensions
                     let timestamp = chrono::Local::now().format("%H:%M").to_string();
                     let state = self.topbar_state(&timestamp);
@@ -413,6 +398,47 @@ impl App {
     /// Returns whether the application should shut down.
     pub(super) fn should_shutdown(&self) -> bool {
         self.signal_handler.should_shutdown()
+    }
+
+    /// Applies chrome minimum-size handling and scroll-region updates for a resize.
+    ///
+    /// When the terminal shrinks below chrome's minimum size, the stale bar and
+    /// scroll region are explicitly cleared. When it resumes, the appropriate
+    /// chrome scroll region is re-established.
+    pub(super) fn sync_chrome_for_terminal_size(
+        &mut self,
+        cols: u16,
+        rows: u16,
+        preserve_cursor: bool,
+    ) -> crate::chrome::SizeCheckResult {
+        let result = self.chrome.check_minimum_size(cols, rows);
+
+        match result {
+            crate::chrome::SizeCheckResult::Suspended => {
+                if let Err(e) = self.chrome.clear_bars(rows) {
+                    warn!("Failed to clear chrome bars on suspend: {}", e);
+                }
+                if let Err(e) = self.chrome.reset_scroll_region() {
+                    warn!("Failed to reset scroll region on suspend: {}", e);
+                }
+                debug!("Chrome suspended due to small terminal");
+            }
+            crate::chrome::SizeCheckResult::Resumed | crate::chrome::SizeCheckResult::NoChange => {
+                if self.chrome.is_active() {
+                    let setup_result = if preserve_cursor {
+                        self.chrome.setup_scroll_region_preserve_cursor(rows)
+                    } else {
+                        self.chrome.setup_scroll_region(rows)
+                    };
+
+                    if let Err(e) = setup_result {
+                        warn!("Failed to configure scroll region for resize: {}", e);
+                    }
+                }
+            }
+        }
+
+        result
     }
 
     /// Toggles chrome display mode.

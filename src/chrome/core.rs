@@ -91,6 +91,38 @@ pub struct Notification {
     pub expires_at: Instant,
 }
 
+/// RAII guard for a non-default terminal scroll region.
+///
+/// When dropped, this guard restores the terminal's full-screen DECSTBM region.
+struct ScrollRegionGuard {
+    armed: bool,
+}
+
+impl ScrollRegionGuard {
+    fn new() -> Self {
+        Self { armed: true }
+    }
+
+    fn reset_with<W: Write>(mut self, out: &mut W) -> io::Result<()> {
+        write!(out, "\x1b[r")?;
+        self.armed = false;
+        Ok(())
+    }
+}
+
+impl Drop for ScrollRegionGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
+        let _ = write!(out, "\x1b[r");
+        let _ = out.flush();
+    }
+}
+
 /// Chrome layer manager for status bar, scroll regions, and panels.
 ///
 /// The Chrome struct manages:
@@ -110,6 +142,9 @@ pub struct Chrome {
 
     /// Current panel state (collapsed or expanded).
     panel_state: PanelState,
+
+    /// RAII guard for any active non-default scroll region.
+    scroll_region_guard: Option<ScrollRegionGuard>,
 
     /// Queue of active notifications.
     notifications: VecDeque<Notification>,
@@ -147,6 +182,7 @@ impl Chrome {
             mode,
             suspended: false,
             panel_state: PanelState::Collapsed,
+            scroll_region_guard: None,
             notifications: VecDeque::new(),
             theme,
             glyph_tier,
@@ -267,9 +303,9 @@ impl Chrome {
     /// # Errors
     ///
     /// Returns an error if escape sequence cannot be written to stdout.
-    pub fn enter_passthrough_mode(&self) -> io::Result<()> {
+    pub fn enter_passthrough_mode(&mut self) -> io::Result<()> {
         // ALWAYS reset scroll region on Passthrough entry - defense against corruption
-        Self::reset_scroll_region()?;
+        self.reset_scroll_region()?;
         debug!("Scroll region reset for Passthrough mode");
         Ok(())
     }
@@ -309,16 +345,33 @@ impl Chrome {
     /// # Errors
     ///
     /// Returns an error if escape sequence cannot be written to stdout.
-    pub fn setup_scroll_region(&self, total_rows: u16) -> io::Result<()> {
+    fn install_scroll_region_guard(&mut self) {
+        if self.scroll_region_guard.is_none() {
+            self.scroll_region_guard = Some(ScrollRegionGuard::new());
+        }
+    }
+
+    fn reset_scroll_region_with<W: Write>(&mut self, out: &mut W) -> io::Result<()> {
+        if let Some(guard) = self.scroll_region_guard.take() {
+            guard.reset_with(out)?;
+        } else {
+            write!(out, "\x1b[r")?;
+        }
+        Ok(())
+    }
+
+    pub fn setup_scroll_region(&mut self, total_rows: u16) -> io::Result<()> {
         if !self.is_active() {
             return Ok(());
         }
 
-        let mut out = io::stdout();
+        let stdout = io::stdout();
+        let mut out = stdout.lock();
         // DECSTBM: Set scrolling region from row 2 to row total_rows
         // Row 1 is for context bar, rows 2-N are scroll region
         write!(out, "\x1b[2;{}r", total_rows)?;
         out.flush()?;
+        self.install_scroll_region_guard();
 
         debug!(top = 2, bottom = total_rows, "Scroll region configured");
         Ok(())
@@ -340,7 +393,7 @@ impl Chrome {
     /// # Errors
     ///
     /// Returns an error if escape sequence cannot be written to stdout.
-    pub fn setup_scroll_region_preserve_cursor(&self, total_rows: u16) -> io::Result<()> {
+    pub fn setup_scroll_region_preserve_cursor(&mut self, total_rows: u16) -> io::Result<()> {
         if !self.is_active() {
             return Ok(());
         }
@@ -364,6 +417,7 @@ impl Chrome {
         write!(out, "\x1b[u")?;
 
         out.flush()?;
+        self.install_scroll_region_guard();
 
         debug!(
             top = 2,
@@ -381,10 +435,10 @@ impl Chrome {
     /// # Errors
     ///
     /// Returns an error if escape sequence cannot be written to stdout.
-    pub fn reset_scroll_region() -> io::Result<()> {
+    pub fn reset_scroll_region(&mut self) -> io::Result<()> {
         let stdout = io::stdout();
         let mut out = stdout.lock();
-        write!(out, "\x1b[r")?;
+        self.reset_scroll_region_with(&mut out)?;
         out.flush()?;
         debug!("Scroll region reset to full screen");
         Ok(())
@@ -400,17 +454,21 @@ impl Chrome {
     ///
     /// This avoids cursor corruption caused by `ESC[r` moving cursor to home
     /// before a later "preserve cursor" operation.
-    pub fn reset_and_setup_scroll_region_preserve_cursor(&self, total_rows: u16) -> io::Result<()> {
+    pub fn reset_and_setup_scroll_region_preserve_cursor(
+        &mut self,
+        total_rows: u16,
+    ) -> io::Result<()> {
         let stdout = io::stdout();
         let mut out = stdout.lock();
 
         // Save original cursor BEFORE any DECSTBM changes.
         write!(out, "\x1b[s")?;
         // Reset to full-screen margins (can move cursor to home in many terminals).
-        write!(out, "\x1b[r")?;
+        self.reset_scroll_region_with(&mut out)?;
         // Re-apply chrome margins only when chrome is active.
         if self.is_active() {
             write!(out, "\x1b[2;{}r", total_rows)?;
+            self.install_scroll_region_guard();
         }
         // Restore the original cursor position after margin changes.
         write!(out, "\x1b[u")?;
@@ -581,11 +639,22 @@ impl Chrome {
             }
             ChromeMode::Full => {
                 // Disabling chrome
+                let rows_to_clear = self.panel_height().min(rows);
+                self.panel_state = PanelState::Collapsed;
                 if self.is_active() {
-                    self.clear_bars(rows)?;
+                    let stdout = io::stdout();
+                    let mut out = stdout.lock();
+                    write!(out, "\x1b[s")?;
+                    for row in 1..=rows_to_clear {
+                        write!(out, "\x1b[{};1H\x1b[2K", row)?;
+                    }
+                    self.reset_scroll_region_with(&mut out)?;
+                    write!(out, "\x1b[u")?;
+                    out.flush()?;
+                } else {
+                    drop(self.scroll_region_guard.take());
                 }
                 self.mode = ChromeMode::Headless;
-                Self::reset_scroll_region()?;
                 info!("Chrome disabled");
             }
         }
@@ -619,9 +688,10 @@ impl Chrome {
         let top_row = height + 1;
         if top_row > total_rows {
             // Fullscreen: panel covers entire terminal, reset scroll region
-            write!(out, "\x1b[r")?;
+            self.reset_scroll_region_with(&mut out)?;
         } else {
             write!(out, "\x1b[{};{}r", top_row, total_rows)?;
+            self.install_scroll_region_guard();
         }
 
         // Position cursor at bottom of terminal
@@ -665,7 +735,7 @@ impl Chrome {
         // Reset scroll region to full screen first (required to clear rows outside
         // the panel's scroll region which was height+1 to total_rows)
         write!(out, "\x1b[0m")?; // Reset attributes
-        write!(out, "\x1b[r")?; // Reset scroll region to full screen
+        self.reset_scroll_region_with(&mut out)?; // Reset scroll region to full screen
 
         // Clear each panel row
         for row in 1..=old_height {
@@ -724,9 +794,10 @@ impl Chrome {
         let top_row = new_height + 1;
         if top_row > new_total_rows {
             // Fullscreen: panel covers entire terminal, reset scroll region
-            write!(out, "\x1b[r")?;
+            self.reset_scroll_region_with(&mut out)?;
         } else {
             write!(out, "\x1b[{};{}r", top_row, new_total_rows)?;
+            self.install_scroll_region_guard();
         }
 
         // Position cursor at bottom of terminal
