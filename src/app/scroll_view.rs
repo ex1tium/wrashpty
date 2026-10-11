@@ -392,7 +392,7 @@ impl App {
                 .saturating_sub(target_line)
                 .saturating_sub(viewport)
                 .saturating_add(1);
-            self.scroll_state = crate::types::ScrollState::scrolled_at(new_offset.max(0));
+            self.scroll_state = crate::types::ScrollState::scrolled_at(new_offset);
             debug!(target_line, new_offset, "Jumped to next command");
         } else {
             debug!("No next command found");
@@ -600,7 +600,7 @@ impl App {
                             let viewport = self.viewport_height();
                             let offset = self.scroll_state.offset();
                             let first_visible =
-                                total.saturating_sub(offset).saturating_sub(viewport).max(0);
+                                total.saturating_sub(offset).saturating_sub(viewport);
 
                             // Perform incremental search
                             search.perform_search(&self.scrollback_buffer, first_visible);
@@ -1206,11 +1206,7 @@ impl App {
             let max_offset = crate::scrollback::ScrollViewer::max_offset(total, viewport);
 
             // Calculate percentage (0 = at bottom, 100 = at top)
-            let percentage = if max_offset == 0 {
-                0
-            } else {
-                ((offset * 100) / max_offset).min(100) as u8
-            };
+            let percentage = (offset * 100).checked_div(max_offset).unwrap_or(0).min(100) as u8;
 
             // Calculate current line - the last visible line at bottom of viewport
             // At offset=0 (bottom), current_line = total (you're at the latest content)

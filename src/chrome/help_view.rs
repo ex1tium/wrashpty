@@ -329,7 +329,7 @@ impl HelpView {
         }
 
         // Sort by score descending (best matches first)
-        self.filtered.sort_by(|a, b| b.score.cmp(&a.score));
+        self.filtered.sort_by_key(|a| std::cmp::Reverse(a.score));
 
         // Reset selection to the beginning of filtered results
         self.list.set_selection(0, self.filtered.len());

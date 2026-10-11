@@ -1,0 +1,5 @@
+# Pin clippy's lint MSRV below the crate MSRV (1.88): rust-version = 1.88
+# (required by the command-schema git pins' let-chains) would otherwise force
+# mass collapsible_if let-chain churn in latency-critical hot paths
+# (marker.rs, pump.rs). Raise this and collapse the chains in a dedicated PR.
+msrv = "1.86"

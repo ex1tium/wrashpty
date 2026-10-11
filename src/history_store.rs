@@ -745,7 +745,7 @@ impl HistoryStore {
 
         // Sort by frequency (descending)
         let mut tokens: Vec<(String, u32)> = token_counts.into_iter().collect();
-        tokens.sort_by(|a, b| b.1.cmp(&a.1));
+        tokens.sort_by_key(|a| std::cmp::Reverse(a.1));
 
         // Return just the tokens, limited
         Ok(tokens.into_iter().take(limit).map(|(t, _)| t).collect())

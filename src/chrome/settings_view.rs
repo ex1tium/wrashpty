@@ -290,31 +290,29 @@ impl SettingsView {
             None => return,
         };
 
-        let persist_value: String;
-
-        match (&mut item.kind, edit) {
+        let persist_value: String = match (&mut item.kind, edit) {
             (SettingKind::Toggle(val), EditState::Toggle(w)) => {
                 *val = w.value();
-                persist_value = if *val { "true".into() } else { "false".into() };
+                if *val { "true".into() } else { "false".into() }
             }
             (SettingKind::Select { selected, .. }, EditState::Select(w)) => {
                 *selected = w.selected();
-                persist_value = w.selected_label().to_string();
+                w.selected_label().to_string()
             }
             (SettingKind::Select { selected, .. }, EditState::Carousel(w)) => {
                 *selected = w.selected();
-                persist_value = w.selected_label().to_string();
+                w.selected_label().to_string()
             }
             (SettingKind::Text(val), EditState::Text(w)) => {
                 *val = w.value().to_string();
-                persist_value = val.clone();
+                val.clone()
             }
             (SettingKind::Slider { value, .. }, EditState::Slider(w)) => {
                 *value = w.value();
-                persist_value = value.to_string();
+                value.to_string()
             }
             _ => return,
-        }
+        };
 
         // Persist to history store
         let key = item.key;

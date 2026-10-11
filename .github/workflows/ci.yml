@@ -48,6 +48,54 @@ jobs:
       - name: Build release
         run: cargo build --release
 
+  test-no-default-features:
+    name: Test (no default features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: no-default-features-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build without default features
+        run: cargo build --no-default-features
+
+      - name: Test without default features
+        run: cargo test --no-default-features
+
+  msrv:
+    name: MSRV (1.88)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install Rust toolchain (MSRV)
+        uses: dtolnay/rust-toolchain@1.88
+
+      - name: Cache cargo registry
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: msrv-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build (MSRV)
+        run: cargo build --all-features
+
+      - name: Test (MSRV)
+        run: cargo test --all-features
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest

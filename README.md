@@ -43,7 +43,7 @@ Mode switching is driven by [shell integration markers](docs/mvp/02-architecture
 
 ## Requirements
 
-- **Rust** 1.75+ (for building)
+- **Rust** 1.88+ (for building)
 - **Bash** 4.0+ (for `BASH_COMMAND` in DEBUG traps)
 - **Linux** (primary target; macOS may work with Homebrew Bash)
 

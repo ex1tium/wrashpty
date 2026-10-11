@@ -165,16 +165,14 @@ impl AltScreenDetector {
                     return Some(AltScreenEvent::Enter);
                 }
             }
-            b'l' => {
-                // Reset (exit alt screen)
-                if self.in_alt_screen {
-                    self.in_alt_screen = false;
-                    tracing::debug!(
-                        "Alt screen exited ({})",
-                        if is_1049 { "1049" } else { "47" }
-                    );
-                    return Some(AltScreenEvent::Exit);
-                }
+            // Reset (exit alt screen)
+            b'l' if self.in_alt_screen => {
+                self.in_alt_screen = false;
+                tracing::debug!(
+                    "Alt screen exited ({})",
+                    if is_1049 { "1049" } else { "47" }
+                );
+                return Some(AltScreenEvent::Exit);
             }
             _ => {}
         }

@@ -58,7 +58,7 @@ cargo doc --no-deps --open     # Generate docs
 
 ## Code Style
 
-- **Edition 2024**, Rust 1.85+, rustfmt/clippy enforced
+- **Edition 2024**, Rust 1.88+, rustfmt/clippy enforced
 - **Errors**: `thiserror` for public APIs, `anyhow` internally
 - **No panics**: Use `Result<T, E>`; reserve `unwrap()` for proven invariants
 

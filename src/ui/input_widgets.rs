@@ -565,7 +565,7 @@ impl CarouselWidget {
 
         // Prev with left arrow
         spans.push(Span::styled(
-            format!("{} {} ", glyphs.nav.arrow_left, &self.options[prev_idx]),
+            format!("{} {} ", glyphs.nav.arrow_left, self.options[prev_idx]),
             dimmed,
         ));
         // Spacer
@@ -574,7 +574,7 @@ impl CarouselWidget {
         spans.push(Span::styled(
             format!(
                 "{} {}",
-                glyphs.nav.chevron_right, &self.options[self.selected]
+                glyphs.nav.chevron_right, self.options[self.selected]
             ),
             active,
         ));
@@ -582,7 +582,7 @@ impl CarouselWidget {
         spans.push(Span::styled("  ", Style::default()));
         // Next with right arrow
         spans.push(Span::styled(
-            format!("{} {}", &self.options[next_idx], glyphs.nav.arrow_right),
+            format!("{} {}", self.options[next_idx], glyphs.nav.arrow_right),
             dimmed,
         ));
 

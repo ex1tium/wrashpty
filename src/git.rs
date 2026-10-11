@@ -293,11 +293,9 @@ fn parse_porcelain_v2(output: &str) -> HashMap<PathBuf, GitFileStatus> {
                     files.insert(PathBuf::from(path), GitFileStatus::Conflict);
                 }
             }
-            Some(b'?') => {
-                // Untracked: "? path"
-                if line.len() > 2 {
-                    files.insert(PathBuf::from(&line[2..]), GitFileStatus::Untracked);
-                }
+            // Untracked: "? path"
+            Some(b'?') if line.len() > 2 => {
+                files.insert(PathBuf::from(&line[2..]), GitFileStatus::Untracked);
             }
             _ => {
                 // Ignore headers and unknown lines

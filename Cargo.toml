@@ -15,7 +15,7 @@ clap = "4.5"
 name = "wrashpty"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.86"
+rust-version = "1.88"
 
 [features]
 default = ["command-schema"]
