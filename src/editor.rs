@@ -29,6 +29,18 @@ const MAX_PENDING_OUTPUT: usize = 64 * 1024;
 /// Prefix for internal host commands to avoid collision with user input.
 const HOST_COMMAND_PREFIX: &str = "__wrashpty_";
 
+/// Host commands accepted from `ExecuteHostCommand` keybindings (exact match).
+///
+/// Must stay in sync with the `EditorResult::HostCommand` dispatch in
+/// `crate::app`.
+const HOST_COMMANDS: &[&str] = &[
+    "open_panel",
+    "scroll_up",
+    "scroll_down",
+    "scroll_line_up",
+    "scroll_line_down",
+];
+
 /// Buffer for PTY output received during Edit mode.
 ///
 /// Uses a VecDeque for efficient push/pop operations. When the buffer
@@ -121,6 +133,25 @@ pub enum EditorResult {
     Exit,
     /// A host command was requested via ExecuteHostCommand.
     HostCommand(String),
+}
+
+/// Classifies a line submitted by reedline as a host command or shell command.
+///
+/// reedline 0.45 delivers `ExecuteHostCommand` events through `Signal::Success`,
+/// so internal commands arrive here as text. Only exact matches against
+/// [`HOST_COMMANDS`] are treated as host commands; anything else the user
+/// typed (including `__wrashpty_`-prefixed lines) runs as a normal command.
+fn classify_submitted_line(line: String) -> EditorResult {
+    if let Some(cmd) = line
+        .strip_prefix(HOST_COMMAND_PREFIX)
+        .filter(|cmd| HOST_COMMANDS.contains(cmd))
+    {
+        debug!(command = %cmd, "Host command received");
+        EditorResult::HostCommand(cmd.to_string())
+    } else {
+        debug!(command = %line, "User submitted command");
+        EditorResult::Command(line)
+    }
 }
 
 /// Reedline-based line editor with background output buffering.
@@ -235,19 +266,7 @@ impl Editor {
     /// Returns an error if reedline encounters an I/O error.
     pub fn read_line(&mut self, prompt: &dyn Prompt) -> Result<EditorResult> {
         match self.reedline.read_line(prompt) {
-            Ok(Signal::Success(line)) => {
-                // Check if this is a host command (from ExecuteHostCommand event)
-                // ExecuteHostCommand returns through Success in reedline 0.45
-                // Use prefix check to avoid collision with user input
-                if line.starts_with(HOST_COMMAND_PREFIX) {
-                    let cmd = line.strip_prefix(HOST_COMMAND_PREFIX).unwrap_or(&line);
-                    debug!(command = %cmd, "Host command received");
-                    Ok(EditorResult::HostCommand(cmd.to_string()))
-                } else {
-                    debug!(command = %line, "User submitted command");
-                    Ok(EditorResult::Command(line))
-                }
-            }
+            Ok(Signal::Success(line)) => Ok(classify_submitted_line(line)),
             Ok(Signal::CtrlC) => {
                 debug!("User pressed Ctrl+C");
                 Ok(EditorResult::ClearLine)
@@ -415,5 +434,40 @@ mod tests {
     fn test_max_pending_output_constant() {
         // Verify the constant is 64KB
         assert_eq!(MAX_PENDING_OUTPUT, 64 * 1024);
+    }
+
+    // =========================================================================
+    // Host Command Classification Tests
+    // =========================================================================
+
+    #[test]
+    fn test_classify_submitted_line_with_exact_host_commands_returns_host_command() {
+        for cmd in HOST_COMMANDS {
+            let result = classify_submitted_line(format!("{HOST_COMMAND_PREFIX}{cmd}"));
+            assert!(
+                matches!(result, EditorResult::HostCommand(ref c) if c == *cmd),
+                "expected host command for {cmd}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_classify_submitted_line_with_unknown_prefixed_input_returns_shell_command() {
+        let result = classify_submitted_line("__wrashpty_evil".to_string());
+        assert!(matches!(result, EditorResult::Command(ref c) if c == "__wrashpty_evil"));
+    }
+
+    #[test]
+    fn test_classify_submitted_line_with_host_command_and_suffix_returns_shell_command() {
+        let result = classify_submitted_line("__wrashpty_scroll_up; rm -rf /".to_string());
+        assert!(
+            matches!(result, EditorResult::Command(ref c) if c == "__wrashpty_scroll_up; rm -rf /")
+        );
+    }
+
+    #[test]
+    fn test_classify_submitted_line_with_normal_input_returns_shell_command() {
+        let result = classify_submitted_line("echo hello".to_string());
+        assert!(matches!(result, EditorResult::Command(ref c) if c == "echo hello"));
     }
 }

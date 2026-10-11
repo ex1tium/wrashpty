@@ -372,6 +372,7 @@ pub fn dedupe_bash_history() -> Result<usize, HistoryError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::io::Cursor;
 
     #[test]
@@ -489,6 +490,7 @@ EOF
     }
 
     #[test]
+    #[serial]
     fn test_append_to_bash_history_with_command_writes_entry() {
         use std::fs;
         use tempfile::tempdir;

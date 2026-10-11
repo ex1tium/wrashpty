@@ -3,7 +3,7 @@
 //! This is the entry point that sets up critical safety infrastructure
 //! (panic hooks, logging) before any terminal operations begin.
 
-use std::fs::File;
+use std::fs::OpenOptions;
 use std::process::Command;
 use std::sync::Mutex;
 
@@ -86,17 +86,24 @@ impl Drop for BashrcGuard {
 
 /// Set up file-based logging.
 ///
-/// Logging goes to /tmp/wrashpty.log, never to the controlled terminal.
-/// This prevents log output from corrupting the terminal display.
+/// Logging goes to `/tmp/wrashpty-<pid>.log` (one file per process), never to
+/// the controlled terminal. This prevents log output from corrupting the
+/// terminal display and keeps concurrent instances from clobbering each other.
 fn setup_logging() -> Result<()> {
-    let log_file = File::create("/tmp/wrashpty.log")
-        .context("Failed to create log file at /tmp/wrashpty.log")?;
+    let path = format!("/tmp/wrashpty-{}.log", std::process::id());
+    let log_file = OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&path)
+        .with_context(|| format!("Failed to open log file at {path}"))?;
 
     // Mutex<W> implements MakeWriter for W: Write + 'static
     let log_file = Mutex::new(log_file);
 
+    let (level, invalid_value) = resolve_log_level();
+
     let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::DEBUG)
+        .with_max_level(level)
         .with_writer(log_file)
         .with_ansi(false)
         .with_target(true)
@@ -106,7 +113,33 @@ fn setup_logging() -> Result<()> {
     tracing::subscriber::set_global_default(subscriber)
         .context("Failed to set global tracing subscriber")?;
 
+    if let Some(value) = invalid_value {
+        tracing::warn!(
+            value = %value,
+            "Invalid WRASHPTY_LOG value (expected error|warn|info|debug|trace), falling back to INFO"
+        );
+    }
+
     Ok(())
+}
+
+/// Resolves the log level from the `WRASHPTY_LOG` environment variable.
+///
+/// Defaults to INFO. Returns the raw value alongside the level when the
+/// variable is set to an unrecognized name, so the caller can warn.
+fn resolve_log_level() -> (tracing::Level, Option<String>) {
+    let Ok(raw) = std::env::var("WRASHPTY_LOG") else {
+        return (tracing::Level::INFO, None);
+    };
+    let level = match raw.to_lowercase().as_str() {
+        "error" => tracing::Level::ERROR,
+        "warn" => tracing::Level::WARN,
+        "info" => tracing::Level::INFO,
+        "debug" => tracing::Level::DEBUG,
+        "trace" => tracing::Level::TRACE,
+        _ => return (tracing::Level::INFO, Some(raw)),
+    };
+    (level, None)
 }
 
 /// Validate that bash is available and log its version.
@@ -397,4 +430,48 @@ fn main() -> Result<()> {
 
     // Exit with the shell's actual exit code
     std::process::exit(exit_code);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_log_level;
+    use serial_test::serial;
+
+    #[test]
+    #[serial]
+    fn test_resolve_log_level_when_unset_returns_info_default() {
+        // SAFETY: serialized test mutating process environment
+        unsafe { std::env::remove_var("WRASHPTY_LOG") };
+        assert_eq!(resolve_log_level(), (tracing::Level::INFO, None));
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_log_level_with_valid_override_returns_requested_level() {
+        for (raw, expected) in [
+            ("error", tracing::Level::ERROR),
+            ("warn", tracing::Level::WARN),
+            ("info", tracing::Level::INFO),
+            ("debug", tracing::Level::DEBUG),
+            ("trace", tracing::Level::TRACE),
+        ] {
+            // SAFETY: serialized test mutating process environment
+            unsafe { std::env::set_var("WRASHPTY_LOG", raw) };
+            assert_eq!(
+                resolve_log_level(),
+                (expected, None),
+                "for WRASHPTY_LOG={raw}"
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_resolve_log_level_with_invalid_value_falls_back_to_info() {
+        // SAFETY: serialized test mutating process environment
+        unsafe { std::env::set_var("WRASHPTY_LOG", "verbose") };
+        let (level, invalid) = resolve_log_level();
+        assert_eq!(level, tracing::Level::INFO);
+        assert_eq!(invalid.as_deref(), Some("verbose"));
+    }
 }
