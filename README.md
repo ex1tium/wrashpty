@@ -37,7 +37,7 @@ Mode switching is driven by [shell integration markers](docs/mvp/02-architecture
 - **Autosuggestions** — inline ghost text from command history, accepted with Right Arrow
 - **Tab completion** — files, directories, PATH executables, and git branches in a navigable menu
 - **History search** — interactive Ctrl+R search and prefix-filtered Up/Down navigation
-- **Emacs and Vi keybindings** — provided by reedline, switchable at runtime
+- **Emacs keybindings** — reedline's default emacs mode (vi mode is a possible follow-up)
 - **Full transparency** — vim, htop, ssh, python, job control (Ctrl+Z/fg/bg) all work unmodified
 - **Crash safety** — terminal state is always restored, even on panic
 
@@ -50,7 +50,7 @@ Mode switching is driven by [shell integration markers](docs/mvp/02-architecture
 ## Building
 
 ```bash
-git clone https://github.com/youruser/wrashpty.git
+git clone https://github.com/ex1tium/wrashpty.git
 cd wrashpty
 cargo build --release
 ```
@@ -77,35 +77,49 @@ Once inside, use your shell normally. The enhanced editing is automatic.
 | Ctrl+Right | Accept next word of suggestion |
 | Ctrl+R | Interactive history search |
 | Up / Down | Prefix-filtered history navigation |
+| Ctrl+Space | Open the command panel |
+| PageUp / PageDown | Fullscreen scrollback viewer (page scroll; also intercepted during command execution) |
+| Shift+PageUp / Shift+PageDown | Scrollback viewer, line scroll |
 | Ctrl+D | Exit (at empty prompt) |
 | Ctrl+C | Clear current line |
+
+Built-in `:` colon commands (`:help`, `:panel`, `:settings`, …) are registered in `src/app/commands.rs`; press `:help` in-app for the full list.
+
+Command-line options: `--no-chrome` (headless mode, no status bars/panels), `--help-format {json,gnu,npm,clap}` (machine-readable help), `-h` (GNU-style help), `-V` (version).
 
 ## Project Structure
 
 ```
 wrashpty/
 ├── src/
-│   ├── main.rs          # Entry point, panic hook
-│   ├── app.rs           # Event loop, mode state machine
+│   ├── main.rs          # Entry point, CLI parsing, logging setup
+│   ├── lib.rs           # Library root
+│   ├── app/             # Event loop, mode state machine
+│   │   ├── mod.rs       # App: run loop, marker handling, host commands
+│   │   ├── transitions.rs # Mode transition side effects
+│   │   ├── scroll_view.rs # Fullscreen scrollback viewer
+│   │   ├── drain.rs     # PTY drain during injection/shutdown
+│   │   └── commands.rs  # Colon-command registry (`:help`, `:panel`, …)
 │   ├── pty.rs           # PTY spawn, resize, command injection
+│   ├── pump.rs          # Passthrough byte pump + marker parsing
+│   ├── marker.rs        # Streaming OSC 777 marker parser
 │   ├── bashrc.rs        # Generated rcfile with shell integration markers
-│   ├── marker.rs        # Streaming OSC marker parser
-│   ├── terminal.rs      # Raw mode RAII guard
-│   ├── pump.rs          # Passthrough byte pump
 │   ├── editor.rs        # reedline integration bridge
-│   ├── history.rs       # HISTFILE loader and indexer
-│   ├── suggest.rs       # Autosuggestion hinter
-│   ├── complete.rs      # Completion providers
-│   ├── prompt.rs        # Prompt renderer
-│   └── signals.rs       # SIGWINCH, SIGCHLD handling
+│   ├── prompt.rs        # Prompt renderer (exit code)
+│   ├── chrome/          # Status bars, panels, glyphs, themes, segments
+│   ├── intelligence/    # Command intelligence (SQLite-backed)
+│   ├── scrollback/      # Scrollback capture, alt-screen detection, viewer
+│   ├── ui/              # Reusable TUI widgets
+│   └── …                # git, history, completion, config, signals, safety, terminal
 ├── docs/
-│   └── mvp/
-│       ├── 01-project-summary.md
-│       ├── 02-architecture.md
-│       └── 03-scenarios-and-solutions.md
+│   ├── dependencies.md
+│   └── mvp/             # Historical MVP design docs (superseded by README where contradicted)
 ├── tests/
-│   ├── marker_tests.rs
-│   └── integration.rs
+│   ├── integration.rs       # rexpect end-to-end tests
+│   ├── marker_tests.rs      # Marker parser tests
+│   ├── panic_test.rs        # Terminal restoration on panic
+│   └── scroll_view_integration.rs
+├── clippy.toml
 └── Cargo.toml
 ```
 
@@ -132,10 +146,13 @@ Key design decisions:
 cargo run
 
 # Run with debug logging (logs go to file, not the controlled terminal)
-RUST_LOG=debug cargo run 2> /tmp/wrashpty.log
+WRASHPTY_LOG=debug cargo run
 
-# Watch the log in another terminal
-tail -f /tmp/wrashpty.log
+# Each instance writes its own log: /tmp/wrashpty-<pid>.log
+# Valid levels: error, warn, info (default), debug, trace
+
+# Watch the newest log in another terminal
+tail -f "$(ls -t /tmp/wrashpty-*.log | head -1)"
 
 # Run tests
 cargo test
@@ -169,8 +186,9 @@ History is loaded from `~/.bash_history` (last 10,000 entries) at startup.
 - [x] Architecture and design documentation
 - [x] **Phase 0: Foundation** — PTY spawn, marker parser with session tokens, passthrough byte pump, terminal safety (RAII guards with fallback), SIGWINCH/SIGCHLD handling
 - [x] **Phase 1: Edit Mode** — Mode state machine, reedline integration, EchoGuard for echo suppression, command injection with deadlock prevention, history loading
-- [ ] **Phase 2: Features** — Autosuggestions, filesystem/PATH/git completions, Ctrl+R history search, prefix-filtered navigation
-- [ ] **Phase 3: Chrome** (Optional) — Top bar/footer, scroll regions, alternate screen detection (CSI parser), git status caching, minimum size handling
+- [x] **Phase 2: Features** — Autosuggestions, filesystem/PATH/git completions, Ctrl+R history search, prefix-filtered navigation
+- [x] **Product layer (shipped)** — Chrome status bars and panels (settings, help, commands/schema browser, file browser, history browser), fullscreen scrollback viewer with search/filter/fold/yank, SQLite-backed command intelligence
+- [ ] **Deferred** — `--shell`, `--histfile`, `--preexec-timeout`, `--vi`, `--emacs`, `-c` CLI flags (designed in the MVP spec, never implemented; see docs/mvp/02-architecture.md §12) and vi editing mode
 
 ## License
 

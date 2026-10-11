@@ -112,13 +112,13 @@ The marker parser and byte pump are latency-critical. Zero-allocation required:
 
 ### Escape Sequences
 
-```rust
-const ESC: u8 = 0x1b;
-const MARKER_PREFIX: &[u8] = b"\x1b]777;wrashpty;";
-const RESET_SCROLL: &[u8] = b"\x1b[r";
-```
+OSC 777 marker format (authoritative spec in `src/marker.rs`):
+`ESC ] 777 ; <16-hex session token> ; <marker_type> [; <payload>] BEL`
+with `marker_type` ∈ {`PRECMD` (payload = exit code), `PROMPT`, `PREEXEC`}.
 
-OSC 777 format: `ESC ] 777 ; wrashpty ; <event> ; <token> ; <data> BEL`
+- Fixed 80-byte marker buffer (`MAX_MARKER_LEN`), zero-allocation `Cow` parsing
+- Invalid-token events logged after `SECURITY_EVENT_LOG_THRESHOLD` (100)
+- Always reset scroll region (`\x1b[r`) before entering Passthrough
 
 ### Signal Handling
 

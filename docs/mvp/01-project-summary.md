@@ -256,7 +256,7 @@ The MVP should be implemented in phases, with each phase fully tested before pro
 3. Command injection with RAII echo suppression (EchoGuard)
 4. Injecting mode with PTY output buffering (avoid deadlock)
 5. History loading from `~/.bash_history`
-6. Basic prompt with cwd and exit code
+6. Basic prompt with cwd and exit code *(as shipped: exit code in the prompt, cwd in the chrome bar)*
 
 **Exit Criteria**:
 - Mode transitions work correctly for all marker sequences

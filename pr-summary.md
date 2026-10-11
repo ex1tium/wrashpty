@@ -36,7 +36,7 @@ This refactor replaces the monolithic `SchemaIndex` with a pluggable `SchemaProv
 - **Sync** is now read-only for schemas — incremental schema building from usage tokens deferred to a future phase; writes happen only on explicit discovery/import
 - **Export/import** updated to use `persist_schema()` standalone function + `provider.add_overlay()`
 - **`CursorHideGuard`** RAII guard in `src/scrollback/viewer.rs` ensures cursor restoration on panic
-- **Dependencies** moved from git to path (`../command-schema/*`); `command-schema-core` is always available, heavy crates are optional
+- **Dependencies** remain git-pinned (`ex1tium/command-schema` @ rev `de70103`); `command-schema-core` is always available, heavy crates are optional (supply-chain note in docs/dependencies.md)
 
 ### Files changed
 

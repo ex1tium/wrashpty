@@ -996,9 +996,9 @@ This approach:
 - Bars are visible during Edit mode, which is when status info is most useful
 - Any future alt-screen detection is purely additive
 
-#### FUTURE/OPT-IN: CSI-Based Alternate Screen Detection
+#### CSI-Based Alternate Screen Detection
 
-**Status**: NOT IMPLEMENTED for MVP. Gated behind opt-in flag `--experimental-alt-screen-detection`.
+**Status (superseded)**: IMPLEMENTED — `AltScreenDetector` (`src/scrollback/alt_screen.rs`) is a streaming CSI parser that runs unconditionally (there is no `--experimental-alt-screen-detection` flag). The App layer feeds it PTY output in every mode (Passthrough/Initializing/Injecting, plus non-blocking polling during Edit) and uses its events to pause scrollback capture while full-screen programs own the alternate screen. Chrome still uses the reset-on-Passthrough approach above; detection does not preserve bars during command execution.
 
 For future versions where chrome bars should remain visible during simple commands (not full-screen apps), a CSI sequence parser can detect alternate screen transitions. **This is complex and risky; MVP disables it by default.**
 
@@ -1234,7 +1234,7 @@ As specified in "MVP REQUIREMENT: Disable Scroll Regions in Passthrough" above, 
 | Always reset in Passthrough | Simpler, corruption-proof | Bars not visible during commands | **REQUIRED** |
 | CSI-based detection | Bars visible during simple commands | Complex, potential missed sequences | Future opt-in |
 
-Any CSI-based alternate screen detection for preserving bars during simple commands is gated behind `--experimental-alt-screen-detection` and requires the prerequisites listed above.
+The shipped CSI detector (`src/scrollback/alt_screen.rs`) serves scrollback capture rather than bar preservation; chrome still resets the scroll region on every Passthrough transition.
 
 ### Toggle Sequence
 
@@ -2484,6 +2484,8 @@ impl WrashCompleter {
 
 **Responsibility**: Render the shell prompt with context (cwd, exit code, duration).
 
+*(As shipped: the prompt shows the exit code only (`src/prompt.rs`); cwd and duration live in the chrome status bar — deliberate design choice.)*
+
 **Public API**:
 ```rust
 pub struct WrashPrompt { /* private fields */ }
@@ -3061,7 +3063,7 @@ Wrashpty is a terminal program. Some behaviors can only be validated interactive
 
 ### Passthrough Latency
 
-Every byte of command output passes through the marker parser. The parser is O(n) with no allocation and a minimal branch per byte (check for ESC). On modern hardware, this adds negligible latency. The dominant cost is the syscall overhead of `read()` and `write()`. Using 8KB buffers amortizes this effectively.
+Every byte of command output passes through the marker parser. The parser is O(n) with no allocation and a minimal branch per byte (check for ESC). On modern hardware, this adds negligible latency. The dominant cost is the syscall overhead of `read()` and `write()`. The 4KB pump buffer (`BUFFER_SIZE` in `src/pump.rs`) amortizes this effectively.
 
 ### Keystroke Latency
 
@@ -3107,44 +3109,50 @@ The wrapper must spawn Bash, generate a tempfile, and wait for the first PROMPT 
 
 ### CLI Arguments
 
+Actual (verified against `src/main.rs`):
+
 ```
 wrashpty [OPTIONS]
 
 Options:
-  --no-chrome             Start with chrome disabled
-  --shell <PATH>          Path to shell binary (default: bash)
-  --histfile <PATH>       Path to history file (default: ~/.bash_history)
-  --preexec-timeout <MS>  PREEXEC marker timeout in ms (default: 500, max: 3000)
-  --vi                    Use vi keybinding mode
-  --emacs                 Use emacs keybinding mode (default)
-  -c <COMMAND>            Execute command and exit
-  -h, --help              Print help
-  -V, --version           Print version
+  --no-chrome             Start with chrome disabled (headless mode)
+  --help-format <FORMAT>  Output help in a parseable format: json, gnu, npm, clap
+  -h                      Print GNU-style help (includes built-in colon commands)
+  -V                      Print version
 ```
+
+**Deferred (designed in this spec, never implemented):** `--shell <PATH>`, `--histfile <PATH>`, `--preexec-timeout <MS>`, `--vi`, `--emacs`, `-c <COMMAND>`.
 
 ### Environment Variables
 
+Actual (verified against `src/config.rs` and `src/main.rs`):
+
 | Variable | Effect |
 |---|---|
-| `WRASH_CHROME` | Set to "0" to disable chrome by default |
-| `WRASH_LOG` | Set to "debug", "info", "warn", or "error" for log level |
-| `WRASH_LOG_FILE` | Path to log file (default: no file logging) |
-| `SHELL` | Fallback shell if --shell not specified and bash not found |
+| `WRASHPTY_GLYPH_TIER` | Glyph tier: `ascii`, `unicode` (default), `emoji`, `nerd`/`nerdfont` |
+| `WRASHPTY_NERD_FONTS` | Legacy glyph toggle (`0`/`false`/`no`/`off` → ascii; `1`/`true`/`yes`/`on` → nerdfont) |
+| `WRASHPTY_THEME` | `amber`/`retro`/`vt220` (default) or `terminal`/`native`/`ansi` |
+| `WRASHPTY_SCROLLBACK` | `0`/`false`/`no`/`off` disables scrollback capture (enabled by default) |
+| `WRASHPTY_SCROLLBACK_LINES` | Max scrollback lines (default 10,000; clamped 100–1,000,000) |
+| `WRASHPTY_SCROLLBACK_LINE_BYTES` | Max bytes per line before truncation (default 4,096; clamped 256–65,536) |
+| `WRASHPTY_LOG` | Log level: `error`, `warn`, `info` (default), `debug`, `trace`; invalid values warn and fall back to INFO. Logs go to `/tmp/wrashpty-<pid>.log` |
 
 ### Default Keybindings
 
+Actual (verified against `src/editor.rs`, the scroll view, and `src/app/commands.rs`):
+
 | Key | Mode | Action |
 |---|---|---|
-| Ctrl+Shift+H | Any | Toggle chrome |
+| Tab | Edit | Completion menu |
+| Ctrl+Space | Edit | Open command panel |
 | Ctrl+R | Edit | History search |
-| Tab | Edit | Trigger completion |
+| Up/Down | Edit | Prefix-filtered history navigation |
 | Ctrl+C | Edit | Clear line |
 | Ctrl+D | Edit (empty line) | Exit |
-| Ctrl+L | Edit | Clear screen (within scroll region if chrome active) |
-| Ctrl+Shift+L | Edit | Flush buffered background output above prompt |
-| Up/Down | Edit | History navigation |
+| PageUp/PageDown | Edit, Passthrough | Fullscreen scrollback viewer (page scroll; also intercepted during command execution) |
+| Shift+PageUp/PageDown | Edit, Passthrough | Scrollback viewer, line scroll |
 
-Keybindings are not configurable in MVP. Future versions may add a config file.
+Keybindings are not configurable. Built-in `:` colon commands (`:help`, `:panel`, `:settings`, …) provide panel and settings access.
 
 ---
 
@@ -3152,15 +3160,16 @@ Keybindings are not configurable in MVP. Future versions may add a config file.
 
 ### Version Pinning Strategy
 
-Critical dependencies are pinned to exact versions in `Cargo.toml`:
+Actual `Cargo.toml` requirements (supersedes the original exact-pin table):
 
 ```toml
 [dependencies]
-reedline = "=0.28.0"      # Exact version, API-critical
-crossterm = "=0.27.0"     # Must match reedline's crossterm
-portable-pty = "=0.8.1"   # Platform-critical
-nix = "0.27"              # SemVer, breaking changes rare
-signal-hook = "0.3"       # SemVer, stable API
+reedline = { version = "0.45", features = ["sqlite"] }  # API-critical
+crossterm = "0.29"                                       # must stay compatible with reedline
+portable-pty = "0.8"                                     # platform-critical, caret-pinned
+nix = { version = "0.27", features = ["term", "signal", "poll", "fs"] }
+signal-hook = "0.3"
+# command-schema-* pinned to git rev de70103 (see docs/dependencies.md)
 ```
 
 ### Crossterm Version Alignment
@@ -3188,7 +3197,7 @@ Reedline is central to Edit mode. Breaking changes require coordinated updates:
 
 ### Minimum Rust Version
 
-MSRV is the latest stable Rust at time of release. No attempt to support older compilers — this is a personal tool, not a library.
+`rust-version = "1.88"` (Cargo.toml). The `command-schema-*` git pins use let-chains (stabilized in Rust 1.88), which sets the effective floor for default and `--all-features` builds. CI runs an MSRV 1.88 job (build + test, `--all-features`). Clippy's lint MSRV is pinned to 1.86 via `clippy.toml` to avoid forced let-chain churn in the hot paths (see the comment there).
 
 ---
 
@@ -3439,6 +3448,8 @@ impl App {
 ### Comprehensive Logging Strategy
 
 **Critical:** Never log to stdout/stderr — we control the terminal. Always log to a file.
+
+*(As shipped: `/tmp/wrashpty-<pid>.log`, opened append+create, with the level from `WRASHPTY_LOG` (`error`/`warn`/`info`/`debug`/`trace`, default `info`) — see `setup_logging` in `src/main.rs`. There is no `WRASH_LOG`/`WRASH_LOG_FILE`.)*
 
 ```rust
 use tracing::{debug, info, warn, error, instrument, span, Level};
